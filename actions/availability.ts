@@ -13,6 +13,7 @@ import {
   type OccupiedSlot,
 } from "@/lib/scheduling/slots";
 import { getUtcBoundariesForLocalDate } from "@/lib/utils";
+import { resolveClinicDentistId } from "@/lib/staff/dentist-directory";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbClient = any;
 
@@ -351,15 +352,10 @@ export async function getAvailableSlots(
     }
 
     // ── Dentist for occupied-slot lookup ────────────────────────────────────
-    const { data: dentistData } = await db
-      .from("profiles")
-      .select("id")
-      .eq("clinic_id", resolvedClinicId)
-      .eq("role", "dentist")
-      .limit(1)
-      .single();
-
-    const dentistId = (dentistData as { id: string } | null)?.id;
+    // Through the service role: this runs for portal patients, who no longer
+    // have any read on a staff profiles row (migration 20260905090000).
+    // `resolvedClinicId` was resolved from the portal link above, server-side.
+    const dentistId = (await resolveClinicDentistId(resolvedClinicId)) ?? undefined;
 
     // ── Occupied slots ──────────────────────────────────────────────────────
     // Use UTC boundaries for the clinic's local date so that the gte/lte

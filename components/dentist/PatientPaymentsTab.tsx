@@ -32,8 +32,12 @@ interface PatientPaymentsTabProps {
 export async function PatientPaymentsTab({
   patientId,
   patientName,
-  role,
-  baseHref,
+  // Underscored, not removed: both are part of the contract its caller
+  // (BillingPaymentsTab) passes to every panel, and the sibling Bill panel does
+  // read baseHref. Dropping them here would cascade a signature change through
+  // components that still need them, to delete two words.
+  role: _role,
+  baseHref: _baseHref,
 }: PatientPaymentsTabProps) {
   const [paymentsResult, balanceResult, treatmentsResult] = await Promise.all([
     getPatientPayments(patientId),

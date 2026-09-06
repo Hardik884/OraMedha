@@ -26,19 +26,6 @@ export interface EngineToggles {
 }
 
 /**
- * AI configuration placeholder. Wired to the actual provider (Gemini via
- * lib/ai) in a future phase.
- */
-export interface AIConfig {
-  /** Whether AI-backed explanations are enabled. */
-  readonly enabled: boolean;
-  /** Provider identifier (placeholder). */
-  readonly provider: string;
-  /** Model identifier (placeholder). */
-  readonly model: string;
-}
-
-/**
  * Root Business Brain configuration.
  */
 export interface BusinessBrainConfig {
@@ -48,9 +35,26 @@ export interface BusinessBrainConfig {
   readonly engines: EngineToggles;
   /** Named numeric thresholds consumed by engines in later phases. */
   readonly thresholds: Readonly<Record<string, number>>;
-  /** AI configuration placeholder. */
-  readonly ai: AIConfig;
 }
+
+/*
+ * There is deliberately no `ai` block here.
+ *
+ * One used to sit alongside `thresholds`, naming a provider and the model
+ * `gemini-2.0-flash`. Nothing ever read either field: `enabled` was false,
+ * `provider` and `model` had no reader anywhere in the repository, and the
+ * Business Brain has no AI path to configure. It was a placeholder for a phase
+ * that has not been built.
+ *
+ * Left in place it would have gone stale in the worst way — the real AI client
+ * (lib/ai/gemini.ts) is pinned to gemini-3.1-flash-lite, so the only model
+ * name a reader could find in `config/` named a model this product does not
+ * use. A dead setting that contradicts the live one is worse than no setting.
+ *
+ * If the Business Brain ever gains an AI path, the model belongs where the
+ * real one already lives, behind guardOutboundPrompt() — not in a second,
+ * unguarded place. See docs/AI-DATA-HANDLING.md.
+ */
 
 /**
  * Default configuration. The whole Business Brain is disabled by default
@@ -73,11 +77,6 @@ export const defaultConfig: BusinessBrainConfig = {
     aiExplanation: false,
   },
   thresholds: {},
-  ai: {
-    enabled: false,
-    provider: "gemini",
-    model: "gemini-2.0-flash",
-  },
 };
 
 /** Returns whether a named engine is enabled in the given config. */

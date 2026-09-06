@@ -1,14 +1,16 @@
 # Backup and disaster recovery
 
-**Status: DOCUMENTED, NOT VERIFIED.**
+**Status: PARTIALLY VERIFIED.** One narrow claim is now tested by a script that
+anyone can re-run. Everything about the *platform's* backups remains untested.
 
 This describes the infrastructure as it can be determined *from this
 repository*. Several fields are marked unverified, and they are unverified
 because nothing in the code can establish them — not because nobody looked.
 
 ⚠️ **The application must never rely on a backup that has never been restored.
-No restore of this system has been tested.** That is the single most important
-line in this document.
+No restore from a Supabase platform backup has been tested.** That is still the
+single most important line in this document, and section 4a says exactly which
+part of it the new drill does and does not address.
 
 ---
 
@@ -68,7 +70,70 @@ already a bad day.
 
 ---
 
-## 4. Restore drill
+## 4a. Local restore drill — ✅ PERFORMED, and narrow
+
+```bash
+npm run db:drill
+```
+
+`scripts/restore-drill.mjs` dumps the local `public` schema, restores it into a
+throwaway database, and verifies the result. It runs against seeded fixtures
+only; no production data is involved, and none should ever be.
+
+**First run: 2026-09-06. Result: passed.** All 15 clinical tables restored with
+matching row counts, all four append-only triggers came back attached, no
+orphaned rows, and RLS was enabled on every restored table.
+
+The audit half was re-run against deliberately seeded rows, because the first
+pass reported them all empty and `0 → 0` proves nothing:
+
+```
+✅ appointment_history    — 2 → 2
+✅ phi_access_log         — 3 → 3
+✅ data_consent_records   — 2 → 2
+✅ data_consent_notices   — 4 → 4
+```
+
+`treatment_history`, `tooth_history` and `consent_audit` are still untested by
+round trip — no fixture exercised them. The drill reports that rather than
+scoring it as a pass.
+
+**What it establishes**
+
+| | |
+|---|---|
+| A `pg_dump` of this schema restores into an empty database with no errors | ✅ |
+| Clinical rows survive the round trip, table by table | ✅ |
+| Audit and consent rows survive it too | ✅ |
+| The append-only **triggers** come back attached | ✅ |
+| RLS is still enabled on every restored table | ✅ |
+| No orphaned appointments, treatments, portal links or profiles | ✅ |
+
+That fourth row is the one worth having. A restore that brings back
+`phi_access_log` as an ordinary writable table would look completely healthy —
+right name, right columns, right row count — and the guarantee the table exists
+to provide would be gone with nothing to notice it.
+
+**What it does NOT establish — and these are the bigger half**
+
+| | |
+|---|---|
+| That Supabase's *platform* backups contain what this dump contains | ❌ different mechanism, different format, taken by someone else |
+| That Storage objects are backed up at all | ❌ nothing in this repo can determine it |
+| RPO or RTO | ❌ measured against production, not localhost |
+| That `auth.users` restores | ❌ deliberately out of scope; Supabase owns that schema |
+
+The drill also reports how many tables were **empty** at dump time, because
+`0 → 0` is not evidence that a table's data survives — it is evidence there was
+no data. Run it after real activity (book an appointment, record a treatment,
+open a patient record) for a result that means more.
+
+**This does not replace section 4.** It proves the *mechanism*; section 4 proves
+*this project's actual backups*, which is the claim a clinic depends on.
+
+---
+
+## 4. Restore drill against a real platform backup
 
 ⚙️ **NOT YET PERFORMED.** The procedure below is written to be followed, not to
 be filed.

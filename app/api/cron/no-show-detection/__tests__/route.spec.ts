@@ -84,9 +84,9 @@ describe("auth", () => {
 });
 
 describe.skipIf(!LOCAL_UP)("sweep", () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw = createClient(URL_BASE, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any;
 
   const CLINIC = "9fd00000-0000-4000-8000-000000000005";

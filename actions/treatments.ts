@@ -31,6 +31,7 @@ import {
 } from "@/lib/treatments/constants";
 import { computeConsultantSplit } from "@/lib/billing/revenue";
 import { syncToothForTreatment } from "@/lib/dental-chart/sync";
+import { resolveDentistIdentities } from "@/lib/staff/dentist-directory";
 
 /**
  * Revenue-distribution columns to persist on a treatment.
@@ -968,8 +969,14 @@ export async function getPatientTreatments(
     >();
 
     if (apptIds.length > 0) {
-      // Patient can read their own appointments (RLS via auth_patient_id) and
-      // the dentist's profile (RLS: profiles readable within the same clinic).
+      // The patient reads their own appointments through RLS (auth_patient_id).
+      //
+      // The dentist's NAME and SIGNATURE, though, come from the dentist
+      // directory rather than from `db`. This used to rely on "profiles
+      // readable within the same clinic" — a policy that also handed the
+      // patient the whole staff roster and every other portal patient's name
+      // (migration 20260905090000). The name on your own treatment record is
+      // legitimate; the roster was not, and only one of the two survived.
       const { data: appts } = await db
         .from("appointments")
         .select("id, dentist_id")
@@ -979,17 +986,8 @@ export async function getPatientTreatments(
       const dentistIds = Array.from(new Set(apptRows.map((a) => a.dentist_id)));
 
       if (dentistIds.length > 0) {
-        const { data: dentists } = await db
-          .from("profiles")
-          .select("id, full_name, signature_url")
-          .in("id", dentistIds);
-
-        const dentistRows = (dentists ?? []) as {
-          id: string;
-          full_name: string;
-          signature_url: string | null;
-        }[];
-        const dentistById = new Map(dentistRows.map((d) => [d.id, d]));
+        const dentistById = await resolveDentistIdentities(dentistIds);
+        const dentistRows = Array.from(dentistById.values());
 
         // Sign once per distinct stored value rather than once per appointment:
         // a patient's history is typically all the same one or two dentists.
@@ -1003,7 +1001,10 @@ export async function getPatientTreatments(
           const signed = dentist?.signature_url
             ? signedByStored.get(dentist.signature_url)
             : undefined;
-          if (dentist && signed) {
+          // full_name is NOT NULL in the schema; the guard is here because the
+          // directory types it nullable, and a signature block with a blank
+          // name above it would be worse than no signature block.
+          if (dentist?.full_name && signed) {
             signatureByAppointment.set(appt.id, {
               dentistName: dentist.full_name,
               signatureUrl: signed,

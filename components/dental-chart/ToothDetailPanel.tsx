@@ -241,7 +241,7 @@ export function ToothDetailPanel({
                   <p className="text-xs text-danger">{linkError}</p>
                 )}
                 {loadingTreatments ? (
-                  <p className="text-xs text-text-secondary">Loading this patient's treatments…</p>
+                  <p className="text-xs text-text-secondary">Loading this patient&apos;s treatments…</p>
                 ) : linkableTreatments.length === 0 ? (
                   <p className="text-xs text-text-disabled">
                     No other treatments to link — every existing treatment for this patient is already linked here.

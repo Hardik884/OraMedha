@@ -613,7 +613,6 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    * asked to record, not something an adapter can infer.
    */
   async listRecallContactAttempts(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _window: EntityWindow,
   ): Promise<readonly RecallContactAttemptRow[] | null> {
     return null;

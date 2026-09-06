@@ -78,9 +78,34 @@ Sequence: enrol at `/dentist/settings` → confirm sign-in works → set the fla
 ⚙️ **Leaked-password protection** (HaveIBeenPwned) is a dashboard toggle under
 Authentication → Policies. Not enabled.
 
+✅ **Per-address send ceiling** (`consumeSendQuota`, same module): 3 sends per
+address per 10 minutes on the two unauthenticated actions that make the server
+email somebody — `requestActivation` (portal) and `requestPasswordReset` (all
+audiences).
+
+The sign-in lockout did not cover these. It counts *failed* password attempts,
+and every request to those two succeeds — the send **is** the cost, not the
+failure. Without a ceiling, either endpoint delivers repeated mail to an address
+the caller names, and exhausts the clinic's shared provider allowance, after
+which no real patient can activate and no real dentist can reset a password.
+
+The quota is consumed **before** the address is checked for existence, so an
+unknown address burns allowance exactly like a known one. Otherwise the throttle
+itself would answer the question the deliberately generic responses refuse to.
+
+🟨 Same in-process caveat as the lockout above. Supabase Auth's own per-hour
+mailer limit is the distributed layer underneath; this adds the per-address
+ceiling that layer does not have.
+
 ⚙️ **CAPTCHA / bot protection** is configurable in `supabase/config.toml`
-(`[auth.captcha]`) and needs an hCaptcha or Turnstile account. Not configured.
-The per-account lockout is the current control.
+(`[auth.captcha]`) and needs an hCaptcha or Turnstile account. **Not configured,
+and not currently recommended.** The public surface is five pages — three
+sign-in doors, forgot-password, and portal activation — and each is now behind
+either the per-account lockout or the send ceiling. There is no public contact
+or demo form (`NewInquiryModal` renders for staff only), and every API route is
+secret-gated. Revisit if real abuse appears in the logs; adding a third-party
+script and an account to defend a surface already covered would cost every
+honest user a challenge to buy nothing.
 
 ---
 
@@ -191,10 +216,37 @@ be remediated from here. See `docs/INCIDENT-RESPONSE.md` §4.
 
 ---
 
-## 8. What is deliberately NOT claimed
+## 8. Vulnerability reporting
+
+⚙️ **There is no published security contact, and `/.well-known/security.txt`
+returns 404 because of it.**
+
+The route exists (`app/.well-known/security.txt/route.ts`) and serves a valid
+RFC 9116 file the moment `SECURITY_CONTACT` names a real address. Until then it
+serves nothing, deliberately: the RFC makes `Contact` mandatory, and a
+security.txt naming a mailbox nobody reads is worse than no file at all — a
+researcher who finds one stops looking for another way to reach us and reports
+into a void.
+
+The path is public by design; `/.well-known` is exempted in
+`lib/supabase/middleware.ts`, because the file's entire audience is people with
+no account, and redirecting them to `/login` is the same as not publishing.
+
+→ **To close this:** choose a monitored SHARED mailbox (not a person's, so it
+survives them leaving), set `SECURITY_CONTACT`, and fill in the inbound-reports
+row in `docs/INCIDENT-RESPONSE.md`.
+
+---
+
+## 9. What is deliberately NOT claimed
 
 - No compliance certification of any kind.
 - No claim that data is stored in any particular country — the regions are
   unverified, and `docs/subprocessors.json` says so.
 - No claim that Google does not retain or train on AI prompts.
-- No claim that backups have been restore-tested. They have not.
+- **No claim that the platform backups have been restore-tested.** They have
+  not. `npm run db:drill` proves the *mechanism* — that a dump of this schema
+  restores intact, with the append-only triggers still attached — against local
+  seed data. It says nothing about Supabase's own backups or about Storage
+  objects. `docs/BACKUP-DR.md` §4a is explicit about the boundary.
+- No claim that there is a route for a security researcher to reach us. See §8.

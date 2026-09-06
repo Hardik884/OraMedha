@@ -22,6 +22,7 @@ import {
   type BillableTreatmentLike,
 } from "@/lib/billing/invoice";
 import type { ActionResult } from "@/types";
+import { resolveDentistIdentities } from "@/lib/staff/dentist-directory";
 
 /**
  * Billing (Bill / Invoice) Server Actions
@@ -120,15 +121,21 @@ async function fetchClinicInfo(
   };
 }
 
+/**
+ * The dentist named on a bill.
+ *
+ * The identity is read through the dentist directory (service role) because
+ * this runs for the PORTAL bill as well as the staff one, and a portal patient
+ * no longer has any read on a staff profiles row (migration 20260905090000).
+ * `dentistId` always comes from an appointment the caller has already been
+ * authorised for. `db` stays the caller's client — it is used only to sign the
+ * signature object, which is a storage operation, not a profiles read.
+ */
 async function fetchDentistInfo(
   db: DbClient,
   dentistId: string
 ): Promise<BillDentistInfo> {
-  const { data } = await db
-    .from("profiles")
-    .select("full_name, signature_url")
-    .eq("id", dentistId)
-    .maybeSingle();
+  const data = (await resolveDentistIdentities([dentistId])).get(dentistId);
 
   return {
     name: (data?.full_name as string | undefined) ?? "Dentist",

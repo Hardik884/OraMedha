@@ -38,6 +38,13 @@ export function NewInquiryModal({ open, onClose }: NewInquiryModalProps) {
     });
     // Refresh the server-rendered page so the new patient shows up immediately
     // in any patient search or booking flow.
+    //
+    // This call was missing. `router` was obtained and never used — which lint
+    // reported as an unused variable, and which meant the behaviour the comment
+    // above describes simply did not happen: a patient created here stayed
+    // invisible to the surrounding page until someone reloaded it. The toast
+    // said the record existed while the list still said it did not.
+    router.refresh();
   }
 
   return (

@@ -26,6 +26,10 @@ import {
 } from "@/lib/scheduling/slots";
 import { zonedDateToUTC, getTodayInTimezone, getUtcBoundariesForLocalDate } from "@/lib/utils";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  resolveClinicDentistId,
+  resolveDentistIdentities,
+} from "@/lib/staff/dentist-directory";
 import { writeAppointmentHistory } from "@/lib/appointments/history";
 import { completeAppointmentCascade } from "@/lib/appointments/complete";
 import { PATIENT_APPOINTMENT_SELECT } from "@/lib/appointments/patient-safe-columns";
@@ -146,23 +150,23 @@ export async function createAppointment(
     }
 
     // ── Resolve dentist_id ──────────────────────────────────────────────────
-    // Dentist = their own profile; Receptionist + Patient = find the clinic's dentist
+    // Dentist = their own profile; Receptionist + Patient = find the clinic's
+    // dentist.
+    //
+    // Resolved through the service role rather than the caller's client. A
+    // portal patient can no longer read the clinic's staff rows at all
+    // (migration 20260905090000), and the lookup is safe to privilege because
+    // `resolvedClinicId` came from the portal link above — server-side — not
+    // from the request.
     let dentistId: string;
     if (profile.role === "dentist") {
       dentistId = profile.id;
     } else {
-      const { data: dentistData } = await db
-        .from("profiles")
-        .select("id")
-        .eq("clinic_id", resolvedClinicId)
-        .eq("role", "dentist")
-        .limit(1)
-        .single();
-
-      if (!dentistData) {
+      const resolved = await resolveClinicDentistId(resolvedClinicId);
+      if (!resolved) {
         return { data: null, error: "No dentist found for this clinic." };
       }
-      dentistId = (dentistData as { id: string }).id;
+      dentistId = resolved;
     }
 
     // ── Validate patient belongs to this clinic ────────────────────────────
@@ -1378,22 +1382,20 @@ export async function getAppointments(filters?: {
     // in a single query and attach them so the table can show the doctor
     // without an ambiguous PostgREST embed (appointments has two FKs to
     // profiles: dentist_id + created_by).
+    //
+    // Via the dentist directory rather than the caller's client, because this
+    // list is served to patients too and a patient no longer has any read on
+    // another profiles row. The ids come from `rows`, which RLS has already
+    // scoped to the caller's own appointments.
     const dentistIds = Array.from(
       new Set(rows.map((r) => r.dentist_id).filter(Boolean))
     );
     if (dentistIds.length > 0) {
-      const { data: dentists } = await db
-        .from("profiles")
-        .select("id, full_name")
-        .in("id", dentistIds);
-      const nameById = new Map(
-        ((dentists ?? []) as { id: string; full_name: string | null }[]).map((d) => [
-          d.id,
-          d.full_name,
-        ])
-      );
+      const byId = await resolveDentistIdentities(dentistIds);
       for (const row of rows) {
-        row.dentistName = row.dentist_id ? nameById.get(row.dentist_id) ?? null : null;
+        row.dentistName = row.dentist_id
+          ? byId.get(row.dentist_id)?.full_name ?? null
+          : null;
       }
     }
 

@@ -175,6 +175,15 @@ names here would be worse than a blank.
 | Technical responder | *(unassigned)* | |
 | Clinic contact | *(unassigned)* | |
 | Legal counsel | *(unassigned)* | |
+| **Inbound security reports** | *(unassigned)* | published at `/.well-known/security.txt` once `SECURITY_CONTACT` is set |
 
 A single named person who can be reached out of hours matters more than the
 structure of this table.
+
+The last row is different from the others in one way worth noting: it is the
+only one an **outsider** uses. The rest of this table is for reaching each other
+once an incident is known about. That row is how someone tells you there is one
+— and until it is filled in, `/.well-known/security.txt` returns 404 and a
+researcher who found a way into a clinic's data has no published route to report
+it. See `lib/security/security-txt.ts` for why serving a placeholder address
+instead would be worse than the 404.

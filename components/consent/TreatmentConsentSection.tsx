@@ -116,7 +116,6 @@ export function TreatmentConsentSection({
     return () => {
       active = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [treatmentId, mode]);
 
   // Report config upward (including whether a consent was already created

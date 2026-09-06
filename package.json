@@ -22,7 +22,8 @@
     "gen:types": "supabase gen types typescript --local > types/database.types.ts",
     "auth:email:push": "node scripts/push-auth-email-config.mjs",
     "auth:email:check": "node scripts/push-auth-email-config.mjs --dry-run",
-    "auth:email:probe": "node scripts/probe-resend-smtp.mjs"
+    "auth:email:probe": "node scripts/probe-resend-smtp.mjs",
+    "db:drill": "node scripts/restore-drill.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -38,7 +39,7 @@
     "html2canvas-pro": "^2.3.8",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.513.0",
-    "next": "15.3.8",
+    "next": "15.5.25",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-hook-form": "^7.56.4",
@@ -59,6 +60,6 @@
     "supabase": "^2.109.1",
     "tailwindcss": "^4.1.10",
     "typescript": "^5.8.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.7"
   }
 }

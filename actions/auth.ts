@@ -21,7 +21,10 @@ import { recordSecurityEvent, subjectHash } from "@/lib/security/events";
 import {
   checkRateLimit,
   clearFailures,
+  consumeSendQuota,
+  MAX_SENDS,
   recordFailure,
+  SEND_PASSWORD_RESET,
 } from "@/lib/security/rate-limit";
 import type { ActionResult } from "@/types";
 
@@ -714,6 +717,35 @@ export async function requestPasswordReset(
   // Basic email shape validation.
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { data: null, error: "Please enter a valid email address." };
+  }
+
+  // ── Send ceiling ──────────────────────────────────────────────────────────
+  // Unauthenticated, and it makes the server email an address the caller names.
+  // The sign-in limiter above does not cover this path: it counts FAILED
+  // password attempts, and every request here succeeds — the send is the cost,
+  // not the failure.
+  //
+  // Two things this bounds. Someone else's inbox, which a script could aim
+  // reset mail at indefinitely; and the clinic's provider allowance, which is
+  // shared with patient activation, so exhausting it here also stops real
+  // patients activating.
+  //
+  // Consumed BEFORE the audience is resolved, so an address with no account
+  // burns allowance exactly like one with an account. Otherwise the ceiling
+  // itself would answer the question the generic response refuses to.
+  const quota = consumeSendQuota(SEND_PASSWORD_RESET, subjectHash(email));
+  if (quota.exhausted) {
+    recordSecurityEvent("AUTH_FAILED", {
+      subjectHash: subjectHash(email),
+      surface: "password-reset-quota",
+      count: MAX_SENDS,
+    });
+    return {
+      data: null,
+      error: `Too many reset requests for this address. Please try again in ${Math.ceil(
+        quota.retryAfterSeconds / 60
+      )} minute(s).`,
+    };
   }
 
   try {

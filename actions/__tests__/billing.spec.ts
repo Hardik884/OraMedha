@@ -17,9 +17,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/auth/session", () => ({ resolveSession: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createServerClient: vi.fn() }));
+// The dentist named on a bill is resolved through the service role since
+// migration 20260905090000 — a portal patient can no longer read a staff
+// profiles row at all, so reading it with the caller's own client would work
+// for staff and silently return nothing for the patient the bill is FOR.
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 
 import { resolveSession } from "@/lib/auth/session";
 import { createServerClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getStaffBill,
   getPatientBillsList,
@@ -67,7 +73,7 @@ function makeGenericDb(tables: Tables, currentUserId = "portal-user-1") {
     };
     return api;
   }
-  return {
+  const client = {
     from: (table: string) => builder(table),
     auth: { getUser: async () => ({ data: { user: { id: currentUserId } } }) },
     // The dentist-signatures bucket is private, so a stored path has to be
@@ -83,6 +89,14 @@ function makeGenericDb(tables: Tables, currentUserId = "portal-user-1") {
       }),
     },
   };
+
+  // The same fixture also answers as the service-role client, so the dentist
+  // lookup in fetchDentistInfo resolves against the `profiles` rows each test
+  // declares. Registering it here rather than per test keeps every existing
+  // test body unchanged — they already pass this object to resolveSession.
+  (createAdminClient as unknown as ReturnType<typeof vi.fn>).mockReturnValue(client);
+
+  return client;
 }
 
 beforeEach(() => vi.clearAllMocks());

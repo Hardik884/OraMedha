@@ -93,6 +93,22 @@ const eslintConfig = [
     rules: {
       // Enforce no-any in strict mode — matches TypeScript strict: true
       "@typescript-eslint/no-explicit-any": "error",
+      // Honour the leading-underscore convention the codebase already uses to
+      // mean "part of this signature, deliberately not read here" — a prop a
+      // component must accept because its callers and siblings pass it, but
+      // which this particular renderer has no use for. Without this the rule
+      // reports those as mistakes, which trains people to ignore it.
+      //
+      // Anything NOT underscore-prefixed is still an error, so a genuinely
+      // forgotten variable is still caught.
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
       // NOTE: no-floating-promises is a type-aware rule that requires
       // parserOptions.project (typed linting). The next/core-web-vitals
       // compat preset does not configure typed linting, so this rule

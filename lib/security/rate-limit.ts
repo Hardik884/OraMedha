@@ -143,3 +143,88 @@ export function clearFailures(key: string): void {
 export function resetAllRateLimits(): void {
   BUCKETS.clear();
 }
+
+// =============================================================================
+// SEND QUOTA — a different question, on the same machinery
+// =============================================================================
+//
+// Everything above counts FAILURES and locks an account after too many. That
+// is the right shape for a password guess, where a success is the thing being
+// defended against and a failure is the signal.
+//
+// Sending an email is the opposite shape. Every send counts, succeeded or not,
+// because the send IS the cost: an unauthenticated caller who can make the
+// server email an address they name can use OraMedha to deliver mail to
+// somebody else's inbox, and can burn the clinic's Resend quota doing it. There
+// is no "failure" to count — a request that works is exactly the problem.
+//
+// So this is a plain N-per-window ceiling rather than a lockout, sharing the
+// bucket, the pruning and the memory bound above rather than growing a second
+// copy of them. Keys are namespaced by the caller (see SEND_* below) so a
+// password-reset request and an activation request do not consume each other's
+// allowance, and neither touches the sign-in counter.
+//
+// SAME HONEST CAVEAT AS ABOVE: in-process and in-memory. Per serverless
+// instance, cleared by a restart. Supabase Auth's own per-hour mailer limit
+// sits underneath and is the distributed one. This adds what that cannot — a
+// PER-ADDRESS ceiling, so one address cannot absorb the whole clinic's hourly
+// allowance before anyone else can reset a password.
+
+/** Sends allowed for one address inside SEND_WINDOW_MS. */
+export const MAX_SENDS = 3;
+
+/**
+ * Window for the send ceiling.
+ *
+ * Longer than the sign-in window on purpose. A person who did not receive a
+ * code retries within a minute or two; three attempts inside ten minutes covers
+ * a genuinely unlucky user and still bounds a script to 18 messages an hour per
+ * address instead of as many as it can issue requests.
+ */
+export const SEND_WINDOW_MS = 10 * 60 * 1000;
+
+/** Namespaces, so one flow's ceiling is not another's. */
+export const SEND_ACTIVATION = "send:activation";
+export const SEND_PASSWORD_RESET = "send:reset";
+
+export type SendQuotaState = {
+  /** True when this address has no allowance left in the window. */
+  exhausted: boolean;
+  /** Seconds until the oldest send falls out of the window. 0 when allowed. */
+  retryAfterSeconds: number;
+};
+
+/**
+ * Consume one send for `namespace` + `subject`, and report whether it was
+ * allowed.
+ *
+ * Records BEFORE the send rather than after, and records even when the send
+ * ends up not happening. Both are deliberate: the expensive thing is the
+ * request, and a caller probing addresses that turn out not to exist must burn
+ * allowance exactly like one probing addresses that do — otherwise the ceiling
+ * itself becomes the enumeration oracle the surrounding action works so hard
+ * not to be.
+ */
+export function consumeSendQuota(
+  namespace: string,
+  subject: string,
+  now = Date.now()
+): SendQuotaState {
+  const bucket = bucketFor(`${namespace}:${subject}`);
+
+  bucket.failures = bucket.failures.filter((t) => now - t < SEND_WINDOW_MS);
+
+  if (bucket.failures.length >= MAX_SENDS) {
+    const oldest = bucket.failures[0];
+    return {
+      exhausted: true,
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((oldest + SEND_WINDOW_MS - now) / 1000)
+      ),
+    };
+  }
+
+  bucket.failures.push(now);
+  return { exhausted: false, retryAfterSeconds: 0 };
+}

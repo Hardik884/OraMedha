@@ -1105,8 +1105,39 @@ npm run db:reset              # rebuild the local DB from the full history + see
 npm run db:list               # compare local history against the linked remote
 npm run db:push               # apply pending migrations to the linked remote
 npm run db:lint               # Supabase database linter (RLS, security-definer views…)
+npm run db:drill              # dump → restore into a scratch DB → verify (docs/BACKUP-DR.md)
 npm run gen:types             # regenerate types/database.types.ts from the local DB
 ```
+
+### ⚠️ The Playwright suite is RED on main, and has been since `853e188`
+
+`npx playwright test` fails ~60 of its 97 tests. Measured on 2026-09-06 by
+running the full suite on a clean checkout of `main` against a freshly reset
+database. **This is not a flake and not an environment problem.**
+
+`853e188` replaced `/patient/signup` — the clinic dropdown became the three-step
+email/code/password activation — and `e2e/auth.spec.ts` was never updated. Its
+`new patient — /patient/signup` and `verification — /patient/verify-email`
+blocks still drive the removed dropdown:
+
+```
+expect(getByRole('button', { name: 'Create account' })).toBeDisabled()
+  → the button no longer starts disabled, because there is no clinic to choose
+```
+
+The verify-email tests reach that screen *through* signup, so they fail behind
+it, and the parameterised overflow/contrast cases fail on doors they cannot
+reach. `e2e/portal-activation.spec.ts` covers the NEW flow and passes.
+
+**Before treating any e2e failure as a regression, diff against `main`.** The P2
+work was checked exactly this way — 50 failures on the P2 tree, 60 on clean
+`main`, the P2 set a strict subset — which is what established that P2
+introduced none of them.
+
+⚙️ **REQUIRES WORK:** rewrite the stale blocks in `e2e/auth.spec.ts` against the
+activation flow, or delete them as superseded by `portal-activation.spec.ts`. A
+suite everyone expects to be red is a suite nobody reads, and the next real
+regression will land in exactly that noise.
 
 Rules:
 
@@ -1403,10 +1434,13 @@ dentgrow/
 │   │   └── verification.ts         # resend cooldown + send-failure classification
 │   ├── audit/
 │   │   └── phi-access.ts           # THE way a sensitive read is recorded
+│   ├── staff/
+│   │   └── dentist-directory.ts    # the ONLY server-side read of a dentist name
 │   ├── security/
 │   │   ├── headers.ts              # CSP + the static security headers
 │   │   ├── events.ts               # structured security events (no PHI)
-│   │   ├── rate-limit.ts           # per-account sign-in lockout
+│   │   ├── rate-limit.ts           # sign-in lockout + the email-send ceiling
+│   │   ├── security-txt.ts         # RFC 9116, or nothing — never a fake address
 │   │   ├── file-validation.ts      # magic-byte checks + the scanning seam
 │   │   └── timing-safe.ts          # constant-time secret comparison
 │   ├── legal/
@@ -1425,6 +1459,7 @@ dentgrow/
 │   ├── DATA-PROTECTION.md          # roles, consent, patient rights
 │   ├── AI-DATA-HANDLING.md         # what reaches Google, and what does not
 │   ├── RETENTION.md                # what is purged, and what never is
+│   ├── OFFBOARDING.md              # why clinic deletion fails, and why that is right
 │   ├── BACKUP-DR.md                # backups, restore drill, RPO/RTO
 │   ├── INCIDENT-RESPONSE.md        # preserve → contain → scope → notify
 │   └── subprocessors.json          # machine-readable third-party inventory
@@ -1451,6 +1486,7 @@ dentgrow/
 ├── .env.local                      # Local environment variables (never commit)
 ├── scripts/
 │   ├── push-auth-email-config.mjs  # Configures the HOSTED project's Auth email
+│   ├── restore-drill.mjs           # proves a dump actually restores (npm run db:drill)
 │   └── probe-resend-smtp.mjs       # Asks Resend which recipients it will carry
 └── supabase/
     ├── EMAIL.md                    # Email transports, limits + the Resend switch
@@ -1537,6 +1573,26 @@ These are non-negotiable standards. Every PR and every AI-generated code block m
   of a policy is a denial. Writes go through the service role, and an
   append-only trigger constrains that too — `service_role` carries `BYPASSRLS`,
   so no policy can bind it.
+- **A policy with no ROLE predicate widens itself when a new role gains rows.**
+  `profiles: read own clinic members` was `using (clinic_id = auth_clinic_id())`
+  and was correct when only staff had a `profiles` row. Portal patients later
+  got one, and without anyone touching the policy it began handing every
+  activated patient the full staff roster — auth user ids, `role`, `is_admin`,
+  `signature_url` — plus the names of the clinic's other portal patients. Fixed
+  in `20260905090000`. The rule: **a policy scoped only by tenant is a policy
+  that will be wrong the day a new role joins the tenant.** Say who, not just
+  where.
+- **Also: RLS cannot restrict COLUMNS, and column GRANTs are per database role
+  (`authenticated`), not per user.** So when one audience legitimately needs a
+  narrow slice of a table another must not see, the answer is not a cleverer
+  policy — it is a server-side projection over ids the caller is already
+  entitled to. See `lib/staff/dentist-directory.ts`, which is exactly that for
+  the dentist's name on a patient's own prescription.
+- **Put a function's authorisation in the function.** If it is only safe because
+  of a policy on another object, that safety survives by luck. And RLS does not
+  bind `service_role` — `bulk_decrement_queue_positions` would have decremented
+  queue positions across every clinic under an accidental service-role call
+  until `20260905090100` gave it its own `clinic_id` predicate.
 - **A `WITH CHECK` clause that only restates the `USING` clause pins nothing.**
   Both `profiles` and `patients` shipped an UPDATE policy asserting only a
   column the attacker never changes. Pin the identity-bearing columns against
@@ -1632,6 +1688,13 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 # verifying a real deployment reports no violations. See docs/SECURITY.md.
 # CSP_MODE=enforce
 
+# Security contact published at /.well-known/security.txt (RFC 9116). UNSET, and
+# the route 404s while it is — deliberately. A security.txt naming a mailbox
+# nobody reads is worse than none: the researcher who finds it stops looking for
+# another way to reach you. Use a SHARED address, not a person's.
+# SECURITY_CONTACT=security@oramedha.com
+# SECURITY_POLICY_URL=https://oramedha.com/security
+
 # Require the platform admin to have two-step verification. OFF by default, and
 # the default is load-bearing: turning it on before the admin has enrolled locks
 # that account out of the console it would use to fix it.
@@ -1666,6 +1729,8 @@ SUPABASE_PROJECT_REF=your-project-ref
 | `NEXT_PUBLIC_MARKETING_URL` | Legal-document links on sign-in pages | Yes |
 | `NEXT_PUBLIC_TERMS_URL` | Terms link, once Terms are published | Yes |
 | `CSP_MODE` | CSP enforcement (`lib/security/headers.ts`) | **No** |
+| `SECURITY_CONTACT` | `/.well-known/security.txt` — omit and it 404s | **No** |
+| `SECURITY_POLICY_URL` | optional `Policy:` line in security.txt | **No** |
 | `REQUIRE_ADMIN_MFA` | Mandatory admin two-step verification | **No** |
 | `RESEND_SMTP_PASSWORD` | `npm run auth:email:push -- --provider=resend` | **No** |
 | `SUPABASE_ACCESS_TOKEN` | `npm run auth:email:push` only | **No** |

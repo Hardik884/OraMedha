@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { FileText, ImageIcon, FileSignature, Download, Printer } from "lucide-react";
+import { FileText, ImageIcon, FileSignature } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/shared/StatusBadge";

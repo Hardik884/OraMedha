@@ -83,11 +83,19 @@ export async function updateSession(
   // that cannot help them yet. The page is not left ungated: it renders only
   // while the httpOnly signup cookie is present, and redirects to sign-in
   // otherwise.
+  // /.well-known is here for a different reason than the rest of this list.
+  // RFC 9116 fixes where security.txt lives, and its entire audience is people
+  // with no account — a researcher who has found a way into a clinic's data and
+  // is trying to tell someone. Redirecting them to /login means the file cannot
+  // be read by the only people it is for, which is the same as not publishing
+  // it. Nothing under this prefix reads the session or returns clinic data; the
+  // route serves a static contact block or 404s.
   const PUBLIC_AUTH_PATHS = [
     "/forgot-password",
     "/reset-password",
     "/auth/callback",
     "/patient/verify-email",
+    "/.well-known",
   ];
   if (PUBLIC_AUTH_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return response();

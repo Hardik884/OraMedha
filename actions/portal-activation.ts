@@ -4,6 +4,10 @@ import { createServerClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { recordSecurityEvent, subjectHash } from "@/lib/security/events";
 import { describeEmailSendFailure } from "@/lib/auth/verification";
+import {
+  consumeSendQuota,
+  SEND_ACTIVATION,
+} from "@/lib/security/rate-limit";
 import type { ActionResult } from "@/types";
 
 /**
@@ -139,6 +143,36 @@ export async function requestActivation(
 
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { data: null, error: "Please enter a valid email address." };
+  }
+
+  // ── Send ceiling ──────────────────────────────────────────────────────────
+  // This action is UNAUTHENTICATED and its whole job is to make the server send
+  // mail to an address the caller names. Left open it is a way to deliver
+  // repeated mail to somebody else's inbox and to burn the clinic's sending
+  // quota, after which no real patient can activate and no dentist can reset a
+  // password, because they share one provider allowance.
+  //
+  // The cooldown on the verify-email screen does not cover this: it is stamped
+  // in a cookie, so it shapes the UI for an honest user and costs an attacker
+  // one deleted cookie.
+  //
+  // Consumed BEFORE eligibility is resolved, so an ineligible address burns
+  // allowance exactly like an eligible one. Throttling only the addresses that
+  // turn out to be real would make the ceiling itself the enumeration oracle
+  // that every other line in this file is written to avoid.
+  const quota = consumeSendQuota(SEND_ACTIVATION, subjectHash(email));
+  if (quota.exhausted) {
+    recordSecurityEvent("PORTAL_ACTIVATION_REFUSED", {
+      reason: "send_quota",
+      subjectHash: subjectHash(email),
+      surface: "portal-activation",
+    });
+    return {
+      data: null,
+      error: `Too many requests for this address. Please try again in ${Math.ceil(
+        quota.retryAfterSeconds / 60
+      )} minute(s).`,
+    };
   }
 
   try {
