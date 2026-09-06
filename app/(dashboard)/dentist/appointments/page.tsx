@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layouts/PageHeader";
 import { AppointmentFilters } from "@/components/dentist/AppointmentFilters";
 import { AppointmentsView } from "@/components/dentist/AppointmentsView";
+import { AppointmentsDefaultFilterSync } from "@/components/dentist/AppointmentsDefaultFilterSync";
 import { NewInquiryButton } from "@/components/dentist/NewInquiryButton";
 import { AppointmentFormDialog } from "@/components/shared/AppointmentFormDialog";
 import { QuickFilters } from "@/components/shared/QuickFilters";
@@ -47,9 +47,19 @@ export default async function DentistAppointmentsPage({ searchParams }: Props) {
   const clinicTimezone = await getClinicTimezone();
   const today = getTodayInTimezone(clinicTimezone);
 
-  // Default the tab to "Upcoming": an unfiltered visit (fresh navigation from the
-  // sidebar) redirects to today-onward. "All" carries an explicit `all=1` marker,
-  // so this only fires on a genuinely empty URL and never traps the All chip.
+  // Default the tab to "Upcoming": an unfiltered visit (fresh navigation from
+  // the sidebar) is treated as today-onward. "All" carries an explicit `all=1`
+  // marker, so this only fires on a genuinely empty URL and never traps the
+  // All chip.
+  //
+  // This USED to be a server-side `redirect()` to the same URL with
+  // `dateFrom` appended. That produced a visible skeleton → blank screen →
+  // content flash: `redirect()` thrown mid-render forces the App Router to
+  // abandon the in-flight navigation and start a second one, and the gap
+  // between the two is where the blank screen came from. Instead, the default
+  // is applied directly to this render — there is no second navigation to
+  // produce a gap — and AppointmentsDefaultFilterSync below reflects it into
+  // the address bar afterwards, silently, with no fetch and no loading state.
   const hasAnyFilter =
     Boolean(params.status) ||
     Boolean(params.search) ||
@@ -58,14 +68,14 @@ export default async function DentistAppointmentsPage({ searchParams }: Props) {
     Boolean(params.timeFrom) ||
     Boolean(params.timeTo) ||
     params.all === "1";
-  if (!hasAnyFilter) {
-    redirect(`/dentist/appointments?dateFrom=${today}`);
-  }
+  const effectiveDateFrom = hasAnyFilter ? params.dateFrom : today;
 
   const quickFilters = appointmentsQuickFilters(today);
 
   return (
     <div className="p-6 lg:p-8 space-y-6">
+      <AppointmentsDefaultFilterSync active={!hasAnyFilter} today={today} />
+
       <PageHeader title="Appointments">
         <NewInquiryButton />
         <AppointmentFormDialog
@@ -89,7 +99,7 @@ export default async function DentistAppointmentsPage({ searchParams }: Props) {
           today={today}
           initialSearch={params.search ?? ""}
           initialStatus={params.status ?? ""}
-          initialDateFrom={params.dateFrom ?? ""}
+          initialDateFrom={effectiveDateFrom ?? ""}
           initialDateTo={params.dateTo ?? ""}
           initialTimeFrom={params.timeFrom ?? ""}
           initialTimeTo={params.timeTo ?? ""}
@@ -104,7 +114,7 @@ export default async function DentistAppointmentsPage({ searchParams }: Props) {
         clinicToday={today}
         search={params.search}
         status={params.status}
-        dateFrom={params.dateFrom}
+        dateFrom={effectiveDateFrom}
         dateTo={params.dateTo}
         timeFrom={params.timeFrom}
         timeTo={params.timeTo}
