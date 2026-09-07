@@ -11,24 +11,23 @@ import { cookies } from "next/headers";
  *   the authenticated user's profiles.clinic_id and enforced by Supabase RLS
  *   (auth_clinic_id()). A tampered cookie cannot expose another clinic's data.
  *
- * Four cookies are used:
+ * Two cookies are used:
  *   - SELECTED_CLINIC_COOKIE: the clinic the logged-in session is operating in.
- *       Set on successful login/signup, cleared on logout.
- *   - SIGNUP_CLINIC_COOKIE: the clinic chosen on the create-account page,
- *       carried through to /portal/setup so patient linking/creation is scoped
- *       to the right clinic. Cleared once linking completes.
- *   - SIGNUP_PHONE_COOKIE: the phone entered at signup, to prefill setup.
+ *       Set on successful login, cleared on logout.
  *   - SIGNUP_EMAIL_COOKIE: the address signed up with, so
  *       /patient/verify-email can show it masked and resend its confirmation
  *       without asking for it again.
+ *
+ * There were four. SIGNUP_CLINIC_COOKIE and SIGNUP_PHONE_COOKIE carried a
+ * browser-chosen clinic and phone from the old self-registration form through
+ * to /portal/setup, and both were deleted with signUpPatient and
+ * linkPortalAccount. Nothing reads a clinic from a cookie any more, anywhere.
  *
  * These helpers may only be called from Server Actions / Route Handlers
  * (where cookies can be written) or Server Components (read-only).
  */
 
 export const SELECTED_CLINIC_COOKIE = "dg_selected_clinic";
-export const SIGNUP_CLINIC_COOKIE = "dg_signup_clinic";
-export const SIGNUP_PHONE_COOKIE = "dg_signup_phone";
 export const SIGNUP_EMAIL_COOKIE = "dg_signup_email";
 
 const COMMON_OPTIONS = {
@@ -59,47 +58,11 @@ export async function clearSelectedClinic(): Promise<void> {
   store.delete(SELECTED_CLINIC_COOKIE);
 }
 
-/** Carry the chosen clinic from create-account through to portal setup. */
-export async function setSignupClinic(clinicId: string): Promise<void> {
-  const store = await cookies();
-  store.set(SIGNUP_CLINIC_COOKIE, clinicId, {
-    ...COMMON_OPTIONS,
-    maxAge: 60 * 60, // 1 hour — long enough to complete setup
-  });
-}
 
-/** Read the clinic chosen during signup (used by /portal/setup). */
-export async function getSignupClinic(): Promise<string | null> {
-  const store = await cookies();
-  return store.get(SIGNUP_CLINIC_COOKIE)?.value ?? null;
-}
 
-/** Clear the signup clinic cookie once linking completes. */
-export async function clearSignupClinic(): Promise<void> {
-  const store = await cookies();
-  store.delete(SIGNUP_CLINIC_COOKIE);
-}
 
-/** Carry the phone entered at create-account through to portal setup (prefill). */
-export async function setSignupPhone(phone: string): Promise<void> {
-  const store = await cookies();
-  store.set(SIGNUP_PHONE_COOKIE, phone, {
-    ...COMMON_OPTIONS,
-    maxAge: 60 * 60, // 1 hour
-  });
-}
 
-/** Read the phone entered during signup (used to prefill /portal/setup). */
-export async function getSignupPhone(): Promise<string | null> {
-  const store = await cookies();
-  return store.get(SIGNUP_PHONE_COOKIE)?.value ?? null;
-}
 
-/** Clear the signup phone cookie once linking completes. */
-export async function clearSignupPhone(): Promise<void> {
-  const store = await cookies();
-  store.delete(SIGNUP_PHONE_COOKIE);
-}
 
 /**
  * Carry the address just signed up with through to /patient/verify-email.

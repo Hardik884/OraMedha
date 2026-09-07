@@ -395,7 +395,13 @@ The queue is a real-time view of patients who have checked in for the current da
 | `updated_at` | `timestamptz` | Auto-updated |
 
 **Note visibility rules:**
-- `internal_notes` — visible only to dentist. Never returned by patient-facing APIs or portal queries.
+- `internal_notes` — visible only to dentist. Never returned by patient-facing
+  APIs or portal queries. **Enforced by a column GRANT, not by convention**
+  (`20260907000100`): it is withheld from `anon` and `authenticated`, so it
+  cannot be selected through the Data API by any query shape. A dentist reads it
+  through the `treatment_clinical_notes` projection. Until that migration the
+  rule was enforced only by views that omitted the column, and both a portal
+  patient and a receptionist could read it straight off the base table.
 - `patient_visible_notes` — visible in the patient portal and returned by `getPatientTreatments` tool. Should contain only information appropriate for the patient to read (e.g., "Filling completed on upper left molar").
 - Both fields are always editable, even after the treatment is `completed`.
 
@@ -1525,6 +1531,14 @@ These are non-negotiable standards. Every PR and every AI-generated code block m
 - Mutations (create, update, delete) must use Next.js Server Actions defined in the `actions/` directory.
 - Server Actions must re-validate the user's `clinic_id` and `role` from the Supabase session. Never trust values from the request body for `clinic_id`.
 - Return types from Server Actions must be explicitly typed: `{ data: T | null; error: string | null }`.
+- **An exported `"use server"` function is an HTTP endpoint, not dead code.**
+  Next.js registers one for every export that reaches the client graph, under a
+  stable id, and deleting the UI does not retire it. `signUpPatient` survived
+  853e188 that way and stayed browser-dispatchable on all 65 routes as an
+  unauthenticated, unthrottled mail-send primitive that accepted a
+  browser-supplied `clinic_id`. Delete the action, not just its form —
+  `lib/__tests__/server-action-surface.spec.ts` reads the build manifest and
+  fails on anything outside the declared set, in both directions.
 
 ### 13.5 Mobile Responsive
 
@@ -1594,9 +1608,31 @@ These are non-negotiable standards. Every PR and every AI-generated code block m
   queue positions across every clinic under an accidental service-role call
   until `20260905090100` gave it its own `clinic_id` predicate.
 - **A `WITH CHECK` clause that only restates the `USING` clause pins nothing.**
-  Both `profiles` and `patients` shipped an UPDATE policy asserting only a
-  column the attacker never changes. Pin the identity-bearing columns against
-  their pre-update values, read through a `stable security definer` helper.
+  `profiles`, `patients` AND `appointments` each shipped an UPDATE policy
+  asserting only a column the attacker never changes. Pin the identity-bearing
+  columns against their pre-update values, read through a `stable security
+  definer` helper.
+- **Pin by DENY-list, not allow-list.** `20260903000100` named the nine columns
+  the portal may not change on `patients`. `20260904184013` added `email` the
+  next day and did not add it to the pin, so the list was stale within
+  twenty-four hours. `20260907000000` compares
+  `to_jsonb(row) - <the columns that may change>` against the pre-update row
+  instead, so a column added later is frozen by default. Name what may move.
+- **RLS cannot restrict columns, and a table-level GRANT subsumes column
+  grants.** So `revoke select (col)` is a no-op until the table grant is
+  revoked and re-granted per column — after which `SELECT *` fails for every
+  role, including the one you meant to keep. That is the price of column
+  security in Postgres and it is worth paying for clinical free-text:
+  `20260907000100` withholds `treatments.internal_notes` and the appointment
+  assessment columns, and staff read them through SECURITY DEFINER projections
+  scoped by clinic AND role. See `lib/appointments/data-api-columns.ts`.
+- **A SECURITY DEFINER view is not automatically the 20260902155414 defect.**
+  Those five views had NO predicate of their own, which is why an anonymous
+  caller read every row. A definer view that carries its authorisation in its
+  own `WHERE` clause is the "server-side projection" this section already
+  prescribes. The distinction is testable, which is why
+  `view-security-invoker.spec.ts` asserts BEHAVIOUR rather than the catalog
+  flag — keep it that way.
 
 ### 13.11 AI Must Never Block Core Operations
 
@@ -1629,6 +1665,10 @@ These are non-negotiable standards. Every PR and every AI-generated code block m
   them execute as their owner and bypass RLS entirely — every patient record in
   the database was readable, modifiable and deletable by an unauthenticated
   caller holding only the public anon key. Fixed in `20260902155414`.
+  `active_treatments` and `active_appointments` were narrowed again in
+  `20260907000100`: they no longer project the clinical columns, which are
+  withheld from `authenticated` at the column level, and a view that selects one
+  fails for every caller.
   `actions/__tests__/view-security-invoker.spec.ts` sweeps **every** view in
   `public` and asserts the behaviour rather than the catalog option.
   **ADD A ROW TO THAT SPEC WHENEVER YOU ADD A VIEW.**

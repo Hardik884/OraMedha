@@ -820,29 +820,17 @@ export const CreateUnavailableDateSchema = z.object({
 export type CreateUnavailableDateInput = z.infer<typeof CreateUnavailableDateSchema>;
 
 // ── Portal Link ───────────────────────────────────────────────────────────────
-
-export const LinkPortalAccountSchema = z.object({
-  /**
-   * The clinic the patient selected at signup. Every lookup, link and
-   * patient creation in the linking flow is scoped to this clinic, so the
-   * same phone number in a different clinic is never matched.
-   */
-  clinicId: z.string().uuid("A clinic must be selected"),
-  phone: z.string().regex(phoneRegex, "Invalid phone number format"),
-  /**
-   * Required only for the "new patient" path — when no existing record matches
-   * the phone number. The server action creates a new patient record using this
-   * name. Optional on the first attempt (phone-only lookup); the form asks for
-   * it only when the server confirms no existing record was found.
-   */
-  name: z.string().min(2, "Name must be at least 2 characters").max(100).optional(),
-  /**
-   * When true the caller has confirmed they want to create a new patient record.
-   * Prevents accidentally creating a duplicate if the user fat-fingered the phone.
-   */
-  confirmNew: z.boolean().optional(),
-});
-export type LinkPortalAccountInput = z.infer<typeof LinkPortalAccountSchema>;
+//
+// LinkPortalAccountSchema — REMOVED.
+//
+// It validated { clinicId, phone, name?, confirmNew? } for linkPortalAccount,
+// the self-registration flow deleted from actions/portal-link.ts. Its shape was
+// the problem, not its validation: a clinic id and a phone number supplied by
+// the browser, plus a flag authorising the server to create a patient record.
+//
+// Portal activation takes none of those. It takes an email address, sends a
+// code to it, and reads the clinic from the record that address already belongs
+// to — so there is nothing here left to validate.
 
 // =============================================================================
 // SECTION 6 — AI TYPES

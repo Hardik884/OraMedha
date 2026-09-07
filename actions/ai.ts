@@ -33,6 +33,7 @@ import {
 import type { ActionResult, CopilotMessage } from "@/types";
 import { computeOutstandingBalance } from "@/lib/billing/balance";
 import { getTodayInTimezone, getUtcBoundariesForLocalDate } from "@/lib/utils";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbClient = any;
@@ -145,11 +146,29 @@ type PendingAiAction = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   args: Record<string, any>;
   createdInvocationId: string;
-  expiresAt: number;
 };
 
-const PENDING_AI_ACTIONS = new Map<string, PendingAiAction>();
 const PENDING_ACTION_TTL_MS = 10 * 60_000;
+
+/*
+ * Held in ai_pending_actions (20260907000300), not in a module-level Map.
+ *
+ * The Map was per-process. On more than one instance the token was frequently
+ * absent when the patient confirmed — a different Lambda served the second turn
+ * — so consumeConfirmedAction returned null, the model re-proposed, and the
+ * patient was asked "shall I book it?" again. It failed CLOSED, so nothing was
+ * ever mis-booked; the assistant simply could not complete a booking, and did
+ * so intermittently depending on instance routing, which is the hardest kind of
+ * bug to be told about.
+ *
+ * Written through the admin client because no client role may touch that table.
+ * That is the point: a caller who could insert into it could mint its own
+ * confirmation and defeat the two-turn rule entirely.
+ */
+function pendingStore() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return createAdminClient() as any;
+}
 
 function newConfirmationId(): string {
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
@@ -161,22 +180,42 @@ function newConfirmationId(): string {
 /**
  * Stores a pending mutating action and returns the confirmation token the
  * model must echo back (in a later turn) to execute it.
+ *
+ * Upserts on user_id: one outstanding proposal per patient, so a new proposal
+ * replaces the last rather than leaving a stale token redeemable. Same
+ * behaviour the single-entry Map had.
  */
-function proposeMutatingAction(
+async function proposeMutatingAction(
   userId: string,
   toolName: MutatingToolName,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   args: Record<string, any>,
   invocationId: string
-): string {
+): Promise<string> {
   const token = newConfirmationId();
-  PENDING_AI_ACTIONS.set(userId, {
-    token,
-    toolName,
-    args,
-    createdInvocationId: invocationId,
-    expiresAt: Date.now() + PENDING_ACTION_TTL_MS,
-  });
+
+  const { error } = await pendingStore()
+    .from("ai_pending_actions")
+    .upsert(
+      {
+        user_id: userId,
+        token,
+        tool_name: toolName,
+        args,
+        created_invocation_id: invocationId,
+        expires_at: new Date(Date.now() + PENDING_ACTION_TTL_MS).toISOString(),
+      },
+      { onConflict: "user_id" }
+    );
+
+  if (error) {
+    // Nothing was stored, so the token cannot be redeemed. Say so rather than
+    // handing back one that will never work — the caller turns this into
+    // "please try again", which is recoverable; a silent dead token is not.
+    console.error("[ai] could not store pending action:", error);
+    throw new Error("Could not prepare that action. Please try again.");
+  }
+
   return token;
 }
 
@@ -184,25 +223,51 @@ function proposeMutatingAction(
  * Validates and consumes a pending action. Returns the stored action only when
  * the token matches, has not expired, and was issued in an EARLIER turn.
  * Returns null otherwise (caller must then (re-)propose).
+ *
+ * The delete is part of the same statement as the match, so a token cannot be
+ * redeemed twice by two concurrent requests.
  */
-function consumeConfirmedAction(
+async function consumeConfirmedAction(
   userId: string,
   toolName: MutatingToolName,
   token: string | undefined,
   invocationId: string
-): PendingAiAction | null {
+): Promise<PendingAiAction | null> {
   if (!token) return null;
-  const pending = PENDING_AI_ACTIONS.get(userId);
-  if (!pending) return null;
-  if (pending.token !== token || pending.toolName !== toolName) return null;
-  if (pending.expiresAt < Date.now()) {
-    PENDING_AI_ACTIONS.delete(userId);
+
+  const { data, error } = await pendingStore()
+    .from("ai_pending_actions")
+    .delete()
+    .eq("user_id", userId)
+    .eq("token", token)
+    .eq("tool_name", toolName)
+    // Must be confirmed in a LATER message turn than it was proposed. This is
+    // what stops the model proposing and confirming inside one turn.
+    .neq("created_invocation_id", invocationId)
+    .gt("expires_at", new Date().toISOString())
+    .select("token, tool_name, args, created_invocation_id")
+    .maybeSingle();
+
+  if (error) {
+    console.error("[ai] could not consume pending action:", error);
     return null;
   }
-  // Must be confirmed in a LATER message turn than it was proposed.
-  if (pending.createdInvocationId === invocationId) return null;
-  PENDING_AI_ACTIONS.delete(userId);
-  return pending;
+  if (!data) return null;
+
+  const row = data as {
+    token: string;
+    tool_name: MutatingToolName;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    args: Record<string, any>;
+    created_invocation_id: string;
+  };
+
+  return {
+    token: row.token,
+    toolName: row.tool_name,
+    args: row.args,
+    createdInvocationId: row.created_invocation_id,
+  };
 }
 
 // =============================================================================
@@ -288,7 +353,7 @@ async function executePatientTool(
       }
       
       const input = createAppointmentInputSchema.parse(args);
-      const confirmed = consumeConfirmedAction(
+      const confirmed = await consumeConfirmedAction(
         session.userId,
         "createAppointment",
         input.confirmationToken,
@@ -297,7 +362,7 @@ async function executePatientTool(
 
       if (!confirmed) {
         // Step 1 — propose only. No mutation happens here.
-        const confirmationToken = proposeMutatingAction(
+        const confirmationToken = await proposeMutatingAction(
           session.userId,
           "createAppointment",
           { scheduledAt: input.scheduledAt, notes: input.notes ?? null },
@@ -338,7 +403,7 @@ async function executePatientTool(
       }
       
       const input = rescheduleAppointmentInputSchema.parse(args);
-      const confirmed = consumeConfirmedAction(
+      const confirmed = await consumeConfirmedAction(
         session.userId,
         "rescheduleAppointment",
         input.confirmationToken,
@@ -346,7 +411,7 @@ async function executePatientTool(
       );
 
       if (!confirmed) {
-        const confirmationToken = proposeMutatingAction(
+        const confirmationToken = await proposeMutatingAction(
           session.userId,
           "rescheduleAppointment",
           {
@@ -383,7 +448,7 @@ async function executePatientTool(
 
     case "cancelAppointment": {
       const input = cancelAppointmentInputSchema.parse(args);
-      const confirmed = consumeConfirmedAction(
+      const confirmed = await consumeConfirmedAction(
         session.userId,
         "cancelAppointment",
         input.confirmationToken,
@@ -391,7 +456,7 @@ async function executePatientTool(
       );
 
       if (!confirmed) {
-        const confirmationToken = proposeMutatingAction(
+        const confirmationToken = await proposeMutatingAction(
           session.userId,
           "cancelAppointment",
           { appointmentId: input.appointmentId },

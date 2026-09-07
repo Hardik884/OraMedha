@@ -4,14 +4,9 @@ import { redirect } from "next/navigation";
 import { createServerClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppUrl } from "@/lib/app-url";
-import { getClinicById } from "@/actions/clinics";
 import {
   setSelectedClinic,
   clearSelectedClinic,
-  setSignupClinic,
-  clearSignupClinic,
-  setSignupPhone,
-  clearSignupPhone,
   setSignupEmail,
   getSignupEmail,
   clearSignupEmail,
@@ -19,11 +14,11 @@ import {
 import { describeEmailSendFailure } from "@/lib/auth/verification";
 import { recordSecurityEvent, subjectHash } from "@/lib/security/events";
 import {
-  checkRateLimit,
-  clearFailures,
-  consumeSendQuota,
+  checkRateLimitShared,
+  clearFailuresShared,
+  consumeSendQuotaShared,
   MAX_SENDS,
-  recordFailure,
+  recordFailureShared,
   SEND_PASSWORD_RESET,
 } from "@/lib/security/rate-limit";
 import type { ActionResult } from "@/types";
@@ -47,9 +42,11 @@ import type { ActionResult } from "@/types";
  * cannot pick their clinic, cannot claim a role, and cannot reach the admin
  * portal by typing its URL.
  *
- * A clinic is chosen in exactly one place in the whole product — the NEW
- * patient signup form — and even there the chosen id is validated against the
- * clinics table before it is used for anything (see signUpPatient).
+ * A clinic is NEVER chosen in the browser, anywhere in the product. The last
+ * form that did was the old self-registration signup, removed below; a patient
+ * activating their portal account proves control of an address the clinic put
+ * on their record, and the clinic is read from that record server-side
+ * (actions/portal-activation.ts).
  *
  * Each entry point also refuses accounts that belong to a different audience,
  * so a patient cannot sign in "into" the staff app and an admin cannot quietly
@@ -138,7 +135,7 @@ async function authenticate(
   // runs into. See lib/security/rate-limit.ts for what it is and is not.
   const subject = subjectHash(email);
 
-  const before = checkRateLimit(subject);
+  const before = await checkRateLimitShared(subject);
   if (before.locked) {
     // The password is not even checked. Answering identically whether or not
     // the account exists keeps this from becoming an account-enumeration
@@ -156,7 +153,7 @@ async function authenticate(
     await supabase.auth.signInWithPassword({ email, password });
 
   if (authError || !authData.user) {
-    const after = recordFailure(subject);
+    const after = await recordFailureShared(subject);
 
     recordSecurityEvent("AUTH_FAILED", {
       subjectHash: subject,
@@ -177,7 +174,7 @@ async function authenticate(
 
   // A success clears the counter, so a week-old mistyped password does not
   // combine with today's to lock someone out of their clinic.
-  clearFailures(subject);
+  await clearFailuresShared(subject);
 
   const { data } = await supabase
     .from("profiles")
@@ -335,120 +332,41 @@ export async function signInAdmin(
   redirect("/admin");
 }
 
-// ── New patient signup — /patient/signup ──────────────────────────────────────
-
-/**
- * signUpPatient
- *
- * Creates a Supabase Auth account for a patient registering themselves, at the
- * clinic they picked on the form.
- *
- * This is the ONLY place in DentGrow where a clinic is chosen in the browser,
- * and the id is verified against the clinics table before it is used — a
- * tampered value is rejected outright rather than silently scoping the new
- * patient into a clinic that does not exist. From here the choice travels in an
- * httpOnly cookie to /portal/setup, so the record lookup and (if needed)
- * creation happen inside that clinic only; the same phone number at a different
- * clinic is never matched.
- *
- * Staff accounts are never created here — they are provisioned by the clinic.
- */
-export async function signUpPatient(
-  _prevState: ActionResult<null>,
-  formData: FormData
-): Promise<ActionResult<null>> {
-  const email = ((formData.get("email") as string) ?? "").trim();
-  const password = (formData.get("password") as string) ?? "";
-  const confirmPassword = (formData.get("confirmPassword") as string) ?? "";
-  const clinicId = ((formData.get("clinic_id") as string) || "").trim();
-  const phone = ((formData.get("phone") as string) || "").trim();
-  const fullName = ((formData.get("full_name") as string) || "").trim();
-
-  if (!clinicId) {
-    return { data: null, error: "Please choose the clinic you attend." };
-  }
-
-  if (!email || !password || !confirmPassword) {
-    return { data: null, error: "All fields are required." };
-  }
-
-  if (password !== confirmPassword) {
-    return { data: null, error: "Passwords do not match." };
-  }
-
-  if (password.length < 8) {
-    return { data: null, error: "Password must be at least 8 characters." };
-  }
-
-  // Never trust a clinic id from the browser — verify it exists first.
-  const clinicResult = await getClinicById(clinicId);
-  if (!clinicResult.data) {
-    return { data: null, error: clinicResult.error ?? "Invalid clinic." };
-  }
-
-  const supabase = await createServerClient();
-
-  const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: fullName ? { full_name: fullName } : undefined,
-      // Where Supabase is permitted to send the confirmed patient. The link in
-      // the email itself is built from the project's Site URL by the template
-      // (supabase/templates/confirmation.html), but this value still has to be
-      // an allow-listed URL for the signup to be accepted, and it is what a
-      // default template would use.
-      //
-      // Origin is resolved from the live request so it is correct per
-      // environment (never a build-time-baked localhost URL in production).
-      emailRedirectTo: await getAppUrl("/auth/callback?next=/portal/setup"),
-    },
-  });
-
-  if (signUpError) {
-    const m = signUpError.message.toLowerCase();
-    if (m.includes("already registered") || m.includes("already been registered")) {
-      return {
-        data: null,
-        error: "An account with this email already exists. Try signing in instead.",
-      };
-    }
-
-    // Signup can fail on the SEND rather than on the account — most visibly
-    // when the project is on Supabase's built-in email service, which delivers
-    // only to addresses on the project's team and rejects everyone else. That
-    // is a configuration problem wearing the costume of a bad password, so it
-    // gets its own explanation instead of "check your details and try again".
-    const failure = describeEmailSendFailure(signUpError.message);
-    if (failure.kind !== "unknown") {
-      if (failure.kind === "not_authorized") {
-        console.error("[signUpPatient] recipient refused by the mail transport:", signUpError.message);
-      }
-      return { data: null, error: failure.message };
-    }
-
-    return { data: null, error: friendlyAuthError(signUpError.message) };
-  }
-
-  // Carry the chosen clinic (and phone) through to /portal/setup so the
-  // patient link/create step is scoped to this clinic only.
-  await setSignupClinic(clinicId);
-  await setSelectedClinic(clinicId);
-  if (phone) await setSignupPhone(phone);
-  await setSignupEmail(email);
-
-  // Where to send them next depends on whether Supabase confirmed the address
-  // on the spot. With email confirmation ON — which is how DentGrow runs — no
-  // session comes back and the account cannot be used until the link in the
-  // email is clicked, so anything other than the "check your email" screen
-  // would be a dead end. Read from the response rather than from configuration,
-  // so this stays correct whichever way the project is configured.
-  if (!signUpData.session) {
-    redirect("/patient/verify-email");
-  }
-
-  redirect("/portal/setup");
-}
+// ── New patient signup ────────────────────────────────────────────────────────
+//
+// REMOVED. `signUpPatient` used to live here, and it was the last piece of the
+// pre-853e188 architecture still wired into the running application.
+//
+// It accepted a clinic_id from the browser, called supabase.auth.signUp() with
+// a caller-supplied address, and handed the choice to /portal/setup in a
+// cookie. Its own docstring said so: "This is the ONLY place in DentGrow where
+// a clinic is chosen in the browser."
+//
+// Nothing rendered it any more — /patient/signup is the three-step activation
+// form — but deleting the UI did not retire the endpoint. Next.js registers a
+// Server Action for every exported "use server" function that reaches the
+// client graph, and the build manifest showed this one published in the
+// `action-browser` layer on ALL 65 routes, under a stable id. It was therefore
+// still callable by anyone who could load any page in the product:
+//
+//   - an UNAUTHENTICATED, UNTHROTTLED way to make the server send mail to any
+//     address on the internet. requestActivation is deliberately metered by
+//     consumeSendQuota(SEND_ACTIVATION) precisely to prevent this, and the two
+//     share one provider allowance — so exhausting it here means no real
+//     patient can activate and no dentist can reset a password;
+//   - a way to fill auth.users with accounts nobody asked for.
+//
+// It leaked no data: the account it created had no profile and no portal link,
+// so auth_patient_id() returned NULL and every portal policy matched zero rows.
+// That is why this was an abuse and integrity problem rather than a breach.
+//
+// Patients do not self-register. The clinic creates the record and puts an
+// address on it; the patient proves control of that address and sets a
+// password (actions/portal-activation.ts). There is no browser-supplied clinic
+// anywhere in that path.
+//
+// lib/__tests__/server-action-surface.spec.ts now fails the build if this — or
+// anything else outside the declared set — is republished as an action.
 
 // ── Verification email resend — /patient/verify-email ────────────────────────
 
@@ -526,15 +444,15 @@ export async function resendVerificationEmail(
 /**
  * abandonSignupEmail
  *
- * "Change email" on the verification screen. Drops the pending address (and the
- * phone prefill that went with it) and returns to the sign-up form, so the
- * patient starts cleanly rather than re-submitting on top of half a session.
- * The clinic choice is kept — they picked it a minute ago and it is the one
- * thing they are unlikely to want to change.
+ * "Change email" on the verification screen. Drops the pending address and
+ * returns to the sign-up form, so the patient starts cleanly rather than
+ * re-submitting on top of half a session.
+ *
+ * There is no longer a clinic or phone carried alongside it: those cookies
+ * belonged to signUpPatient, which is gone.
  */
 export async function abandonSignupEmail(): Promise<void> {
   await clearSignupEmail();
-  await clearSignupPhone();
   redirect("/patient/signup");
 }
 
@@ -575,9 +493,9 @@ export async function signOut(): Promise<void> {
 
   await supabase.auth.signOut();
   // Clear the selected-clinic UX cookies so a fresh login re-resolves them.
+  // The signup clinic and phone cookies are gone with signUpPatient — nothing
+  // writes them any more, so there is nothing left to clear.
   await clearSelectedClinic();
-  await clearSignupClinic();
-  await clearSignupPhone();
   await clearSignupEmail();
   redirect(destination);
 }
@@ -733,7 +651,7 @@ export async function requestPasswordReset(
   // Consumed BEFORE the audience is resolved, so an address with no account
   // burns allowance exactly like one with an account. Otherwise the ceiling
   // itself would answer the question the generic response refuses to.
-  const quota = consumeSendQuota(SEND_PASSWORD_RESET, subjectHash(email));
+  const quota = await consumeSendQuotaShared(SEND_PASSWORD_RESET, subjectHash(email));
   if (quota.exhausted) {
     recordSecurityEvent("AUTH_FAILED", {
       subjectHash: subjectHash(email),

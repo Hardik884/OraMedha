@@ -1,0 +1,148 @@
+name: CI
+
+# WHY THIS FILE EXISTS
+#   Until now nothing ran on push. Typecheck, lint, build and the test suite all
+#   passed locally and were never verified anywhere else — and the suite's own
+#   result was misleading: every integration spec skips itself when Postgres is
+#   unreachable, so 248 tests covering RLS, tenant isolation and audit
+#   immutability reported "skipped" and the run still exited 0.
+#
+#   This workflow therefore does two things that a naive "npm test" job does not:
+#   it STARTS the database so those specs actually execute, and it then ASSERTS
+#   that nothing skipped, so the suite can never again be green by abstention.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Typecheck · Lint · Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run type-check
+
+      # `next.config.ts` no longer sets eslint.ignoreDuringBuilds, so the build
+      # below would also fail on lint. This step runs first so a lint error is
+      # reported as a lint error rather than as a build failure.
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        # Build-time values only. next build does not connect to Supabase; these
+        # exist because the client factories read them at module scope. They are
+        # deliberately NOT real credentials.
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:55321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-build-placeholder
+          SUPABASE_SERVICE_ROLE_KEY: ci-build-placeholder
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+        run: npm run build
+
+  test:
+    name: Tests (against a real database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      # lib/__tests__/server-action-surface.spec.ts is describe.skipIf(!BUILT)
+      # on .next/server/server-reference-manifest.json, which only next build
+      # produces. This job runs on its own fresh checkout — it does not
+      # inherit the static job's build — so without this step that spec
+      # silently skips in CI every time, and "Assert nothing skipped" would
+      # forever be failing on a check that never actually ran rather than on
+      # a real regression. Same placeholder values as the static job's Build
+      # step: build-time only, next build does not connect to Supabase.
+      - name: Build (so the server-action-surface spec can see the manifest)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:55321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-build-placeholder
+          SUPABASE_SERVICE_ROLE_KEY: ci-build-placeholder
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+        run: npm run build
+
+      - name: Start Supabase
+        # The CLI is a devDependency, so npx resolves the pinned version rather
+        # than whatever the runner image happens to carry. Nothing is excluded:
+        # specs touch storage (consent and document uploads) and auth, and a
+        # trimmed stack would put them straight back into skipping.
+        run: npx supabase start
+
+      # Rebuilds the database from the FULL migration history plus seed.sql.
+      # This is the only step that proves a fresh environment still provisions —
+      # the property CLAUDE.md §11.0 asks for before every push, and which no
+      # machine was checking.
+      - name: Apply migrations from scratch
+        run: npx supabase db reset
+
+      - name: Confirm the API is answering
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:55321/rest/v1/" -H "apikey: $(npx supabase status -o json | jq -r .ANON_KEY)" >/dev/null 2>&1; then
+              echo "PostgREST is up."
+              exit 0
+            fi
+            echo "waiting for PostgREST ($i/30)…"
+            sleep 2
+          done
+          echo "PostgREST never came up — the integration specs would silently skip."
+          exit 1
+
+      - name: Run the suite
+        env:
+          # Point BOTH the specs and the application code under test at the
+          # local stack. NEXT_PUBLIC_SUPABASE_URL matters because
+          # createAdminClient() reads it directly — see
+          # test/guard-remote-database.ts.
+          SUPABASE_TEST_URL: http://127.0.0.1:55321
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:55321
+        run: |
+          ANON=$(npx supabase status -o json | jq -r .ANON_KEY)
+          SERVICE=$(npx supabase status -o json | jq -r .SERVICE_ROLE_KEY)
+          SUPABASE_TEST_ANON_KEY="$ANON" \
+          SUPABASE_TEST_SERVICE_ROLE_KEY="$SERVICE" \
+          SUPABASE_TEST_SERVICE_KEY="$SERVICE" \
+          NEXT_PUBLIC_SUPABASE_ANON_KEY="$ANON" \
+          SUPABASE_SERVICE_ROLE_KEY="$SERVICE" \
+          npx vitest --run --reporter=json --outputFile=vitest-report.json
+
+      # The step that makes the job mean something. A run in which the security
+      # specs skipped must not be reported as a pass.
+      - name: Assert nothing skipped
+        if: always()
+        run: node scripts/assert-no-skipped-tests.mjs vitest-report.json
+
+      - name: Stop Supabase
+        if: always()
+        run: npx supabase stop --no-backup || true

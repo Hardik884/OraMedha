@@ -10,6 +10,7 @@ import {
   type PatientDataExport,
 } from "@/lib/data-export";
 import type { ActionResult } from "@/types";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * actions/data-export.ts
@@ -50,6 +51,31 @@ type DbClient = any;
  * Gathers the record. Called only after authorisation has been fully resolved
  * by one of the two exported actions — it performs no check of its own and is
  * not exported.
+ *
+ * WHY THIS READS AS THE SERVICE ROLE
+ *   An export is the one read that legitimately crosses the column boundary
+ *   20260907000100 draws. That migration withholds the clinical free-text on
+ *   `appointments` (and `treatments.internal_notes`) from `anon` and
+ *   `authenticated`, because Postgres cannot otherwise distinguish a dentist
+ *   from a patient — both arrive as the same database role. Read through the
+ *   caller's own client, every query below would now fail.
+ *
+ *   Reading them here is not a hole, for three reasons that hold together:
+ *
+ *     1. The caller is fully authorised BEFORE this runs. exportMyData resolves
+ *        patientId from the portal link (never from the request); exportPatientData
+ *        is dentist-only and re-checks the patient against the caller's clinic.
+ *     2. Every query is explicitly scoped to that patientId (and clinicId), so
+ *        the absence of RLS changes which rows are returned not at all.
+ *     3. `scope` still decides the COLUMNS. A patient export omits
+ *        STAFF_ONLY_TREATMENT_FIELDS — the dentist's internal_notes — and
+ *        lib/__tests__/data-export.spec.ts asserts that.
+ *
+ *   A patient receiving their own clinical record is the point of the feature,
+ *   not a leak: it is the right-of-access disclosure, it is rate-limited by
+ *   being an explicit action, and it writes a PATIENT_DATA_EXPORTED audit row.
+ *   What 20260907000100 stops is that same content being readable AMBIENTLY off
+ *   the base table with nothing but the anon key.
  */
 async function collect(
   db: DbClient,
@@ -203,7 +229,7 @@ export async function exportMyData(): Promise<ActionResult<PatientDataExport>> {
     }
 
     const patientId = link.patient_id as string;
-    const data = await collect(db, profile.clinic_id, patientId, "patient");
+    const data = await collect(createAdminClient(), profile.clinic_id, patientId, "patient");
 
     if (!data.patient) {
       return { data: null, error: "Your record could not be found." };
@@ -271,7 +297,7 @@ export async function exportPatientData(
       return { data: null, error: "Patient not found." };
     }
 
-    const data = await collect(db, profile.clinic_id, patientId, "staff");
+    const data = await collect(createAdminClient(), profile.clinic_id, patientId, "staff");
 
     await recordPhiAccess(profile, {
       event: "PATIENT_DATA_EXPORTED",

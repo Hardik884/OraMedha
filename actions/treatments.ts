@@ -32,6 +32,8 @@ import {
 import { computeConsultantSplit } from "@/lib/billing/revenue";
 import { syncToothForTreatment } from "@/lib/dental-chart/sync";
 import { resolveDentistIdentities } from "@/lib/staff/dentist-directory";
+import { TREATMENT_SELECT } from "@/lib/appointments/data-api-columns";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * Revenue-distribution columns to persist on a treatment.
@@ -249,7 +251,7 @@ export async function createTreatment(
         dentition_type: parsed.data.dentition_type ?? null,
         ...revenue.fields,
       })
-      .select()
+      .select(TREATMENT_SELECT)
       .single();
 
     if (error) {
@@ -328,9 +330,18 @@ export async function updateTreatment(
     // rather than only what it changed to. Fetched here, before any of the
     // derived values below are recomputed, so the comparison is against the
     // record as it actually stood.
-    const { data: beforeRow } = await db
+    //
+    // Read as the SERVICE ROLE because internal_notes is one of the fields
+    // treatment_history tracks, and 20260907000100 withholds that column from
+    // `authenticated`. Through the caller's own client the "before" value would
+    // come back undefined and every save would record a spurious change to it —
+    // an audit trail that reports edits nobody made is worse than one that
+    // reports none. Authorisation is already fully resolved above (dentist,
+    // and the clinic_id filter below is the caller's own), so this reads
+    // exactly the row the caller could already reach.
+    const { data: beforeRow } = await createAdminClient()
       .from("treatments")
-      .select("*")
+      .select(`${TREATMENT_SELECT}, internal_notes`)
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
@@ -426,7 +437,7 @@ export async function updateTreatment(
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
-      .select()
+      .select(TREATMENT_SELECT)
       .single();
 
     if (error) {
@@ -568,7 +579,7 @@ export async function getTreatment(
 
     const { data, error } = await db
       .from("treatments")
-      .select("*")
+      .select(TREATMENT_SELECT)
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
@@ -597,8 +608,11 @@ export async function getTreatment(
 
 // =============================================================================
 // getTreatmentsForPatient — list by patient, role-aware
-// Dentist: full record (internal_notes included)
-// Receptionist: internal_notes excluded
+// Dentist: every non-clinical column (internal_notes is withheld from the Data
+//   API itself by 20260907000100 — a dentist reads it per-treatment through
+//   getTreatment(), which projects it via the service-role client)
+// Receptionist: same list, minus nothing further — the columns below are
+//   already the non-clinical set
 // =============================================================================
 
 export async function getTreatmentsForPatient(
@@ -618,9 +632,15 @@ export async function getTreatmentsForPatient(
     // columns: they drive the payment totals on the patient profile, and
     // omitting them made a receptionist's "Total Cost" disagree with the
     // outstanding balance shown beside it.
+    //
+    // `"*"` used to be the dentist branch. It no longer works for ANY role —
+    // 20260907000100 revokes table-wide SELECT on `treatments` and re-grants it
+    // column-by-column, minus internal_notes, so `select=*` is refused outright
+    // (`permission denied for table treatments`), dentist included.
+    // TREATMENT_SELECT is exactly that granted column list.
     const selectFields =
       profile.role === "dentist"
-        ? "*"
+        ? TREATMENT_SELECT
         : "id, clinic_id, appointment_id, patient_id, treatment_type, patient_visible_notes, cost, opd_charged, opd_fee, xray_taken, xray_cost, status, performed_at, deleted_at, created_at, updated_at";
 
     const { data, error } = await db
@@ -831,7 +851,7 @@ export async function getAllTreatments(filters?: {
     let query = db
       .from("treatments")
       .select(
-        "*, patients!inner(id, name, phone)",
+        `${TREATMENT_SELECT}, patients!inner(id, name, phone)`,
         { count: "exact" }
       )
       .eq("clinic_id", profile.clinic_id)

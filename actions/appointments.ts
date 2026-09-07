@@ -34,6 +34,7 @@ import { writeAppointmentHistory } from "@/lib/appointments/history";
 import { completeAppointmentCascade } from "@/lib/appointments/complete";
 import { PATIENT_APPOINTMENT_SELECT } from "@/lib/appointments/patient-safe-columns";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
+import { APPOINTMENT_SELECT } from "@/lib/appointments/data-api-columns";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbClient = any;
@@ -361,7 +362,7 @@ export async function createAppointment(
         status: "scheduled",
         created_by: profile.id,
       })
-      .select()
+      .select(APPOINTMENT_SELECT)
       .single();
 
     if (insertErr || !appointment) {
@@ -441,7 +442,7 @@ export async function updateAppointmentStatus(
     // Fetch current appointment
     const { data: current, error: fetchErr } = await db
       .from("appointments")
-      .select("*")
+      .select(APPOINTMENT_SELECT)
       .eq("id", parsed.data.appointment_id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
@@ -483,7 +484,7 @@ export async function updateAppointmentStatus(
       // Re-fetch the (now completed) appointment to return to the caller.
       const { data: updated } = await db
         .from("appointments")
-        .select("*")
+        .select(APPOINTMENT_SELECT)
         .eq("id", parsed.data.appointment_id)
         .eq("clinic_id", profile.clinic_id)
         .single();
@@ -508,7 +509,7 @@ export async function updateAppointmentStatus(
       .update(updatePayload)
       .eq("id", parsed.data.appointment_id)
       .eq("clinic_id", profile.clinic_id)
-      .select()
+      .select(APPOINTMENT_SELECT)
       .single();
 
     if (updateErr || !updated) {
@@ -646,7 +647,7 @@ export async function rescheduleAppointment(
     // Fetch appointment and verify clinic ownership
     const { data: current } = await db
       .from("appointments")
-      .select("*")
+      .select(APPOINTMENT_SELECT)
       .eq("id", parsed.data.appointment_id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
@@ -780,7 +781,7 @@ export async function rescheduleAppointment(
       })
       .eq("id", parsed.data.appointment_id)
       .eq("clinic_id", profile.clinic_id)
-      .select()
+      .select(APPOINTMENT_SELECT)
       .single();
 
     if (updateErr || !updated) {
@@ -1003,7 +1004,7 @@ export async function updateAppointmentNotes(
       })
       .eq("id", appointmentId)
       .eq("clinic_id", profile.clinic_id)
-      .select()
+      .select(APPOINTMENT_SELECT)
       .single();
 
     if (updateErr || !updated) {
@@ -1094,7 +1095,7 @@ export async function updateAppointmentClinical(
       .update(payload)
       .eq("id", appointmentId)
       .eq("clinic_id", profile.clinic_id)
-      .select()
+      .select(APPOINTMENT_SELECT)
       .single();
 
     if (updateErr || !updated) {
@@ -1145,7 +1146,7 @@ export async function getAppointmentsToday(): Promise<
 
     const { data, error } = await db
       .from("appointments")
-      .select("*, patient:patients(id, name, phone)")
+      .select(`${APPOINTMENT_SELECT}, patient:patients(id, name, phone)`)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
       .gte("scheduled_at", startUtc)
@@ -1157,11 +1158,68 @@ export async function getAppointmentsToday(): Promise<
       return { data: null, error: "Failed to fetch today's appointments." };
     }
 
-    return { data: (data ?? []) as AppointmentWithPatient[], error: null };
+    const withClinical = await attachClinicalNotes(
+      db,
+      (data ?? []) as (AppointmentWithPatient & { id: string })[]
+    );
+
+    return { data: withClinical as AppointmentWithPatient[], error: null };
   } catch (err) {
     console.error("[getAppointmentsToday] unexpected:", err);
     return { data: null, error: "Unexpected error" };
   }
+}
+
+// =============================================================================
+// attachClinicalNotes — re-joins the staff-only clinical free-text
+// =============================================================================
+
+/**
+ * Merges the clinical columns back onto appointment rows for a STAFF caller.
+ *
+ * 20260907000100 withholds notes / chief_complaints / medical_history /
+ * oral_findings / provisional_diagnosis from `anon` and `authenticated` at the
+ * column level, because that is the only mechanism Postgres has that can tell
+ * a dentist from a patient — RLS is row-level, and both arrive as the same
+ * database role. A patient could otherwise read their clinician's assessment
+ * straight off the base table with nothing but the public anon key and their
+ * own JWT, which is what this closes.
+ *
+ * Staff still need the columns, so they come back through
+ * `appointment_clinical_notes`: a SECURITY DEFINER projection whose own WHERE
+ * clause requires the caller to be a dentist or receptionist IN THE ROW'S
+ * CLINIC. Nothing here widens what the caller may see — the ids passed in have
+ * already been through the base table's RLS, and the view refuses anything
+ * outside their clinic regardless.
+ *
+ * One extra query per read, not one per row.
+ *
+ * NEVER call this on the patient branch of a read.
+ */
+async function attachClinicalNotes<T extends { id: string }>(
+  db: DbClient,
+  rows: T[]
+): Promise<T[]> {
+  if (rows.length === 0) return rows;
+
+  const { data, error } = await db
+    .from("appointment_clinical_notes")
+    .select("id, notes, chief_complaints, medical_history, oral_findings, provisional_diagnosis")
+    .in("id", rows.map((r) => r.id));
+
+  if (error) {
+    // A clinical note that cannot be loaded must not blank out the appointment
+    // it belongs to — the row still renders, without the free-text. Logged
+    // loudly because it means the projection or its grants have drifted.
+    console.error("[attachClinicalNotes]", error);
+    return rows;
+  }
+
+  const byId = new Map(
+    ((data ?? []) as { id: string }[]).map((row) => [row.id, row])
+  );
+
+  return rows.map((row) => ({ ...byId.get(row.id), ...row }));
 }
 
 // =============================================================================
@@ -1190,7 +1248,7 @@ export async function getAppointment(
           .single()
       : db
           .from("appointments")
-          .select("*, patient:patients(id, name, phone, date_of_birth, gender)")
+          .select(`${APPOINTMENT_SELECT}, patient:patients(id, name, phone, date_of_birth, gender)`)
           .eq("id", id)
           .eq("clinic_id", profile.clinic_id)
           .is("deleted_at", null)
@@ -1229,9 +1287,18 @@ export async function getAppointment(
       });
     }
 
+    // Staff see the clinical free-text; a patient must not. The columns are
+    // withheld at the database level (20260907000100), so this is what puts
+    // them back for the audience entitled to them.
+    const resolved = isPatient
+      ? (appointment as AppointmentWithPatient)
+      : ((
+          await attachClinicalNotes(db, [appointment as AppointmentWithPatient & { id: string }])
+        )[0] as AppointmentWithPatient);
+
     return {
       data: {
-        ...(appointment as AppointmentWithPatient),
+        ...resolved,
         history,
       },
       error: null,
@@ -1291,7 +1358,7 @@ export async function getAppointments(filters?: {
         ? db.from("appointments").select(PATIENT_APPOINTMENT_SELECT, { count: "exact" })
         : db
             .from("appointments")
-            .select("*, patient:patients(id, name, phone, date_of_birth, gender)", { count: "exact" });
+            .select(`${APPOINTMENT_SELECT}, patient:patients(id, name, phone, date_of_birth, gender)`, { count: "exact" });
     query = query.is("deleted_at", null).order("scheduled_at", { ascending: false });
 
     // Staff: scope to clinic_id.
@@ -1375,7 +1442,13 @@ export async function getAppointments(filters?: {
       return { data: null, error: "Failed to fetch appointments." };
     }
 
-    const rows = (data ?? []) as AppointmentWithPatient[];
+    const rows =
+      profile.role === "patient"
+        ? ((data ?? []) as AppointmentWithPatient[])
+        : ((await attachClinicalNotes(
+            db,
+            (data ?? []) as (AppointmentWithPatient & { id: string })[]
+          )) as AppointmentWithPatient[]);
 
     // Resolve the treating doctor (dentist) display name for each row. The
     // appointment stores dentist_id (FK → profiles); we batch-fetch the names
