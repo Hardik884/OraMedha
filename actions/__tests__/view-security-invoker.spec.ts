@@ -145,9 +145,18 @@ async function tokenFor(email: string): Promise<string> {
  * Exact row count for a relation as seen by `token`, via PostgREST's
  * count=exact. Requests zero rows: the count is the assertion, and no patient
  * data needs to cross the wire to make it.
+ *
+ * `columns` defaults to `*`, but `appointments` and `treatments` cannot use it
+ * any more: 20260907000100_restrict_clinical_columns.sql revokes table-wide
+ * SELECT on both and re-grants it column-by-column, minus the withheld
+ * clinical fields. A table-level grant is what makes `SELECT *` resolve at
+ * all — once it's gone, `select=*` is refused for EVERY role, dentist
+ * included, which is documented in that migration as the intended
+ * consequence, not a regression. `id` is never withheld, so it is a safe,
+ * always-granted stand-in when counting rows is all that's needed.
  */
-async function countAs(relation: string, token: string): Promise<number> {
-  const res = await fetch(`${URL}/rest/v1/${relation}?select=*&limit=0`, {
+async function countAs(relation: string, token: string, columns = "*"): Promise<number> {
+  const res = await fetch(`${URL}/rest/v1/${relation}?select=${columns}&limit=0`, {
     headers: {
       apikey: ANON,
       Authorization: `Bearer ${token}`,
@@ -159,6 +168,9 @@ async function countAs(relation: string, token: string): Promise<number> {
   if (!total || total === "*") throw new Error(`no count for ${relation}: ${range}`);
   return Number(total);
 }
+
+/** Base tables whose column-level grants no longer permit `select=*`. */
+const COLUMN_RESTRICTED_BASE_TABLES: ReadonlySet<string> = new Set(["appointments", "treatments"]);
 
 /**
  * How many rows of `relation` this caller can actually obtain — where being
@@ -243,9 +255,10 @@ describe.skipIf(!LOCAL_UP)("public views must enforce RLS as the caller", () => 
   it.each(SOFT_DELETE_VIEWS)(
     "$view shows a dentist exactly what $base shows them",
     async ({ view, base }) => {
+      const baseColumns = COLUMN_RESTRICTED_BASE_TABLES.has(base) ? "id" : "*";
       const [viaView, viaBase] = await Promise.all([
         countAs(view, brain),
-        countAs(base, brain),
+        countAs(base, brain, baseColumns),
       ]);
       expect(viaView).toBe(viaBase);
     },

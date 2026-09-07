@@ -76,6 +76,22 @@ jobs:
       - name: Install (locked)
         run: npm ci
 
+      # lib/__tests__/server-action-surface.spec.ts is describe.skipIf(!BUILT)
+      # on .next/server/server-reference-manifest.json, which only next build
+      # produces. This job runs on its own fresh checkout — it does not
+      # inherit the static job's build — so without this step that spec
+      # silently skips in CI every time, and "Assert nothing skipped" would
+      # forever be failing on a check that never actually ran rather than on
+      # a real regression. Same placeholder values as the static job's Build
+      # step: build-time only, next build does not connect to Supabase.
+      - name: Build (so the server-action-surface spec can see the manifest)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:55321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-build-placeholder
+          SUPABASE_SERVICE_ROLE_KEY: ci-build-placeholder
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+        run: npm run build
+
       - name: Start Supabase
         # The CLI is a devDependency, so npx resolves the pinned version rather
         # than whatever the runner image happens to carry. Nothing is excluded:

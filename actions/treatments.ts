@@ -608,8 +608,11 @@ export async function getTreatment(
 
 // =============================================================================
 // getTreatmentsForPatient — list by patient, role-aware
-// Dentist: full record (internal_notes included)
-// Receptionist: internal_notes excluded
+// Dentist: every non-clinical column (internal_notes is withheld from the Data
+//   API itself by 20260907000100 — a dentist reads it per-treatment through
+//   getTreatment(), which projects it via the service-role client)
+// Receptionist: same list, minus nothing further — the columns below are
+//   already the non-clinical set
 // =============================================================================
 
 export async function getTreatmentsForPatient(
@@ -629,9 +632,15 @@ export async function getTreatmentsForPatient(
     // columns: they drive the payment totals on the patient profile, and
     // omitting them made a receptionist's "Total Cost" disagree with the
     // outstanding balance shown beside it.
+    //
+    // `"*"` used to be the dentist branch. It no longer works for ANY role —
+    // 20260907000100 revokes table-wide SELECT on `treatments` and re-grants it
+    // column-by-column, minus internal_notes, so `select=*` is refused outright
+    // (`permission denied for table treatments`), dentist included.
+    // TREATMENT_SELECT is exactly that granted column list.
     const selectFields =
       profile.role === "dentist"
-        ? "*"
+        ? TREATMENT_SELECT
         : "id, clinic_id, appointment_id, patient_id, treatment_type, patient_visible_notes, cost, opd_charged, opd_fee, xray_taken, xray_cost, status, performed_at, deleted_at, created_at, updated_at";
 
     const { data, error } = await db
@@ -842,7 +851,7 @@ export async function getAllTreatments(filters?: {
     let query = db
       .from("treatments")
       .select(
-        "*, patients!inner(id, name, phone)",
+        `${TREATMENT_SELECT}, patients!inner(id, name, phone)`,
         { count: "exact" }
       )
       .eq("clinic_id", profile.clinic_id)
