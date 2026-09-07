@@ -680,9 +680,11 @@ export async function getTreatmentsForAppointment(
       return { data: null, error: "Forbidden" };
     }
 
+    // `"*"` was the dentist branch here too, and it fails for every role after
+    // 20260907000100 — see the note in getTreatmentsForPatient above.
     const selectFields =
       profile.role === "dentist"
-        ? "*"
+        ? TREATMENT_SELECT
         : "id, clinic_id, appointment_id, patient_id, treatment_type, patient_visible_notes, cost, status, performed_at, deleted_at, created_at, updated_at";
 
     const { data, error } = await db
