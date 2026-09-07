@@ -19,9 +19,13 @@ const serverActionOrigins =
   process.env.NODE_ENV === "production" ? [] : ["localhost:3000", "127.0.0.1:3000"];
 
 const nextConfig: NextConfig = {
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
+  /*
+   * `eslint.ignoreDuringBuilds` was true here. It meant a lint error could not
+   * fail a deploy, on a project where nothing else ran lint either — there was
+   * no CI until .github/workflows/ci.yml. The suppression is removed rather than
+   * kept alongside CI: two places that can fail a build should not disagree
+   * about whether lint counts.
+   */
   /**
    * Security headers that never vary per request. Defined in
    * lib/security/headers.ts and asserted by its spec.

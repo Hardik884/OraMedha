@@ -59,6 +59,7 @@ const SERVICE =
 const BRAIN = "brain@dentgrow.test"; // dentist, My Dental Clinic
 const LIYING = "dentist@dentgrow.test"; // dentist, Dr. Liying's clinic
 const PATIENT = "patient@dentgrow.test"; // portal patient, Dr. Liying's clinic
+const RECEPTIONIST = "receptionist@dentgrow.test"; // receptionist, Dr. Liying's clinic
 
 const MY_CLINIC = "00000000-0000-0000-0000-000000000001";
 const PATIENT_ASHA = "b0000000-0000-4000-8000-000000000001";
@@ -91,6 +92,25 @@ const VIEWS: readonly { view: string; base: string }[] = [
     // table — correctly do not apply to it.
     view: "patient_data_consent_state",
     base: "data_consent_records",
+  },
+  {
+    // Added by 20260907000100_restrict_clinical_columns.sql. Unlike every other
+    // view here these two are SECURITY DEFINER, and deliberately so: the columns
+    // they project are withheld from `authenticated` at the column level, so an
+    // invoker view could not read them at all.
+    //
+    // That is not a return to the 20260902155414 defect. Those five views were
+    // definer views with NO predicate of their own, which is why an anonymous
+    // caller read every row in the database. These carry their authorisation in
+    // their own WHERE clause — the caller's clinic AND their role — so they are
+    // projections over rows the caller already holds. The sweep below is what
+    // proves the difference rather than asserting it.
+    view: "treatment_clinical_notes",
+    base: "treatments",
+  },
+  {
+    view: "appointment_clinical_notes",
+    base: "appointments",
   },
 ];
 
@@ -258,15 +278,64 @@ describe.skipIf(!LOCAL_UP)("public views must enforce RLS as the caller", () => 
     }
   });
 
-  // ── 5. Role separation through the views ────────────────────────────────
-  // internal_notes is dentist-only (CLAUDE.md §3). Before the fix a patient
-  // could read every clinical note in the database through active_treatments.
-  it("a patient cannot read clinical notes through a view", async () => {
-    const res = await fetch(
-      `${URL}/rest/v1/active_treatments?select=internal_notes&limit=0`,
-      { headers: { apikey: ANON, Authorization: `Bearer ${patient}`, Prefer: "count=exact" } },
-    );
-    expect(Number(res.headers.get("content-range")?.split("/")[1] ?? -1)).toBe(0);
+  // ── 5. Role separation: the clinical columns ────────────────────────────
+  // internal_notes is dentist-only (CLAUDE.md §3, §5.4). This assertion used to
+  // read active_treatments?select=internal_notes and require a count of 0.
+  //
+  // It now asserts something stronger, because the mechanism changed under it.
+  // 20260902155414 made the view honour RLS, so the patient's own row-scope
+  // returned nothing extra — but the COLUMN was still readable off the base
+  // table, and a count of 0 on one view never said otherwise. Reproduced before
+  // 20260907000100: a portal patient selecting internal_notes from `treatments`
+  // got the dentist's note back, as did a receptionist.
+  //
+  // The column is now withheld from `authenticated` outright, so the correct
+  // expectation is REFUSAL rather than an empty result. Asserting the old count
+  // here would fail against the safer database, which is how a test ends up
+  // arguing for weaker security — the same trap assertion 1 documents.
+  it("a patient cannot read internal_notes from the base table", async () => {
+    const res = await fetch(`${URL}/rest/v1/treatments?select=internal_notes&limit=1`, {
+      headers: { apikey: ANON, Authorization: `Bearer ${patient}` },
+    });
+    expect(res.ok, "internal_notes must not be selectable by a patient").toBe(false);
+  });
+
+  it("a receptionist cannot read internal_notes from the base table", async () => {
+    const receptionist = await tokenFor(RECEPTIONIST);
+    const res = await fetch(`${URL}/rest/v1/treatments?select=internal_notes&limit=1`, {
+      headers: { apikey: ANON, Authorization: `Bearer ${receptionist}` },
+    });
+    expect(res.ok, "internal_notes must not be selectable by a receptionist").toBe(false);
+  });
+
+  it("no view projects internal_notes any more", async () => {
+    // active_treatments used to carry it. If a future view reintroduces the
+    // column, every read of that view breaks for all roles — this says so with
+    // a name instead of a 500.
+    const res = await fetch(`${URL}/rest/v1/active_treatments?select=internal_notes&limit=1`, {
+      headers: { apikey: ANON, Authorization: `Bearer ${brain}` },
+    });
+    expect(res.ok, "active_treatments must not project internal_notes").toBe(false);
+  });
+
+  it("the clinical projections return nothing to a patient", async () => {
+    for (const view of ["treatment_clinical_notes", "appointment_clinical_notes"]) {
+      expect(await readableRowsAs(view, patient), `${view} leaked to a patient`).toBe(0);
+    }
+  });
+
+  it("treatment_clinical_notes returns nothing to a receptionist", async () => {
+    // Both staff roles may see an appointment's chief_complaints; only the
+    // dentist may see their own treatment notes.
+    const receptionist = await tokenFor(RECEPTIONIST);
+    expect(await readableRowsAs("treatment_clinical_notes", receptionist)).toBe(0);
+  });
+
+  it("a dentist still reads their own clinic's clinical notes", async () => {
+    // Non-vacuity: the four assertions above must be about authorisation, not
+    // about an empty table.
+    expect(await countAs("treatment_clinical_notes", brain)).toBeGreaterThan(0);
+    expect(await countAs("appointment_clinical_notes", brain)).toBeGreaterThan(0);
   });
 
   // ── 6. Patient scoping through the views ────────────────────────────────

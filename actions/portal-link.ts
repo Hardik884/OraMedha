@@ -1,482 +1,72 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { getClinicById } from "@/actions/clinics";
 import {
-  clearSignupClinic,
-  clearSignupPhone,
-  clearSignupEmail,
-} from "@/lib/clinic-session";
-import {
-  LinkPortalAccountSchema,
   type ActionResult,
   type PortalLinkStatus,
   type PortalUser,
   type Patient,
 } from "@/types";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AdminClient = any;
-
-/**
- * normalizePhone
- *
- * Strips all non-digit characters, then removes a leading country code if
- * the result is longer than 10 digits (handles +91, 91, 0 prefixes).
- * Returns the last 10 digits so that all of the following resolve identically:
- *   "9876543210"        → "9876543210"
- *   "+91 9876543210"    → "9876543210"
- *   "91-9876543210"     → "9876543210"
- *   "98765 43210"       → "9876543210"
- *   "+919876543210"     → "9876543210"
- *
- * This normalized form is used for lookups and for storing new self-registered
- * patient records so future lookups always succeed.
- */
-function normalizePhone(raw: string): string {
-  const digitsOnly = raw.replace(/\D/g, "");
-  // If we have more than 10 digits, trim to the last 10 (drops country codes)
-  return digitsOnly.length > 10 ? digitsOnly.slice(-10) : digitsOnly;
-}
-
-/**
- * isNextRedirectError — recognises errors thrown by Next.js redirect()/notFound().
- *
- * Next 15 no longer exports isRedirectError from next/navigation, but the
- * thrown error still carries a `digest` string starting with "NEXT_REDIRECT".
- * We catch and rethrow these so Next.js can perform the redirect.
- */
-function isNextRedirectError(err: unknown): boolean {
-  return (
-    !!err &&
-    typeof err === "object" &&
-    "digest" in err &&
-    typeof (err as { digest: unknown }).digest === "string" &&
-    ((err as { digest: string }).digest.startsWith("NEXT_REDIRECT") ||
-      (err as { digest: string }).digest.startsWith("NEXT_NOT_FOUND"))
-  );
-}
-
 /**
  * Portal Link Server Actions
  *
- * Manages the link between a Supabase Auth account and a patient record.
- * See CLAUDE.md §5.8 for the full portal linking architecture.
+ * READS the link between a Supabase Auth account and a patient record, and
+ * lets a linked patient edit their own contact details. It no longer CREATES
+ * that link, and it can no longer create a patient record at all.
  *
- * Two onboarding paths:
+ * See CLAUDE.md §5.8 for the portal linking architecture. The short version:
  *
- * A — Existing patient:
- *   Phone matches an active patients row → link user_id to that record. If
- *   more than one active patient in the clinic shares the phone (households,
- *   a parent booking for children — phone numbers are NOT required to be
- *   unique per clinic, see 20260822000000_drop_patient_phone_uniqueness.sql),
- *   the first match is used; a clinic in that position should encourage the
- *   patient to register a number of their own so they land on their own
- *   record next time.
- *   Preserves all existing clinical data.
+ *   - a patient record and an auth account are independent. Most patients
+ *     never have an account;
+ *   - the link is written in ONE place, actions/portal-activation.ts, at the
+ *     moment the patient proves control of the address their clinic put on
+ *     their record and chooses a password;
+ *   - nothing in either file accepts a clinic from the browser.
  *
- * B — New patient (self-registration):
- *   No phone match found. When confirmNew=true a new patients row is created
- *   (name + phone + clinic_id), then linked. The patient can immediately book
- *   appointments. Staff can enrich the record later.
+ * WHAT USED TO BE HERE
+ *   linkPortalAccount and _createAndLinkNewPatient — the self-registration
+ *   path, where a visitor picked a clinic, was matched to a patient by phone
+ *   number, and had a record created for them if no match was found. Removed;
+ *   the section header below records why. normalizePhone went with them: phone
+ *   is not unique even within one clinic
+ *   (20260822000000_drop_patient_phone_uniqueness.sql), which is precisely why
+ *   matching on it was the wrong idea.
  *
- * Key invariants preserved:
- *   - patient_portal_links.user_id UNIQUE  (one portal account per patient)
+ * Key invariants, unchanged:
+ *   - patient_portal_links.user_id UNIQUE    (one patient per portal account)
  *   - patient_portal_links.patient_id UNIQUE (one account per patient record)
- *   - clinic_id never stored in portal_links — always derived via patients.clinic_id
- *
- * NOT an invariant: patients.phone is not unique, even within a clinic — see
- * 20260822000000_drop_patient_phone_uniqueness.sql for why the earlier
- * uniqueness constraint was actively wrong (it blocked legitimate distinct
- * patients from sharing a household number). Every phone lookup in this file
- * is written to tolerate more than one match.
+ *   - clinic_id is never stored in portal_links — always derived via
+ *     patients.clinic_id
  */
-
-/**
- * Special sentinel returned when no patient record was found for the given phone
- * and the caller has NOT yet confirmed they want to create a new one.
- * The form uses this to switch to the "new patient" confirmation UI.
- */
-export type PortalLinkResult =
-  | { status: "linked" }
-  | { status: "not_found"; phone: string }   // no existing record — prompt for name
-  | { status: "error"; message: string };
 
 // =============================================================================
-// linkPortalAccount — called post-signup on /portal/setup
+// linkPortalAccount — REMOVED
+//
+// This was the self-service portal linking flow: it took a clinicId and a phone
+// number FROM THE BROWSER, searched that clinic for a matching patient, and —
+// when it found none — CREATED a new patient record from whatever name was
+// typed in (_createAndLinkNewPatient, deleted with it).
+//
+// Both halves are incompatible with how portal access works after 853e188:
+//
+//   - the clinic picker was the last place a visitor could assert which tenant
+//     they belong to. Eligibility is now decided by an address the CLINIC put
+//     on a record, and the clinic is read from that record;
+//   - creating a patient record from the portal is what produced the duplicate
+//     records clinics then had to merge. The person already existed, matched on
+//     a phone number that is not unique even within one clinic
+//     (20260822000000_drop_patient_phone_uniqueness.sql).
+//
+// /portal/setup stopped rendering the form that called this, but the action
+// itself stayed exported — and an exported "use server" function is a live
+// endpoint, not dead code. It is deleted here rather than left for the next
+// person to find, along with components/patient/PortalLinkForm.tsx.
+//
+// The replacement is actions/portal-activation.ts. Nothing in it accepts a
+// clinic from the browser, and it never creates a patient record.
 // =============================================================================
-
-export async function linkPortalAccount(
-  input: unknown
-): Promise<ActionResult<PortalLinkResult>> {
-  try {
-    const parsed = LinkPortalAccountSchema.safeParse(input);
-    if (!parsed.success) {
-      return {
-        data: null,
-        error: parsed.error.errors[0]?.message ?? "Invalid input",
-      };
-    }
-
-    const supabase = await createServerClient();
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) return { data: null, error: "Unauthorized" };
-
-    // Check if this user already has a portal link (UNIQUE constraint guard).
-    // Uses the user-scoped client — the portal_links RLS policy allows a linked
-    // user to read their own row, so this is safe and correct.
-    const { data: existingLink } = await supabase
-      .from("patient_portal_links")
-      .select("id")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (existingLink) {
-      // Already linked — redirect to portal
-      redirect("/portal");
-    }
-
-    // Guard: staff accounts (dentist/receptionist) must never go through portal
-    // linking. The linking flow upserts profiles.role = 'patient', which would
-    // overwrite a staff member's profile and demote them — corrupting their
-    // access. A staff user who lands here (e.g. by manually visiting
-    // /portal/setup) is refused before any write happens.
-    const { data: existingProfile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (
-      existingProfile &&
-      (existingProfile as { role: string }).role !== "patient"
-    ) {
-      return {
-        data: null,
-        error:
-          "This is a staff account and cannot be linked to the patient portal.",
-      };
-    }
-
-    // Validate the selected clinic. Every subsequent lookup/creation is scoped
-    // to this clinic so a phone number registered in another clinic is never
-    // matched (clinic isolation requirement).
-    const clinicCheck = await getClinicById(parsed.data.clinicId);
-    if (!clinicCheck.data) {
-      return { data: null, error: clinicCheck.error ?? "Invalid clinic selection." };
-    }
-    const selectedClinicId = clinicCheck.data.id;
-
-    // Use the admin client for the patient phone lookup.
-    //
-    // At this point in the flow the user has NO profile row and NO portal link.
-    // The patients RLS policies all require either:
-    //   • auth_role() = 'dentist'/'receptionist'  (reads from profiles — doesn't exist yet)
-    //   • id = auth_patient_id()                  (reads from portal_links — doesn't exist yet)
-    //
-    // auth_patient_id() returns NULL for an unlinked user, and NULL = id evaluates
-    // to NULL (not TRUE) in PostgreSQL, so every patients row is hidden.
-    // The user-scoped client therefore always returns zero rows, causing the
-    // lookup to fall through to the "not found" branch and create a duplicate.
-    //
-    // The admin client (service role) bypasses RLS and is the correct pattern
-    // here — this is a privileged onboarding lookup, not a patient data read.
-    // The lookup is explicitly scoped to selectedClinicId so cross-clinic phone
-    // collisions can never match.
-    const admin: AdminClient = createAdminClient();
-
-    const phone = normalizePhone(parsed.data.phone.trim());
-
-    // ── PATH A: try to find an existing patient by phone IN THIS CLINIC ───────
-    const { data: matches, error: searchErr } = await admin
-      .from("patients")
-      .select("id, name, clinic_id, phone")
-      .eq("clinic_id", selectedClinicId)
-      .ilike("phone", `%${phone}`)
-      .is("deleted_at", null)
-      .limit(5);
-
-    if (searchErr) {
-      console.error("[linkPortalAccount] search:", searchErr);
-      return { data: null, error: "Unable to search for your record. Please try again." };
-    }
-
-    const patients = (matches ?? []) as Pick<Patient, "id" | "name" | "clinic_id" | "phone">[];
-
-    if (patients.length === 0) {
-      // ── PATH B: no existing record ───────────────────────────────────────────
-      // If the caller hasn't confirmed they want a new record yet, send back the
-      // sentinel so the form can ask for their name before proceeding.
-      if (!parsed.data.confirmNew) {
-        return {
-          data: { status: "not_found", phone },
-          error: null,
-        };
-      }
-
-      // Caller confirmed → create a new patient record.
-      const name = parsed.data.name?.trim();
-      if (!name || name.length < 2) {
-        return { data: null, error: "Please enter your full name (at least 2 characters)." };
-      }
-
-      return await _createAndLinkNewPatient({
-        user,
-        phone,
-        name,
-        clinicId: selectedClinicId,
-      });
-    }
-
-    // ── PATH A continued: existing record found ───────────────────────────────
-    // Phone is not unique per clinic (20260822000000_drop_patient_phone_
-    // uniqueness.sql) — households and parent/child patients can legitimately
-    // share a number — so more than one active patient can genuinely match
-    // here. There is no signal in a phone number alone that picks the right
-    // one, so the first match is used; a patient linked to the wrong shared-
-    // phone record can be corrected by clinic staff from the patient profile.
-    const patient = patients[0];
-
-    // Check the patient isn't already linked to another auth account.
-    // Must use the admin client — the portal_links RLS policy only lets a user
-    // see their own row (WHERE user_id = auth.uid()), so querying by patient_id
-    // to detect a *different* user's link would silently return null and the
-    // guard would never fire.
-    const { data: patientLinkExists } = await admin
-      .from("patient_portal_links")
-      .select("id")
-      .eq("patient_id", patient.id)
-      .maybeSingle();
-
-    if (patientLinkExists) {
-      return {
-        data: null,
-        error:
-          "This patient record is already linked to another account. Please contact your clinic.",
-      };
-    }
-
-    return await _linkExistingPatient({ user, patient });
-  } catch (err) {
-    // next/navigation redirect throws — rethrow so Next.js handles it
-    if (isNextRedirectError(err)) {
-      throw err;
-    }
-    console.error("[linkPortalAccount] unexpected:", err);
-    return { data: null, error: "Unexpected error" };
-  }
-}
-
-// =============================================================================
-// Internal helpers
-// =============================================================================
-
-type AuthUser = { id: string; email?: string };
-
-/**
- * Clears the signup carry-through cookies once portal linking has completed.
- * Failures are non-fatal — the link already succeeded.
- */
-async function _clearSignupCookies(): Promise<void> {
-  try {
-    await clearSignupClinic();
-    await clearSignupPhone();
-    // The pending-verification address too: the account is confirmed and
-    // linked, so /patient/verify-email has nothing left to wait for.
-    await clearSignupEmail();
-  } catch {
-    // Cookie store may be unavailable in some execution contexts — ignore.
-  }
-}
-
-/**
- * Links an authenticated portal user to an existing patient record.
- * Creates the profiles row as a side-effect (first sign-in state).
- */
-async function _linkExistingPatient({
-  user,
-  patient,
-}: {
-  user: AuthUser;
-  patient: Pick<Patient, "id" | "name" | "clinic_id">;
-}): Promise<ActionResult<PortalLinkResult>> {
-  const admin: AdminClient = createAdminClient();
-
-  const { error: insertErr } = await admin
-    .from("patient_portal_links")
-    .insert({ patient_id: patient.id, user_id: user.id });
-
-  if (insertErr) {
-    console.error("[linkPortalAccount] portal link insert:", insertErr);
-    return { data: null, error: "Failed to link account. Please try again." };
-  }
-
-  // Mark the patient record as having completed portal setup.
-  await admin
-    .from("patients")
-    .update({ portal_registered_at: new Date().toISOString() })
-    .eq("id", patient.id)
-    .is("portal_registered_at", null); // only set once, don't overwrite
-
-  const { data: authUser } = await admin.auth.admin.getUserById(user.id);
-  const userEmail = authUser?.user?.email ?? "";
-
-  // Use upsert so a pre-existing profile row (from a prior partial attempt or
-  // retry) does not cause a unique-violation that rolls back the portal link.
-  // ignoreDuplicates: false means we update the row if it already exists, which
-  // is safe — the values are the same (same clinic_id, same role).
-  const { error: profileErr } = await admin.from("profiles").upsert(
-    {
-      id: user.id,
-      clinic_id: patient.clinic_id,
-      full_name: patient.name || userEmail.split("@")[0],
-      role: "patient",
-    },
-    { onConflict: "id" }
-  );
-
-  if (profileErr) {
-    // Roll back the portal link to avoid a half-linked state
-    console.error("[linkPortalAccount] profile insert:", profileErr);
-    await admin
-      .from("patient_portal_links")
-      .delete()
-      .eq("user_id", user.id)
-      .eq("patient_id", patient.id);
-    return {
-      data: null,
-      error: "Account setup failed while creating your profile. Please try again.",
-    };
-  }
-
-  await _clearSignupCookies();
-  revalidatePath("/portal");
-  return { data: { status: "linked" }, error: null };
-}
-
-/**
- * Creates a new patient record for a self-registering user, then links it.
- *
- * clinic_id is the clinic the patient selected at signup — passed in by the
- * caller after validation. There is no "first clinic" fallback: in a
- * multi-clinic deployment the clinic must always be explicit so records land
- * in the correct tenant and phone numbers stay isolated per clinic.
- */
-async function _createAndLinkNewPatient({
-  user,
-  phone,
-  name,
-  clinicId,
-}: {
-  user: AuthUser;
-  phone: string;
-  name: string;
-  clinicId: string;
-}): Promise<ActionResult<PortalLinkResult>> {
-  const admin: AdminClient = createAdminClient();
-
-  // Guard: don't create a duplicate patient if this phone already exists in the
-  // clinic (race condition between two concurrent signups with the same number).
-  // phone is already the 10-digit normalized form, so the suffix search matches
-  // any stored format (with or without a country code prefix).
-  //
-  // limit(1) rather than maybeSingle(): phone is no longer unique per clinic
-  // (20260822000000_drop_patient_phone_uniqueness.sql — households and
-  // parent/child patients legitimately share a number), so this lookup can
-  // now match more than one row. maybeSingle() treats >1 row as an error and
-  // returns { data: null }, which silently disabled this guard for any phone
-  // already shared by two patients — the function would fall through and
-  // create a third, duplicate record instead of linking to one of the
-  // existing two. limit(1) picks a match deterministically either way.
-  const { data: raceMatches } = await admin
-    .from("patients")
-    .select("id")
-    .eq("clinic_id", clinicId)
-    .ilike("phone", `%${phone}`)
-    .is("deleted_at", null)
-    .limit(1);
-
-  const raceCheck = raceMatches?.[0] as { id: string } | undefined;
-
-  if (raceCheck) {
-    // A record appeared between the first lookup and now — link to it instead.
-    return await _linkExistingPatient({
-      user,
-      patient: { id: raceCheck.id, name, clinic_id: clinicId },
-    });
-  }
-
-  // Create the new patient record, flagged as self-registered.
-  // phone is already the 10-digit normalized form — store it as-is so future
-  // lookups via the same normalization path always match cleanly.
-  const { data: newPatient, error: patientErr } = await admin
-    .from("patients")
-    .insert({
-      clinic_id: clinicId,
-      name,
-      phone,
-      is_self_registered: true,
-      portal_registered_at: new Date().toISOString(),
-    })
-    .select("id, clinic_id")
-    .single();
-
-  if (patientErr || !newPatient) {
-    console.error("[linkPortalAccount] patient insert:", patientErr);
-    return { data: null, error: "Failed to create your patient record. Please try again." };
-  }
-
-  // Now link the new patient record to the auth account.
-  const { error: linkErr } = await admin
-    .from("patient_portal_links")
-    .insert({ patient_id: newPatient.id, user_id: user.id });
-
-  if (linkErr) {
-    // Roll back the patient record to keep things clean.
-    console.error("[linkPortalAccount] portal link insert (new patient):", linkErr);
-    await admin.from("patients").delete().eq("id", newPatient.id);
-    return { data: null, error: "Failed to link your account. Please try again." };
-  }
-
-  // Create the profile row.
-  const { data: authUser } = await admin.auth.admin.getUserById(user.id);
-  const userEmail = authUser?.user?.email ?? "";
-
-  const { error: profileErr } = await admin.from("profiles").upsert(
-    {
-      id: user.id,
-      clinic_id: clinicId,
-      full_name: name || userEmail.split("@")[0],
-      role: "patient",
-    },
-    { onConflict: "id" }
-  );
-
-  if (profileErr) {
-    // Roll back both patient record and portal link.
-    console.error("[linkPortalAccount] profile insert (new patient):", profileErr);
-    await admin
-      .from("patient_portal_links")
-      .delete()
-      .eq("user_id", user.id);
-    await admin.from("patients").delete().eq("id", newPatient.id);
-    return {
-      data: null,
-      error: "Account setup failed while creating your profile. Please try again.",
-    };
-  }
-
-  await _clearSignupCookies();
-  revalidatePath("/portal");
-  return { data: { status: "linked" }, error: null };
-}
 
 // =============================================================================
 // getLinkedPatient — resolves authenticated portal user's patient_id + clinic_id

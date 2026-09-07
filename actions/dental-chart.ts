@@ -18,6 +18,7 @@ import {
   type DentitionType,
   type Treatment,
 } from "@/types";
+import { TREATMENT_SELECT } from "@/lib/appointments/data-api-columns";
 
 /**
  * Dental Chart Server Actions
@@ -350,7 +351,7 @@ export async function linkTreatmentToTooth(input: unknown): Promise<ActionResult
     // is the sole source of truth for which patient it belongs to.
     const { data: existing, error: fetchError } = await db
       .from("treatments")
-      .select("*")
+      .select(TREATMENT_SELECT)
       .eq("id", parsed.data.treatment_id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
@@ -372,7 +373,7 @@ export async function linkTreatmentToTooth(input: unknown): Promise<ActionResult
       .eq("id", parsed.data.treatment_id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
-      .select()
+      .select(TREATMENT_SELECT)
       .single();
 
     if (error) {
@@ -432,7 +433,7 @@ export async function unlinkTreatmentFromTooth(treatmentId: string): Promise<Act
       .eq("id", treatmentId)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
-      .select()
+      .select(TREATMENT_SELECT)
       .single();
 
     if (error) {

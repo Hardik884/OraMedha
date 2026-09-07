@@ -31,6 +31,13 @@ export default defineConfig({
     ],
     environment: "node",
     /*
+     * Runs before every spec file. Refuses to start the suite when the ambient
+     * Supabase URL points at a hosted project — application code under test
+     * (createAdminClient) reads that variable directly and writes with the
+     * service-role key. See test/guard-remote-database.ts.
+     */
+    setupFiles: ["./test/guard-remote-database.ts"],
+    /*
      * Run spec FILES one at a time.
      *
      * A large share of this suite is integration specs that seed and tear down

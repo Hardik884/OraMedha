@@ -32,6 +32,8 @@ import {
 import { computeConsultantSplit } from "@/lib/billing/revenue";
 import { syncToothForTreatment } from "@/lib/dental-chart/sync";
 import { resolveDentistIdentities } from "@/lib/staff/dentist-directory";
+import { TREATMENT_SELECT } from "@/lib/appointments/data-api-columns";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * Revenue-distribution columns to persist on a treatment.
@@ -249,7 +251,7 @@ export async function createTreatment(
         dentition_type: parsed.data.dentition_type ?? null,
         ...revenue.fields,
       })
-      .select()
+      .select(TREATMENT_SELECT)
       .single();
 
     if (error) {
@@ -328,9 +330,18 @@ export async function updateTreatment(
     // rather than only what it changed to. Fetched here, before any of the
     // derived values below are recomputed, so the comparison is against the
     // record as it actually stood.
-    const { data: beforeRow } = await db
+    //
+    // Read as the SERVICE ROLE because internal_notes is one of the fields
+    // treatment_history tracks, and 20260907000100 withholds that column from
+    // `authenticated`. Through the caller's own client the "before" value would
+    // come back undefined and every save would record a spurious change to it —
+    // an audit trail that reports edits nobody made is worse than one that
+    // reports none. Authorisation is already fully resolved above (dentist,
+    // and the clinic_id filter below is the caller's own), so this reads
+    // exactly the row the caller could already reach.
+    const { data: beforeRow } = await createAdminClient()
       .from("treatments")
-      .select("*")
+      .select(`${TREATMENT_SELECT}, internal_notes`)
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
@@ -426,7 +437,7 @@ export async function updateTreatment(
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
-      .select()
+      .select(TREATMENT_SELECT)
       .single();
 
     if (error) {
@@ -568,7 +579,7 @@ export async function getTreatment(
 
     const { data, error } = await db
       .from("treatments")
-      .select("*")
+      .select(TREATMENT_SELECT)
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
