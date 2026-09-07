@@ -5,7 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { recordSecurityEvent, subjectHash } from "@/lib/security/events";
 import { describeEmailSendFailure } from "@/lib/auth/verification";
 import {
-  consumeSendQuota,
+  consumeSendQuotaShared,
   SEND_ACTIVATION,
 } from "@/lib/security/rate-limit";
 import type { ActionResult } from "@/types";
@@ -160,7 +160,7 @@ export async function requestActivation(
   // allowance exactly like an eligible one. Throttling only the addresses that
   // turn out to be real would make the ceiling itself the enumeration oracle
   // that every other line in this file is written to avoid.
-  const quota = consumeSendQuota(SEND_ACTIVATION, subjectHash(email));
+  const quota = await consumeSendQuotaShared(SEND_ACTIVATION, subjectHash(email));
   if (quota.exhausted) {
     recordSecurityEvent("PORTAL_ACTIVATION_REFUSED", {
       reason: "send_quota",

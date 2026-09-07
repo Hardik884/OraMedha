@@ -14,11 +14,11 @@ import {
 import { describeEmailSendFailure } from "@/lib/auth/verification";
 import { recordSecurityEvent, subjectHash } from "@/lib/security/events";
 import {
-  checkRateLimit,
-  clearFailures,
-  consumeSendQuota,
+  checkRateLimitShared,
+  clearFailuresShared,
+  consumeSendQuotaShared,
   MAX_SENDS,
-  recordFailure,
+  recordFailureShared,
   SEND_PASSWORD_RESET,
 } from "@/lib/security/rate-limit";
 import type { ActionResult } from "@/types";
@@ -135,7 +135,7 @@ async function authenticate(
   // runs into. See lib/security/rate-limit.ts for what it is and is not.
   const subject = subjectHash(email);
 
-  const before = checkRateLimit(subject);
+  const before = await checkRateLimitShared(subject);
   if (before.locked) {
     // The password is not even checked. Answering identically whether or not
     // the account exists keeps this from becoming an account-enumeration
@@ -153,7 +153,7 @@ async function authenticate(
     await supabase.auth.signInWithPassword({ email, password });
 
   if (authError || !authData.user) {
-    const after = recordFailure(subject);
+    const after = await recordFailureShared(subject);
 
     recordSecurityEvent("AUTH_FAILED", {
       subjectHash: subject,
@@ -174,7 +174,7 @@ async function authenticate(
 
   // A success clears the counter, so a week-old mistyped password does not
   // combine with today's to lock someone out of their clinic.
-  clearFailures(subject);
+  await clearFailuresShared(subject);
 
   const { data } = await supabase
     .from("profiles")
@@ -651,7 +651,7 @@ export async function requestPasswordReset(
   // Consumed BEFORE the audience is resolved, so an address with no account
   // burns allowance exactly like one with an account. Otherwise the ceiling
   // itself would answer the question the generic response refuses to.
-  const quota = consumeSendQuota(SEND_PASSWORD_RESET, subjectHash(email));
+  const quota = await consumeSendQuotaShared(SEND_PASSWORD_RESET, subjectHash(email));
   if (quota.exhausted) {
     recordSecurityEvent("AUTH_FAILED", {
       subjectHash: subjectHash(email),

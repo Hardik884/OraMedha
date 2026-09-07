@@ -19,10 +19,13 @@
  *   lockout, so an attacker spreading attempts across many IPs against one
  *   dentist's account still runs into a wall.
  *
- *   → A shared store (Redis, or a Postgres table) is the upgrade. Deliberately
- *     not built here: OraMedha runs no such service today, and a fake
- *     distributed limiter that silently is not one is worse than an honest
- *     local one. See docs/SECURITY.md.
+ *   → THE SHARED STORE NOW EXISTS. 20260907000300 puts these counters in a
+ *     Postgres table, and the application calls the *Shared functions at the
+ *     bottom of this file. The in-memory implementation below is no longer the
+ *     control — it is the FALLBACK the shared path uses when the database is
+ *     unreachable, so a query timeout degrades the limiter instead of removing
+ *     it. It is also what the unit tests exercise, because the policy is the
+ *     part worth testing without a database.
  *
  * WHY A LOCKOUT AND NOT A BLANKET DELAY
  *   A delay costs the attacker nothing they cannot parallelise. A lockout on a
@@ -164,11 +167,12 @@ export function resetAllRateLimits(): void {
 // password-reset request and an activation request do not consume each other's
 // allowance, and neither touches the sign-in counter.
 //
-// SAME HONEST CAVEAT AS ABOVE: in-process and in-memory. Per serverless
-// instance, cleared by a restart. Supabase Auth's own per-hour mailer limit
-// sits underneath and is the distributed one. This adds what that cannot — a
-// PER-ADDRESS ceiling, so one address cannot absorb the whole clinic's hourly
-// allowance before anyone else can reset a password.
+// Shares the shared store too: consumeSendQuotaShared() at the bottom of this
+// file is what the application calls, and the in-memory version below is its
+// fallback. Supabase Auth's own per-hour mailer limit sits underneath and is
+// the distributed one. This adds what that cannot — a PER-ADDRESS ceiling, so
+// one address cannot absorb the whole clinic's hourly allowance before anyone
+// else can reset a password.
 
 /** Sends allowed for one address inside SEND_WINDOW_MS. */
 export const MAX_SENDS = 3;
@@ -227,4 +231,137 @@ export function consumeSendQuota(
 
   bucket.failures.push(now);
   return { exhausted: false, retryAfterSeconds: 0 };
+}
+
+// =============================================================================
+// THE SHARED STORE
+// =============================================================================
+//
+// Everything above is per-process and in-memory, and the header says plainly
+// what that costs: on a serverless platform each instance keeps its own
+// counter, so the effective limit across N warm instances is N times the
+// configured one, and a cold start resets it. On a platform that scales to
+// zero, an 8-attempt lockout is close to no lockout at all.
+//
+// These are the same controls against a table both instances share
+// (20260907000300). The POLICY does not move — MAX_ATTEMPTS, WINDOW_MS,
+// LOCKOUT_MS, MAX_SENDS and SEND_WINDOW_MS are still the only definition of the
+// numbers, and they are passed into SQL as arguments rather than restated
+// there. Only the STORE moves, which is why the unit tests above keep testing
+// the arithmetic without a database.
+//
+// Each SQL function does its read-modify-write under a row lock, so two
+// instances racing produce one correct count instead of two independent ones.
+//
+// WHY service_role
+//   A sign-in throttle is consumed by a caller who has not authenticated yet.
+//   If `anon` could execute these, an attacker would simply clear their own
+//   lockout. EXECUTE is granted to service_role alone and reached through the
+//   admin client, which exists only on the server.
+//
+// WHEN THE DATABASE IS UNREACHABLE
+//   Every function below falls back to the in-memory counter rather than
+//   failing open. A throttle that stops throttling because a query timed out
+//   is worse than a local one, and refusing the sign-in outright would turn a
+//   database blip into a clinic-wide outage. The fallback is logged, because
+//   "the shared limiter is not working" is something an operator must be able
+//   to see.
+
+import { createAdminClient } from "@/lib/supabase/admin";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type ThrottleRow = {
+  locked: boolean;
+  retry_after_seconds: number;
+  failures: number;
+};
+
+function admin(): any {
+  return createAdminClient();
+}
+
+/** Current state for an identifier, recording nothing. */
+export async function checkRateLimitShared(key: string): Promise<RateLimitState> {
+  try {
+    const { data, error } = await admin().rpc("throttle_check", {
+      p_key: key,
+      p_window_ms: WINDOW_MS,
+    });
+    if (error) throw new Error(error.message);
+
+    const row = (data as ThrottleRow[] | null)?.[0];
+    if (!row) return { locked: false, retryAfterSeconds: 0, failures: 0 };
+
+    return {
+      locked: row.locked,
+      retryAfterSeconds: row.retry_after_seconds,
+      failures: row.failures,
+    };
+  } catch (err) {
+    console.error("[rate-limit] shared check failed, using in-process counter:", err);
+    return checkRateLimit(key);
+  }
+}
+
+/** Records a failure and returns the resulting state. */
+export async function recordFailureShared(key: string): Promise<RateLimitState> {
+  try {
+    const { data, error } = await admin().rpc("throttle_record_failure", {
+      p_key: key,
+      p_max: MAX_ATTEMPTS,
+      p_window_ms: WINDOW_MS,
+      p_lockout_ms: LOCKOUT_MS,
+    });
+    if (error) throw new Error(error.message);
+
+    const row = (data as ThrottleRow[] | null)?.[0];
+    if (!row) return recordFailure(key);
+
+    return {
+      locked: row.locked,
+      retryAfterSeconds: row.retry_after_seconds,
+      failures: row.failures,
+    };
+  } catch (err) {
+    console.error("[rate-limit] shared record failed, using in-process counter:", err);
+    return recordFailure(key);
+  }
+}
+
+/** Clears the counter for an identifier. Called on a SUCCESSFUL sign-in. */
+export async function clearFailuresShared(key: string): Promise<void> {
+  // Cleared locally too: if the shared call fails, the in-process counter is
+  // what the fallback above will read, and it must not still hold the failures
+  // this success just forgave.
+  clearFailures(key);
+  try {
+    const { error } = await admin().rpc("throttle_clear", { p_key: key });
+    if (error) throw new Error(error.message);
+  } catch (err) {
+    console.error("[rate-limit] shared clear failed:", err);
+  }
+}
+
+/** Consume one send for `namespace` + `subject`, and report whether it was allowed. */
+export async function consumeSendQuotaShared(
+  namespace: string,
+  subject: string
+): Promise<SendQuotaState> {
+  const key = `${namespace}:${subject}`;
+  try {
+    const { data, error } = await admin().rpc("throttle_consume_send", {
+      p_key: key,
+      p_max: MAX_SENDS,
+      p_window_ms: SEND_WINDOW_MS,
+    });
+    if (error) throw new Error(error.message);
+
+    const row = (data as { exhausted: boolean; retry_after_seconds: number }[] | null)?.[0];
+    if (!row) return consumeSendQuota(namespace, subject);
+
+    return { exhausted: row.exhausted, retryAfterSeconds: row.retry_after_seconds };
+  } catch (err) {
+    console.error("[rate-limit] shared send quota failed, using in-process counter:", err);
+    return consumeSendQuota(namespace, subject);
+  }
 }

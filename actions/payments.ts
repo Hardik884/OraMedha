@@ -572,68 +572,51 @@ export async function getPatientsWithOutstandingBalance(): Promise<
       return { data: null, error: "Forbidden" };
     }
 
-    const cid = profile.clinic_id;
+    /*
+     * One aggregate in the database, not three unbounded table reads.
+     *
+     * This used to fetch every patient, every treatment and every payment in
+     * the clinic and reduce them in JavaScript. PostgREST caps a response at
+     * max_rows (1000 in supabase/config.toml) and TRUNCATES SILENTLY past it —
+     * no error, no signal — so once a clinic passed a thousand treatments or
+     * payments the balances here started coming out wrong, in whichever
+     * direction the truncation fell. actions/messaging.ts builds the payment
+     * reminder list from this function, so the visible failure would have been
+     * chasing patients who had already paid.
+     *
+     * clinic_outstanding_balances() (20260907000200) mirrors
+     * lib/billing/balance.ts term for term and returns one row per patient who
+     * owes something, so there is nothing left to truncate. Its clinic comes
+     * from auth_clinic_id() inside the function and its role check is its own —
+     * no clinic id is passed from here.
+     */
+    const { data, error } = await db.rpc("clinic_outstanding_balances");
 
-    // Fetch all active patients with their treatment costs and payments
-    const [{ data: patients }, { data: treatmentTotals }, { data: paymentTotals }] =
-      await Promise.all([
-        db
-          .from("patients")
-          .select("id, name, phone, payment_plan_until")
-          .eq("clinic_id", cid)
-          .is("deleted_at", null),
-        db
-          .from("treatments")
-          .select("patient_id, cost, opd_charged, opd_fee, xray_taken, xray_cost, status")
-          .eq("clinic_id", cid)
-          .is("deleted_at", null),
-        db
-          .from("payments")
-          .select("patient_id, amount")
-          .eq("clinic_id", cid)
-          .is("deleted_at", null),
-      ]);
+    if (error) {
+      console.error("[getPatientsWithOutstandingBalance]", error);
+      return { data: null, error: "Failed to load outstanding balances." };
+    }
 
-    if (!patients) return { data: [], error: null };
-
-    // Aggregate per patient — only billable treatments contribute to dues.
-    const costMap = new Map<string, number>();
-    const paidMap = new Map<string, number>();
-
-    // treatmentTotalCharge applies the billable-status rule AND adds the OPD and
-    // X-ray fees. This loop previously summed `cost` alone while selecting the
-    // OPD columns it never read, so a patient whose only dues were a
-    // consultation or a radiograph was absent from this list entirely.
-    for (const t of (treatmentTotals ?? []) as {
+    const rows = (data ?? []) as Array<{
       patient_id: string;
-      cost: number;
-      status: string;
-      opd_charged: boolean | null;
-      opd_fee: number | null;
-      xray_taken: boolean | null;
-      xray_cost: number | null;
-    }[]) {
-      costMap.set(t.patient_id, (costMap.get(t.patient_id) ?? 0) + treatmentTotalCharge(t));
-    }
+      name: string;
+      phone: string | null;
+      payment_plan_until: string | null;
+      balance: number | string;
+    }>;
 
-    for (const p of (paymentTotals ?? []) as { patient_id: string; amount: number }[]) {
-      paidMap.set(p.patient_id, (paidMap.get(p.patient_id) ?? 0) + Number(p.amount ?? 0));
-    }
-
-    const result = (
-      patients as { id: string; name: string; phone: string | null; payment_plan_until: string | null }[]
-    )
-      .map((p) => ({
-        id: p.id,
-        name: p.name,
-        phone: p.phone,
-        balance: Math.max(0, (costMap.get(p.id) ?? 0) - (paidMap.get(p.id) ?? 0)),
-        paymentPlanUntil: p.payment_plan_until,
-      }))
-      .filter((p) => p.balance > 0)
-      .sort((a, b) => b.balance - a.balance);
-
-    return { data: result, error: null };
+    return {
+      data: rows.map((r) => ({
+        id: r.patient_id,
+        name: r.name,
+        phone: r.phone,
+        // numeric arrives as a string over PostgREST; every caller does
+        // arithmetic and formatting on it.
+        balance: Number(r.balance ?? 0),
+        paymentPlanUntil: r.payment_plan_until,
+      })),
+      error: null,
+    };
   } catch (err) {
     console.error("[getPatientsWithOutstandingBalance] unexpected:", err);
     return { data: null, error: "Unexpected error" };

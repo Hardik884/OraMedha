@@ -35,6 +35,38 @@ every clinical field (`20260903000100`). Before that, a portal account holding
 only the public anon key could move its own record into another clinic and
 rewrite the clinician's notes.
 
+✅ The same defect on `appointments` is closed by `20260907000000`. Its
+`WITH CHECK` asserted only `patient_id = auth_patient_id()` — a column the
+caller never changes — so a portal patient could reschedule themselves to any
+instant, set `status = 'completed'` without the cascade that increments visits
+and writes history, set a 600-minute duration, and move the appointment into
+another clinic. All four were reproduced against a real database before the fix.
+
+The new policy pins by **deny-list**: every column except `status` and
+`updated_at` must equal its pre-update value, so a column added by a later
+migration is frozen by default. `20260903000100` used an allow-list and was
+already stale a day later, when `20260904184013` added `patients.email` without
+adding it to the pin.
+
+✅ **Clinical columns are withheld at the COLUMN level** (`20260907000100`).
+`treatments.internal_notes` and the appointment clinical free-text were
+protected only by views that omit them, while patients and receptionists also
+held a `SELECT` policy on the base table. Reproduced: a portal patient read
+their dentist's `internal_notes` and `oral_findings`; a receptionist read every
+`internal_notes` in their clinic.
+
+RLS is row-level and every user of this product arrives as the same database
+role, so no policy can express "this column, but only for a dentist". The
+columns are withheld by GRANT and read back through SECURITY DEFINER
+projections (`treatment_clinical_notes`, `appointment_clinical_notes`) that
+carry clinic **and** role in their own `WHERE` clause.
+
+🟨 Consequence worth knowing: a table-level grant subsumes column grants, so the
+table grant had to be revoked and re-granted per column, and `SELECT *` on those
+two tables now fails for every role. `lib/appointments/data-api-columns.ts` is
+the replacement, and a column added later is **unreadable until granted** — a
+deliberate fail-closed default.
+
 🟨 **FORCE ROW LEVEL SECURITY is not enabled.** It is genuine defence in depth
 against the whole class of defect the views represented, and it also subjects
 the table *owner* to RLS — which affects migration-time DML and `supabase/seed.sql`.
@@ -58,10 +90,18 @@ at the wrong door is refused and signed straight back out.
 minutes locks an identifier for 15 minutes. Supabase Auth limits per IP; this
 is the limit an attacker spreading attempts across many IPs still hits.
 
-🟨 It is **in-process**. On serverless each warm instance keeps its own counter,
-so the effective limit is per instance, and a restart clears it. A shared store
-(Redis, or a Postgres table) is the upgrade. This is stated in the module rather
-than left to be discovered.
+✅ It is **shared across instances** since `20260907000300`. The counters live
+in `security_throttle` and each read-modify-write happens under a row lock, so
+eight attempts means eight attempts however many instances are warm. It was
+in-process before that, which on a platform that scales to zero made the lockout
+close to decorative.
+
+The SQL functions are executable by `service_role` only and are called through
+the admin client. That matters because the caller of a sign-in throttle is
+anonymous at the moment it runs — had `anon` held EXECUTE, an attacker could
+clear their own lockout. The in-memory counter remains as the FALLBACK when the
+database is unreachable, so a query timeout degrades the limiter rather than
+removing it.
 
 ✅ **TOTP two-step verification**, enrolled from Clinic Settings. Anyone who has
 enrolled is challenged on every sign-in, enforced in middleware so navigating
@@ -93,9 +133,9 @@ The quota is consumed **before** the address is checked for existence, so an
 unknown address burns allowance exactly like a known one. Otherwise the throttle
 itself would answer the question the deliberately generic responses refuse to.
 
-🟨 Same in-process caveat as the lockout above. Supabase Auth's own per-hour
-mailer limit is the distributed layer underneath; this adds the per-address
-ceiling that layer does not have.
+✅ Shared across instances on the same store as the lockout above
+(`20260907000300`). Supabase Auth's own per-hour mailer limit is the layer
+underneath; this adds the per-address ceiling that layer does not have.
 
 ⚙️ **CAPTCHA / bot protection** is configurable in `supabase/config.toml`
 (`[auth.captcha]`) and needs an hCaptcha or Turnstile account. **Not configured,

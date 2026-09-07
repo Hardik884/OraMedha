@@ -30,6 +30,7 @@ import type {
   PaymentMethod,
   AppointmentStatus,
 } from "@/types";
+import { fetchAllRows } from "./fetch-all";
 import { computeClinicOutstandingBalance, isBillableTreatment } from "@/lib/billing/balance";
 import { treatmentClinicShare } from "@/lib/billing/revenue";
 import { sumEarnedConsultantPayouts } from "@/lib/billing/payout";
@@ -288,30 +289,49 @@ export async function getAnalyticsSummary(
 
   const today = todayDate;
 
+  /*
+   * Every row-returning query below goes through fetchAllRows.
+   *
+   * PostgREST caps a response at max_rows (1000) and truncates SILENTLY past
+   * it — 200 OK, no error, fewer rows. Several of these are not even date-
+   * bounded (every treatment and every patient in the clinic), so every figure
+   * on this dashboard was correct only while the clinic was small and would
+   * then have drifted downward with nothing to indicate it. See
+   * lib/analytics/fetch-all.ts.
+   *
+   * newPatientsMonthRes is exempt: it is a head-only exact COUNT, which the cap
+   * does not apply to.
+   */
   const [
-    apptRes, apptTodayRes, patientsRes, newPatientsMonthRes,
-    paymentsRes, treatmentsRes, followUpsRes, queueTodayRes,
-    consultancyRes, allPaymentsRes,
+    appointments, appointmentsToday, patients, newPatientsMonthRes,
+    payments, treatments, followUps, queueToday,
+    consultancyRows, allPayments,
   ] = await Promise.all([
-    supabase
-      .from("appointments")
-      // patient_id is needed to scope "returning"/"active" patients to THIS
-      // range's completed visits, instead of the lifetime total_visits column
-      // (audit B7).
-      .select("status, source, scheduled_at, duration_minutes, patient_id")
-      .eq("clinic_id", clinicId).is("deleted_at", null)
-      .gte("scheduled_at", startOf(dateFrom, timezone)).lte("scheduled_at", endOf(dateTo, timezone)),
+    fetchAllRows<ApptRow>(() =>
+      supabase
+        .from("appointments")
+        // patient_id is needed to scope "returning"/"active" patients to THIS
+        // range's completed visits, instead of the lifetime total_visits column
+        // (audit B7).
+        .select("status, source, scheduled_at, duration_minutes, patient_id")
+        .eq("clinic_id", clinicId).is("deleted_at", null)
+        .gte("scheduled_at", startOf(dateFrom, timezone)).lte("scheduled_at", endOf(dateTo, timezone)),
+      "analytics: appointments in range"),
 
-    supabase
-      .from("appointments")
-      .select("status, source")
-      .eq("clinic_id", clinicId).is("deleted_at", null)
-      .gte("scheduled_at", todayStartIso).lte("scheduled_at", todayEndIso),
+    fetchAllRows<Pick<ApptRow, "status" | "source">>(() =>
+      supabase
+        .from("appointments")
+        .select("status, source")
+        .eq("clinic_id", clinicId).is("deleted_at", null)
+        .gte("scheduled_at", todayStartIso).lte("scheduled_at", todayEndIso),
+      "analytics: appointments today"),
 
-    supabase
-      .from("patients")
-      .select("id, created_at, total_visits, last_visit")
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+    fetchAllRows<Pick<PatientRow, "id" | "created_at" | "total_visits" | "last_visit">>(() =>
+      supabase
+        .from("patients")
+        .select("id, created_at, total_visits, last_visit")
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: patients"),
 
     supabase
       .from("patients")
@@ -319,77 +339,70 @@ export async function getAnalyticsSummary(
       .eq("clinic_id", clinicId).is("deleted_at", null)
       .gte("created_at", monthStartIso),
 
-    supabase
-      .from("payments")
-      .select("amount, patient_id, payment_date")
-      .eq("clinic_id", clinicId).is("deleted_at", null)
-      .gte("payment_date", dateFrom).lte("payment_date", dateTo),
+    fetchAllRows<Pick<PaymentRow, "amount" | "patient_id" | "payment_date">>(() =>
+      supabase
+        .from("payments")
+        .select("amount, patient_id, payment_date")
+        .eq("clinic_id", clinicId).is("deleted_at", null)
+        .gte("payment_date", dateFrom).lte("payment_date", dateTo),
+      "analytics: payments in range"),
 
-    supabase
-      .from("treatments")
-      // id / consultant_id / the ancillary-charge columns / performed_at are
-      // required by the payout allocator (lib/billing/payout.ts), which needs
-      // to know each treatment's full charge and when it happened.
-      .select(
-        "id, cost, clinic_share, consultant_share, consultant_id, patient_id, status, " +
-          "opd_charged, opd_fee, xray_taken, xray_cost, performed_at, created_at"
-      )
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+    fetchAllRows<Pick<TreatmentRow,
+      | "id" | "cost" | "clinic_share" | "consultant_share" | "consultant_id"
+      | "patient_id" | "status" | "opd_charged" | "opd_fee" | "xray_taken"
+      | "xray_cost" | "performed_at" | "created_at">>(() =>
+      supabase
+        .from("treatments")
+        // id / consultant_id / the ancillary-charge columns / performed_at are
+        // required by the payout allocator (lib/billing/payout.ts), which needs
+        // to know each treatment's full charge and when it happened.
+        .select(
+          "id, cost, clinic_share, consultant_share, consultant_id, patient_id, status, " +
+            "opd_charged, opd_fee, xray_taken, xray_cost, performed_at, created_at"
+        )
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: treatments"),
 
-    supabase
-      .from("follow_ups")
-      // updated_at is needed to scope "completed follow-ups" to this range
-      // (audit B7) — status/due_date alone can't tell WHEN a follow-up was
-      // completed.
-      .select("status, due_date, updated_at")
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+    fetchAllRows<Pick<FollowUpRow, "status" | "due_date" | "updated_at">>(() =>
+      supabase
+        .from("follow_ups")
+        // updated_at is needed to scope "completed follow-ups" to this range
+        // (audit B7) — status/due_date alone can't tell WHEN a follow-up was
+        // completed.
+        .select("status, due_date, updated_at")
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: follow-ups"),
 
-    supabase
-      .from("queue_entries")
-      .select("status, checked_in_at, called_at")
-      .eq("clinic_id", clinicId)
-      .eq("queue_date", todayDate),
+    fetchAllRows<QueueRow>(() =>
+      supabase
+        .from("queue_entries")
+        .select("status, checked_in_at, called_at")
+        .eq("clinic_id", clinicId)
+        .eq("queue_date", todayDate),
+      "analytics: queue today"),
 
-    supabase
-      .from("consultancy_income")
-      .select("amount, date")
-      .eq("clinic_id", clinicId)
-      .gte("date", dateFrom).lte("date", dateTo),
+    fetchAllRows<{ amount: number; date: string }>(() =>
+      supabase
+        .from("consultancy_income")
+        .select("amount, date")
+        .eq("clinic_id", clinicId)
+        .gte("date", dateFrom).lte("date", dateTo),
+      "analytics: consultancy income"),
 
     // Deliberately UNBOUNDED by date. Consultant payouts are earned from money
     // collected, so working out what a treatment has been paid needs its whole
     // payment history — a treatment billed last year and settled today is only
     // visible if both ends are in scope. The date range is applied afterwards,
-    // by differencing two cumulative positions.
-    supabase
-      .from("payments")
-      .select("amount, treatment_id, payment_date, patient_id")
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+    // by differencing two cumulative positions. Unbounded is exactly why it
+    // must be paged.
+    fetchAllRows<{ amount: number; treatment_id: string | null; payment_date: string; patient_id: string }>(() =>
+      supabase
+        .from("payments")
+        .select("amount, treatment_id, payment_date, patient_id")
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: all payments"),
   ]);
 
-  const appointments = (apptRes.data ?? []) as ApptRow[];
-  const appointmentsToday = (apptTodayRes.data ?? []) as Pick<ApptRow, "status" | "source">[];
-  const patients = (patientsRes.data ?? []) as Pick<PatientRow, "id" | "created_at" | "total_visits" | "last_visit">[];
-  const payments = (paymentsRes.data ?? []) as Pick<PaymentRow, "amount" | "patient_id" | "payment_date">[];
-  const treatments = (treatmentsRes.data ?? []) as Pick<
-    TreatmentRow,
-    | "id"
-    | "cost"
-    | "clinic_share"
-    | "consultant_share"
-    | "consultant_id"
-    | "patient_id"
-    | "status"
-    | "opd_charged"
-    | "opd_fee"
-    | "xray_taken"
-    | "xray_cost"
-    | "performed_at"
-    | "created_at"
-  >[];
-  const followUps = (followUpsRes.data ?? []) as Pick<FollowUpRow, "status" | "due_date" | "updated_at">[];
-  const queueToday = (queueTodayRes.data ?? []) as QueueRow[];
-  const consultancyRows = (consultancyRes.data ?? []) as { amount: number; date: string }[];
 
   const totalAppointments = appointments.length;
   const completedAppointments = appointments.filter((a) => a.status === "completed").length;
@@ -417,15 +430,11 @@ export async function getAnalyticsSummary(
     .filter((p) => p.payment_date >= monthStartDate)
     .reduce((sum, p) => sum + (p.amount ?? 0), 0);
 
-  // The clinic's ENTIRE payment history (unbounded by date), needed both for the
-  // point-in-time outstanding balance below and for the consultant-payout
-  // differencing further down.
-  const allPayments = (allPaymentsRes.data ?? []) as {
-    amount: number;
-    treatment_id: string | null;
-    payment_date: string;
-    patient_id: string | null;
-  }[];
+  // allPayments — the clinic's ENTIRE payment history (unbounded by date) — is
+  // resolved by the paged read above. It feeds both the point-in-time
+  // outstanding balance below and the consultant-payout differencing further
+  // down, and being unbounded is exactly why it must be paged rather than
+  // truncated at 1,000 rows.
 
   // Outstanding = each patient's own max(0, their charges − their payments),
   // summed (audit A5). Two things this MUST get right and the old code did not:
@@ -649,12 +658,16 @@ export async function getPatientAnalytics(
   const { clinicId, dateFrom, dateTo } = filter;
   const tz = filter.timezone ?? "Asia/Kolkata";
 
-  const [{ data }, apptRes] = await Promise.all([
-    supabase
-      .from("patients")
-      .select("id, name, created_at, date_of_birth, gender, total_visits")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null),
+  const [data, apptRes] = await Promise.all([
+    // Unbounded by date — every patient the clinic has. Paged, or it truncates
+    // at max_rows and the age/gender distributions quietly describe a subset.
+    fetchAllRows<PatientRow>(() =>
+      supabase
+        .from("patients")
+        .select("id, name, created_at, date_of_birth, gender, total_visits")
+        .eq("clinic_id", clinicId)
+        .is("deleted_at", null),
+      "analytics: patient analytics — patients"),
     // Completed visits IN RANGE, per patient — "returning"/"top" patients must
     // reflect the selected period, not the lifetime total_visits column
     // (audit B7).
@@ -818,10 +831,14 @@ export async function getRevenueAnalytics(
       .eq("clinic_id", clinicId).is("deleted_at", null)
       .gte("payment_date", dateFrom).lte("payment_date", dateTo),
 
-    supabase
-      .from("treatments")
-      .select("cost, patient_id, status, opd_charged, opd_fee, xray_taken, xray_cost")
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+    // Unbounded by date: an outstanding balance is a point-in-time total, so it
+    // needs the whole history. Paged for that reason.
+    fetchAllRows<TreatmentRow>(() =>
+      supabase
+        .from("treatments")
+        .select("cost, patient_id, status, opd_charged, opd_fee, xray_taken, xray_cost")
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: revenue — treatments"),
 
     supabase
       .from("appointments")
@@ -831,15 +848,17 @@ export async function getRevenueAnalytics(
 
     // Outstanding is a point-in-time balance, so it needs ALL payments, not just
     // the ones in the selected range (audit A5).
-    supabase
-      .from("payments")
-      .select("amount, patient_id")
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+    fetchAllRows<{ amount: number; patient_id: string | null }>(() =>
+      supabase
+        .from("payments")
+        .select("amount, patient_id")
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: revenue — all payments"),
   ]);
 
   const payments = (paymentsRes.data ?? []) as PaymentRow[];
-  const treatments = (treatmentsRes.data ?? []) as TreatmentRow[];
-  const allPayments = (allPaymentsRes.data ?? []) as { amount: number; patient_id: string | null }[];
+  const treatments = treatmentsRes;
+  const allPayments = allPaymentsRes;
   const appts = (appointmentsRes.data ?? []) as Array<{ id: string; source: AppointmentSource; status: AppointmentStatus }>;
 
   const overTimeMap: Record<string, number> = {};
@@ -989,21 +1008,24 @@ export async function getFollowUpAnalytics(
     timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
   }).format(new Date());
 
-  const [followUpsRes, withTreatmentRes] = await Promise.all([
-    supabase
-      .from("follow_ups")
-      .select("status, due_date, created_at, updated_at")
-      .eq("clinic_id", clinicId).is("deleted_at", null),
+  // Both unbounded by date — follow-up completion rate is a lifetime figure.
+  const [followUps, withTreatmentRes] = await Promise.all([
+    fetchAllRows<FollowUpRow>(() =>
+      supabase
+        .from("follow_ups")
+        .select("status, due_date, created_at, updated_at")
+        .eq("clinic_id", clinicId).is("deleted_at", null),
+      "analytics: follow-up analytics"),
 
-    supabase
-      .from("follow_ups")
-      .select("status, treatment_id, treatments(treatment_type)")
-      .eq("clinic_id", clinicId).is("deleted_at", null)
-      .not("treatment_id", "is", null),
+    fetchAllRows<{ status: string; treatment_id: string | null; treatments: unknown }>(() =>
+      supabase
+        .from("follow_ups")
+        .select("status, treatment_id, treatments(treatment_type)")
+        .eq("clinic_id", clinicId).is("deleted_at", null)
+        .not("treatment_id", "is", null),
+      "analytics: follow-ups by treatment"),
   ]);
-
-  const followUps = (followUpsRes.data ?? []) as FollowUpRow[];
-  const withTreatments = (withTreatmentRes.data ?? []) as Array<{
+  const withTreatments = withTreatmentRes as Array<{
     status: string;
     treatment_id: string | null;
     treatments: { treatment_type: string } | { treatment_type: string }[] | null;
