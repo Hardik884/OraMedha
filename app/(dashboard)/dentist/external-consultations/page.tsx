@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/layouts/PageHeader";
 import { ExternalConsultationDialog } from "@/components/dentist/ExternalConsultationDialog";
+import { ConsultationPaymentControl } from "@/components/dentist/ConsultationPaymentControl";
 import { getConsultancyIncome } from "@/actions/consultants";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Plus } from "lucide-react";
@@ -22,7 +23,13 @@ export default async function ExternalConsultationsPage() {
   const { data, error } = await getConsultancyIncome();
   const entries = (data ?? []) as ConsultancyIncome[];
 
+  // An unpriced consultation (amount NULL) contributes nothing rather than
+  // zero-ing the total — the two are different states and only one is a fact.
   const total = entries.reduce((sum, e) => sum + Number(e.amount ?? 0), 0);
+  const unpaidTotal = entries
+    .filter((e) => !e.is_paid)
+    .reduce((sum, e) => sum + Number(e.amount ?? 0), 0);
+  const unpaidCount = entries.filter((e) => !e.is_paid).length;
 
   return (
     <div className="p-6 space-y-6">
@@ -33,7 +40,7 @@ export default async function ExternalConsultationsPage() {
         </ExternalConsultationDialog>
       </PageHeader>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-surface border border-border rounded-xl p-4">
           <p className="text-xs font-medium text-text-secondary uppercase tracking-wide">
             Total External Income
@@ -47,6 +54,17 @@ export default async function ExternalConsultationsPage() {
             Consultations Recorded
           </p>
           <p className="text-2xl font-semibold text-text-primary mt-1">{entries.length}</p>
+        </div>
+        <div className="bg-surface border border-border rounded-xl p-4">
+          <p className="text-xs font-medium text-text-secondary uppercase tracking-wide">
+            Awaiting Payment
+          </p>
+          <p className="text-2xl font-semibold text-text-primary mt-1">
+            {formatCurrency(unpaidTotal)}
+          </p>
+          <p className="text-xs text-text-secondary mt-1">
+            {unpaidCount} {unpaidCount === 1 ? "consultation" : "consultations"}
+          </p>
         </div>
       </div>
 
@@ -70,9 +88,10 @@ export default async function ExternalConsultationsPage() {
               <thead>
                 <tr className="border-b border-surface-muted bg-background text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">
                   <th className="px-4 py-3">Date</th>
+                  <th className="px-4 py-3">Time</th>
                   <th className="px-4 py-3">Clinic Name</th>
                   <th className="px-4 py-3">Treatment Performed</th>
-                  <th className="px-4 py-3 text-right">Amount Earned</th>
+                  <th className="px-4 py-3 text-right">Amount / Payment</th>
                   <th className="px-4 py-3">Notes</th>
                 </tr>
               </thead>
@@ -82,14 +101,27 @@ export default async function ExternalConsultationsPage() {
                     <td className="px-4 py-3 text-text-body whitespace-nowrap">
                       {formatDate(e.date)}
                     </td>
+                    <td className="px-4 py-3 text-text-body whitespace-nowrap">
+                      {e.start_time && e.end_time ? (
+                        <span title="This time is blocked for appointments">
+                          {e.start_time.slice(0, 5)}–{e.end_time.slice(0, 5)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="px-4 py-3 font-medium text-text-primary">
                       {e.external_clinic ? e.external_clinic : "—"}
                     </td>
                     <td className="px-4 py-3 text-text-body">
                       {e.description ? e.description : "—"}
                     </td>
-                    <td className="px-4 py-3 text-right font-medium text-text-primary whitespace-nowrap">
-                      {formatCurrency(Number(e.amount ?? 0))}
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <ConsultationPaymentControl
+                        consultationId={e.id}
+                        amount={e.amount == null ? null : Number(e.amount)}
+                        isPaid={e.is_paid}
+                      />
                     </td>
                     <td className="px-4 py-3 text-text-body">
                       {e.notes ? e.notes : "—"}

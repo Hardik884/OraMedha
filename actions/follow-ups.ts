@@ -610,7 +610,9 @@ export async function getFollowUpsForPatient(
       .eq("patient_id", patientId)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
-      .order("due_date", { ascending: true });
+      // Newest first, matching the clinic-wide Follow-ups tab.
+      .order("due_date", { ascending: false })
+      .order("created_at", { ascending: false });
 
     if (error) {
       console.error("[getFollowUpsForPatient]", error);
@@ -716,8 +718,22 @@ export async function getAllFollowUps(filters?: {
     if (filters?.dateFrom) query = query.gte("due_date", filters.dateFrom);
     if (filters?.dateTo)   query = query.lte("due_date", filters.dateTo);
 
+    /*
+     * Newest first.
+     *
+     * The list read oldest-first, so the Follow-ups tab opened on recalls due
+     * months ago and the one just created was on the last page. `due_date` is
+     * the date the follow-up is FOR, which is what the tab is sorted by;
+     * `created_at` breaks ties so two recalls due the same day appear in the
+     * order they were entered, newest first.
+     *
+     * getOverdueFollowUps deliberately keeps its ascending order — that one is
+     * a worklist, and there the most overdue item is the one to deal with
+     * first.
+     */
     const { data, error, count } = await query
-      .order("due_date", { ascending: true })
+      .order("due_date", { ascending: false })
+      .order("created_at", { ascending: false })
       .range(from, to);
 
     if (error) {

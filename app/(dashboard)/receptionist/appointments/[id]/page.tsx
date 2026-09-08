@@ -9,7 +9,7 @@ import { CancelAppointmentButton } from "@/components/shared/CancelAppointmentBu
 import { AppointmentHistoryTimeline } from "@/components/shared/AppointmentHistoryTimeline";
 import { ClinicalTextCard } from "@/components/shared/ClinicalTextCard";
 import { MedicalHistoryCard } from "@/components/shared/MedicalHistoryCard";
-import { AppointmentRadiographsSection } from "@/components/shared/AppointmentRadiographsSection";
+import { AppointmentInvestigativeReportsSection } from "@/components/shared/AppointmentInvestigativeReportsSection";
 import { getAppointment } from "@/actions/appointments";
 import { getOutstandingBalance } from "@/actions/payments";
 import { createServerClient } from "@/lib/supabase/server";
@@ -145,8 +145,8 @@ export default async function ReceptionistAppointmentDetailPage({ params }: Prop
         canEdit
       />
 
-      {/* ── Radiographic Documents (IOPA / OPG / CBCT) ───────── */}
-      <AppointmentRadiographsSection appointmentId={appt.id} patientId={appt.patient_id} />
+      {/* ── Investigative and Diagnostic Reports ──────────────── */}
+      <AppointmentInvestigativeReportsSection appointmentId={appt.id} patientId={appt.patient_id} />
 
       {/* ── Actions ──────────────────────────────────────────── */}
       {!isTerminal && (

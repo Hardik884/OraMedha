@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button, type ButtonVariant, type ButtonSize } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
 import { CalendarPicker } from "@/components/ui/calendar-picker";
+import { cn } from "@/lib/utils";
 
 interface ExternalConsultationDialogProps {
   /** Class names applied to the trigger button. */
@@ -40,16 +41,22 @@ export function ExternalConsultationDialog({
   const [error, setError] = useState<string | null>(null);
 
   const [date, setDate] = useState("");
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
   const [clinic, setClinic] = useState("");
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
+  const [isPaid, setIsPaid] = useState(false);
   const [notes, setNotes] = useState("");
 
   function resetForm() {
     setDate("");
+    setStartTime("");
+    setEndTime("");
     setClinic("");
     setDescription("");
     setAmount("");
+    setIsPaid(false);
     setNotes("");
     setError(null);
   }
@@ -66,7 +73,12 @@ export function ExternalConsultationDialog({
         date,
         external_clinic: clinic.trim() || undefined,
         description: description.trim() || undefined,
-        amount: Number(amount),
+        // Optional: the slot is often reserved before the fee is agreed. An
+        // empty box means "not known yet", which is not the same as zero.
+        amount: amount.trim() === "" ? undefined : Number(amount),
+        is_paid: isPaid,
+        start_time: startTime || undefined,
+        end_time: endTime || undefined,
         notes: notes.trim() || undefined,
       });
       if (res.error || !res.data) {
@@ -118,6 +130,40 @@ export function ExternalConsultationDialog({
             <CalendarPicker id="ext-date" value={date} onChange={setDate} placeholder="Select date" clearable />
           </Field>
 
+          {/*
+            Reserving the time.
+
+            Filling both ends writes a consultancy_schedules block for that
+            exact date and range — the table getAvailableSlots already subtracts
+            from, so the slots disappear from the dentist, receptionist and
+            patient-portal booking screens alike. Leaving them empty records the
+            consultation without touching the schedule, which is what an
+            after-the-fact entry needs.
+          */}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Start Time" htmlFor="ext-start">
+              <Input
+                id="ext-start"
+                type="time"
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+              />
+            </Field>
+            <Field label="End Time" htmlFor="ext-end">
+              <Input
+                id="ext-end"
+                type="time"
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+              />
+            </Field>
+          </div>
+          <p className="-mt-2 text-xs text-text-secondary">
+            {startTime && endTime
+              ? "This time will be blocked — no appointment can be booked in it."
+              : "Optional. Set both to block the time so no appointment can be booked in it."}
+          </p>
+
           <Field label="Clinic Name" htmlFor="ext-clinic">
             <Input
               id="ext-clinic"
@@ -136,7 +182,9 @@ export function ExternalConsultationDialog({
             />
           </Field>
 
-          <Field label="Amount Earned (₹)" htmlFor="ext-amount" required>
+          {/* Amount is OPTIONAL and stays editable after saving — see the
+              External Consultations list. */}
+          <Field label="Amount Earned (₹)" htmlFor="ext-amount">
             <Input
               id="ext-amount"
               type="number"
@@ -144,8 +192,35 @@ export function ExternalConsultationDialog({
               step="0.01"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.00"
+              placeholder="Leave blank if not yet known"
             />
+          </Field>
+
+          <Field label="Payment" htmlFor="ext-paid">
+            <div className="flex items-center gap-2">
+              <button
+                id="ext-paid"
+                type="button"
+                role="switch"
+                aria-checked={isPaid}
+                onClick={() => setIsPaid((v) => !v)}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                  isPaid
+                    ? "bg-success-bg text-success border-success-border"
+                    : "bg-surface text-text-secondary border-border hover:bg-surface-muted"
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block h-3.5 w-3.5 rounded-full border transition-colors",
+                    isPaid ? "bg-success border-success" : "bg-transparent border-border-strong"
+                  )}
+                  aria-hidden
+                />
+                {isPaid ? "Paid" : "Not Paid"}
+              </button>
+            </div>
           </Field>
 
           <Field label="Notes" htmlFor="ext-notes">

@@ -435,9 +435,31 @@ export const UpdateAppointmentClinicalSchema = z.object({
 });
 export type UpdateAppointmentClinicalInput = z.infer<typeof UpdateAppointmentClinicalSchema>;
 
-/** Radiographic document categories offered on the Patient Visit page. */
-export const RADIOGRAPH_DOCUMENT_TYPES = ["IOPA", "OPG", "CBCT", "Other"] as const;
-export type RadiographDocumentType = (typeof RADIOGRAPH_DOCUMENT_TYPES)[number];
+/**
+ * Categories offered when attaching an investigative or diagnostic report to a
+ * visit.
+ *
+ * Was RADIOGRAPH_DOCUMENT_TYPES with only IOPA / OPG / CBCT / Other. The
+ * section covers every investigative document a visit produces, not only
+ * imaging, so pathology and lab reports are named rather than filed under
+ * "Other".
+ *
+ * THE THREE RADIOGRAPH VALUES MUST KEEP THEIR EXACT SPELLING. `document_type`
+ * is stored as free text, and RADIOGRAPH_TYPES in actions/treatments.ts matches
+ * on these strings to decide whether a read is audited as XRAY_VIEWED or
+ * DOCUMENT_VIEWED. Renaming one would silently reclassify every stored
+ * radiograph; adding new values is safe, and they audit as DOCUMENT_VIEWED.
+ */
+export const INVESTIGATIVE_DOCUMENT_TYPES = [
+  "IOPA",
+  "OPG",
+  "CBCT",
+  "Pathology",
+  "Lab Report",
+  "Diagnostic Report",
+  "Other",
+] as const;
+export type InvestigativeDocumentType = (typeof INVESTIGATIVE_DOCUMENT_TYPES)[number];
 
 export const RescheduleAppointmentSchema = z.object({
   appointment_id: z.string().uuid(),
@@ -779,6 +801,26 @@ export type CreateAvailabilityRuleInput = z.infer<typeof CreateAvailabilityRuleS
 
 export const CreateConsultantSchema = z.object({
   name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
+  /** Professional designation, e.g. "Endodontist". Optional. */
+  designation: z
+    .string()
+    .trim()
+    .max(100)
+    .optional()
+    .or(z.literal(""))
+    .transform((v) => v || undefined),
+  /**
+   * Contact number. Explicitly OPTIONAL — a consultant is a directory entry
+   * for revenue allocation, not a messaging recipient, so requiring one would
+   * block adding a consultant whose number nobody has to hand.
+   */
+  phone: z
+    .string()
+    .trim()
+    .max(20)
+    .optional()
+    .or(z.literal(""))
+    .transform((v) => v || undefined),
 });
 export type CreateConsultantInput = z.infer<typeof CreateConsultantSchema>;
 
@@ -787,14 +829,51 @@ export type UpdateConsultantInput = z.infer<typeof UpdateConsultantSchema>;
 
 // ── Consultancy Income (external earnings) ───────────────────────────────────
 
-export const RecordConsultancyIncomeSchema = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Valid date is required"),
-  external_clinic: z.string().trim().max(200).optional().or(z.literal("")).transform((v) => v || undefined),
-  description: z.string().trim().max(500).optional().or(z.literal("")).transform((v) => v || undefined),
-  amount: z.number().positive("Amount must be greater than zero"),
-  notes: z.string().max(1000).optional().or(z.literal("")).transform((v) => v || undefined),
-});
+const TIME_HHMM = /^\d{2}:\d{2}$/;
+
+export const RecordConsultancyIncomeSchema = z
+  .object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Valid date is required"),
+    external_clinic: z.string().trim().max(200).optional().or(z.literal("")).transform((v) => v || undefined),
+    description: z.string().trim().max(500).optional().or(z.literal("")).transform((v) => v || undefined),
+    /**
+     * OPTIONAL. The slot is routinely reserved before the fee is agreed, and
+     * requiring an amount here would mean either inventing one or not booking
+     * the time. Editable afterwards via UpdateConsultancyIncomeSchema.
+     */
+    amount: z.number().nonnegative("Amount cannot be negative").optional(),
+    /** Whether the fee has already been received. Independent of `amount`. */
+    is_paid: z.boolean().optional(),
+    /**
+     * Optional reserved slot. Both ends or neither — a start with no end
+     * cannot block anything. When present the action also writes the matching
+     * consultancy_schedules row, which is what removes the time from every
+     * booking channel.
+     */
+    start_time: z.string().regex(TIME_HHMM, "Valid start time required (HH:MM)").optional().or(z.literal("")).transform((v) => v || undefined),
+    end_time: z.string().regex(TIME_HHMM, "Valid end time required (HH:MM)").optional().or(z.literal("")).transform((v) => v || undefined),
+    notes: z.string().max(1000).optional().or(z.literal("")).transform((v) => v || undefined),
+  })
+  .refine((v) => (v.start_time == null) === (v.end_time == null), {
+    message: "Enter both a start and an end time, or neither",
+    path: ["end_time"],
+  })
+  .refine((v) => v.start_time == null || v.end_time == null || v.end_time > v.start_time, {
+    message: "End time must be after start time",
+    path: ["end_time"],
+  });
 export type RecordConsultancyIncomeInput = z.infer<typeof RecordConsultancyIncomeSchema>;
+
+/**
+ * Editing an existing consultation. Deliberately narrow: only the fee and
+ * whether it has been paid. Moving the reserved slot would mean moving the
+ * schedule block that depends on it, which is a different operation.
+ */
+export const UpdateConsultancyIncomeSchema = z.object({
+  amount: z.number().nonnegative("Amount cannot be negative").nullable().optional(),
+  is_paid: z.boolean().optional(),
+});
+export type UpdateConsultancyIncomeInput = z.infer<typeof UpdateConsultancyIncomeSchema>;
 
 // ── Consultancy Schedule (single-date time blocks) ───────────────────────────
 

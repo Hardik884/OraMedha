@@ -5,13 +5,13 @@ import {
   uploadAppointmentDocument,
   deleteAppointmentDocument,
 } from "@/actions/treatments";
-import { RADIOGRAPH_DOCUMENT_TYPES, type TreatmentDocument } from "@/types";
+import { INVESTIGATIVE_DOCUMENT_TYPES, type TreatmentDocument } from "@/types";
 import { Select } from "@/components/ui/select";
 import { FileText, ImageIcon, Upload, Trash2, Download } from "lucide-react";
 
 type DocWithUrl = TreatmentDocument & { url: string | null };
 
-interface RadiographicDocumentsProps {
+interface InvestigativeReportsProps {
   appointmentId: string;
   patientId: string;
   documents: DocWithUrl[];
@@ -30,20 +30,31 @@ function formatSize(bytes: number | null): string {
 }
 
 /**
- * RadiographicDocuments
+ * InvestigativeReports
  *
- * Appointment-scoped document manager for radiographs (IOPA / OPG / CBCT).
- * Reuses the appointment document server actions (patient-documents bucket).
+ * Appointment-scoped manager for the investigative and diagnostic documents a
+ * visit produces — radiographs (IOPA / OPG / CBCT), pathology and lab results,
+ * and other diagnostic reports.
+ *
+ * Renamed from RadiographicDocuments: the section always accepted any PDF or
+ * image, so the old name described the commonest case rather than the scope,
+ * and staff filed pathology results under "Other" because nothing said they
+ * belonged here.
+ *
+ * NOTHING ABOUT STORAGE CHANGED. Same server actions, same patient-documents
+ * bucket, same `document_type` free-text column — existing documents keep their
+ * stored type and remain listed, downloadable and removable exactly as before.
+ *
  * Upload → Preview → Download → Remove. View-only when `canManage` is false.
  */
-export function RadiographicDocuments({
+export function InvestigativeReports({
   appointmentId,
   patientId,
   documents,
   canManage,
-}: RadiographicDocumentsProps) {
+}: InvestigativeReportsProps) {
   const [isPending, startTransition] = useTransition();
-  const [docType, setDocType] = useState<string>(RADIOGRAPH_DOCUMENT_TYPES[0]);
+  const [docType, setDocType] = useState<string>(INVESTIGATIVE_DOCUMENT_TYPES[0]);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -93,9 +104,10 @@ export function RadiographicDocuments({
   return (
     <div className="bg-surface border border-border rounded-xl p-5 space-y-4">
       <div>
-        <h3 className="text-sm font-semibold text-text-primary">Radiographic Documents</h3>
+        <h3 className="text-sm font-semibold text-text-primary">Investigative and Diagnostic Reports</h3>
         <p className="text-xs text-text-secondary mt-0.5">
-          Attach IOPA, OPG or CBCT scans (PDF, JPG, JPEG, PNG — max 10 MB each).
+          Attach radiographs, pathology and other diagnostic reports (PDF, JPG,
+          JPEG, PNG — max 10 MB each).
         </p>
       </div>
 
@@ -108,7 +120,7 @@ export function RadiographicDocuments({
             disabled={uploading}
             className="w-32"
           >
-            {RADIOGRAPH_DOCUMENT_TYPES.map((t) => (
+            {INVESTIGATIVE_DOCUMENT_TYPES.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>

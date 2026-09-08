@@ -93,40 +93,20 @@ export function AppointmentQuickActions({
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <Link href={`${baseHref}/appointments/${appointmentId}`} className={ACTION_BUTTON}>
-        <Eye className="h-3 w-3" aria-hidden />
-        View
-      </Link>
+      {/*
+        FRONT-DESK ACTIONS COME FIRST.
 
-      <TreatmentFormDialog
-        appointmentId={appointmentId}
-        patientId={patientId}
-        triggerClassName={ACTION_BUTTON}
-      >
-        <Stethoscope className="h-3 w-3" aria-hidden />
-        Treatment
-      </TreatmentFormDialog>
+        These three move the visit through its lifecycle and are what the desk
+        reaches for dozens of times a day. They used to sit at the END of the
+        row, behind View / Treatment / Follow-up / Payment — so on a narrow
+        screen the row wrapped and the one button that mattered was on the
+        second line, in a position that moved depending on which of the others
+        happened to render.
 
-      <FollowUpFormDialog
-        patientId={patientId}
-        patientName={patientName}
-        appointmentId={appointmentId}
-        triggerClassName={ACTION_BUTTON}
-      >
-        <Bell className="h-3 w-3" aria-hidden />
-        Follow-up
-      </FollowUpFormDialog>
-
-      <PaymentFormDialog
-        patientId={patientId}
-        patientName={patientName}
-        appointmentId={appointmentId}
-        triggerClassName={ACTION_BUTTON}
-      >
-        <CreditCard className="h-3 w-3" aria-hidden />
-        Payment
-      </PaymentFormDialog>
-
+        Only one of the three is ever shown at once (the statuses are mutually
+        exclusive), so the leftmost slot holds "the next thing to do to this
+        appointment" and nothing else.
+      */}
       {canCheckIn && (
         <button
           type="button"
@@ -162,6 +142,40 @@ export function AppointmentQuickActions({
           Mark as Complete
         </button>
       )}
+
+      <Link href={`${baseHref}/appointments/${appointmentId}`} className={ACTION_BUTTON}>
+        <Eye className="h-3 w-3" aria-hidden />
+        View
+      </Link>
+
+      <TreatmentFormDialog
+        appointmentId={appointmentId}
+        patientId={patientId}
+        triggerClassName={ACTION_BUTTON}
+      >
+        <Stethoscope className="h-3 w-3" aria-hidden />
+        Treatment
+      </TreatmentFormDialog>
+
+      <FollowUpFormDialog
+        patientId={patientId}
+        patientName={patientName}
+        appointmentId={appointmentId}
+        triggerClassName={ACTION_BUTTON}
+      >
+        <Bell className="h-3 w-3" aria-hidden />
+        Follow-up
+      </FollowUpFormDialog>
+
+      <PaymentFormDialog
+        patientId={patientId}
+        patientName={patientName}
+        appointmentId={appointmentId}
+        triggerClassName={ACTION_BUTTON}
+      >
+        <CreditCard className="h-3 w-3" aria-hidden />
+        Payment
+      </PaymentFormDialog>
 
       {canReschedule && (
         <button type="button" className={ACTION_BUTTON} onClick={() => setShowReschedule(true)}>

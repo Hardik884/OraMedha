@@ -65,14 +65,23 @@ export async function FollowUpList({
   const { db, profile } = await resolveSession();
   const today = profile ? await todayForClinic(db, profile.clinic_id) : "";
 
-  // Sort: overdue first, then by due_date ascending
-  const sorted = [...followUps].sort((a, b) => {
-    const aOverdue = a.status === "pending" && a.due_date < today;
-    const bOverdue = b.status === "pending" && b.due_date < today;
-    if (aOverdue && !bOverdue) return -1;
-    if (!aOverdue && bOverdue) return 1;
-    return a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : 0;
-  });
+  /*
+   * Sort: newest first, by the date the follow-up is FOR.
+   *
+   * This used to hoist overdue items to the top and then sort ascending, which
+   * meant the tab opened on the oldest recall in the clinic's history and a
+   * follow-up created today was at the bottom. Overdue items are still marked
+   * — followUpDisplayStatus gives each row its own badge — and the ones that
+   * need chasing are surfaced as a worklist by getOverdueFollowUps and the
+   * dashboard Actions card, which is the right place for an ordering by
+   * urgency. A browsable list is ordered by recency.
+   *
+   * `today` is still resolved above: each row uses it for its overdue badge and
+   * "days remaining" text.
+   */
+  const sorted = [...followUps].sort((a, b) =>
+    a.due_date > b.due_date ? -1 : a.due_date < b.due_date ? 1 : 0
+  );
 
   return (
     <div className="bg-surface border border-border rounded-xl overflow-hidden">

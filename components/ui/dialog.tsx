@@ -4,13 +4,19 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type DialogSize = "sm" | "md" | "lg" | "xl";
+type DialogSize = "sm" | "md" | "lg" | "xl" | "full";
 
 const SIZE_CLASSES: Record<DialogSize, string> = {
   sm: "max-w-sm",
   md: "max-w-md",
   lg: "max-w-2xl",
   xl: "max-w-4xl",
+  /**
+   * Near-viewport width, for content that is itself wide and would otherwise
+   * have to scroll sideways inside the dialog — the dental chart's 32-tooth
+   * arch being the case this was added for.
+   */
+  full: "max-w-[96rem] w-[96vw]",
 };
 
 interface DialogProps {

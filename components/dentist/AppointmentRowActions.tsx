@@ -80,11 +80,8 @@ export function AppointmentRowActions({
 
   return (
     <div className="flex items-center justify-end gap-1.5">
-      <Link href={viewHref} className={ACTION_BUTTON}>
-        <Eye className="h-3 w-3" aria-hidden />
-        View
-      </Link>
-
+      {/* Front-desk lifecycle actions lead the row — see the same note in
+          AppointmentQuickActions. Only one is ever shown at a time. */}
       {canCheckIn && (
         <button
           type="button"
@@ -108,6 +105,11 @@ export function AppointmentRowActions({
           Mark In Progress
         </button>
       )}
+
+      <Link href={viewHref} className={ACTION_BUTTON}>
+        <Eye className="h-3 w-3" aria-hidden />
+        View
+      </Link>
 
       {canReschedule && (
         <button type="button" onClick={() => setShowReschedule(true)} className={ACTION_BUTTON}>

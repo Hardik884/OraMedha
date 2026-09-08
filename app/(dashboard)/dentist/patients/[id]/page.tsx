@@ -112,7 +112,11 @@ export default async function DentistPatientProfilePage({ params, searchParams }
       )}
 
       {tab === "dental-chart" && (
-        <PatientDentalChartSection patientId={id} patientName={patientName} />
+        <PatientDentalChartSection
+          patientId={id}
+          patientName={patientName}
+          fullViewHref={`/dentist/patients/${id}/dental-chart`}
+        />
       )}
 
       {tab === "follow-ups" && (

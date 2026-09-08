@@ -8,7 +8,8 @@
  *
  * Same mock-DB pattern as actions/__tests__/dental-chart.spec.ts.
  * @/lib/dental-chart/history is mocked so no service-role network call is
- * attempted for the tooth_history append-only write.
+ * attempted for the tooth_history append-only write, and @/lib/supabase/admin
+ * is mocked for the same reason — see the note above that mock.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +22,24 @@ vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 const writeToothHistoryMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@/lib/dental-chart/history", () => ({
   writeToothHistory: (...args: unknown[]) => writeToothHistoryMock(...args),
+}));
+
+/*
+ * updateTreatment reads the PRE-UPDATE row through the service role, because
+ * 20260907000100 withholds treatments.internal_notes from `authenticated` and
+ * the treatment_history diff has to see it. That is a second service-role call
+ * this file did not have when it was written.
+ *
+ * Unmocked it makes these unit tests environment-dependent in the worst way:
+ * with the variables unset createAdminClient() THROWS and the action returns
+ * "Unexpected error"; with them set it issues a real request for a fixture id
+ * that is not a uuid, whose error the action deliberately ignores — so the
+ * suite passes by accident rather than by design. Pointing it at the same
+ * in-memory tables makes the "before" row the one the test actually seeded.
+ */
+const adminTables: { current: Record<string, Row[]> } = { current: {} };
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => makeDb(adminTables.current),
 }));
 
 import { resolveSession } from "@/lib/auth/session";
@@ -99,6 +118,7 @@ function baseTables(): Record<string, Row[]> {
 }
 
 function asDentist(tables: Record<string, Row[]>) {
+  adminTables.current = tables;
   (resolveSession as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
     db: makeDb(tables),
     profile: { id: "dentist-1", clinic_id: CLINIC, role: "dentist" },

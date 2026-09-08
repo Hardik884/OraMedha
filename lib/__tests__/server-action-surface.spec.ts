@@ -145,6 +145,11 @@ const ALLOWED: ReadonlySet<string> = new Set([
   "getConsultancyRevenueToday",
   "recordConsultancyIncome",
   "getConsultancyIncome",
+  // Added with external-consultation slot booking: the fee and its paid flag
+  // stay editable after the consultation is recorded, and the dashboard
+  // Actions card counts the unpaid ones.
+  "updateConsultancyIncome",
+  "getUnpaidConsultationCount",
   "getConsultancySchedules",
   "createConsultancySchedule",
   "deleteConsultancySchedule",

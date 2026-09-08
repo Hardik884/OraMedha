@@ -7,6 +7,7 @@ import {
   CreateConsultantSchema,
   UpdateConsultantSchema,
   RecordConsultancyIncomeSchema,
+  UpdateConsultancyIncomeSchema,
   CreateConsultancyScheduleSchema,
   CreateUnavailableDateSchema,
   type ActionResult,
@@ -90,7 +91,12 @@ export async function createConsultant(
 
     const { data, error } = await db
       .from("consultants")
-      .insert({ clinic_id: profile.clinic_id, name: parsed.data.name })
+      .insert({
+        clinic_id: profile.clinic_id,
+        name: parsed.data.name,
+        designation: parsed.data.designation ?? null,
+        phone: parsed.data.phone ?? null,
+      })
       .select()
       .single();
 
@@ -130,7 +136,12 @@ export async function updateConsultant(
 
     const { data, error } = await db
       .from("consultants")
-      .update({ name: parsed.data.name, updated_at: new Date().toISOString() })
+      .update({
+        name: parsed.data.name,
+        designation: parsed.data.designation ?? null,
+        phone: parsed.data.phone ?? null,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", id)
       .eq("clinic_id", profile.clinic_id)
       .eq("is_active", true)
@@ -245,6 +256,48 @@ export async function recordConsultancyIncome(
       return { data: null, error: "Forbidden: only dentists can record consultancy income." };
     }
 
+    /*
+     * Reserving the time.
+     *
+     * When a slot is given, the same range is written to consultancy_schedules
+     * FIRST, because that is the table getAvailableSlots already subtracts from
+     * (actions/availability.ts) for every booking channel — dentist,
+     * receptionist and patient portal alike. Writing it here is what makes the
+     * reservation real; the income row alone would block nothing.
+     *
+     * Deliberately NOT a second scheduling system. consultancy_schedules exists
+     * for exactly this ("Specific-date time ranges when the dentist consults
+     * externally", 20260707000000) and was previously only reachable from
+     * Settings, where nobody thought to use it when recording a consultation.
+     *
+     * Order matters: if the block succeeds and the income insert then fails, a
+     * stray block would silently withhold slots from the schedule with nothing
+     * on screen explaining why — so the block is rolled back on failure below.
+     */
+    let scheduleId: string | null = null;
+    if (parsed.data.start_time && parsed.data.end_time) {
+      const { data: block, error: blockErr } = await db
+        .from("consultancy_schedules")
+        .insert({
+          clinic_id: profile.clinic_id,
+          dentist_id: profile.id,
+          date: parsed.data.date,
+          start_time: parsed.data.start_time,
+          end_time: parsed.data.end_time,
+          reason: parsed.data.external_clinic
+            ? `External consultation — ${parsed.data.external_clinic}`
+            : "External consultation",
+        })
+        .select("id")
+        .single();
+
+      if (blockErr || !block) {
+        console.error("[recordConsultancyIncome] schedule block:", blockErr);
+        return { data: null, error: "Failed to reserve that time slot." };
+      }
+      scheduleId = (block as { id: string }).id;
+    }
+
     const { data, error } = await db
       .from("consultancy_income")
       .insert({
@@ -253,7 +306,12 @@ export async function recordConsultancyIncome(
         date: parsed.data.date,
         external_clinic: parsed.data.external_clinic ?? null,
         description: parsed.data.description ?? null,
-        amount: parsed.data.amount,
+        // Optional: the slot is routinely reserved before the fee is agreed.
+        amount: parsed.data.amount ?? null,
+        is_paid: parsed.data.is_paid ?? false,
+        start_time: parsed.data.start_time ?? null,
+        end_time: parsed.data.end_time ?? null,
+        schedule_id: scheduleId,
         notes: parsed.data.notes ?? null,
       })
       .select()
@@ -261,6 +319,11 @@ export async function recordConsultancyIncome(
 
     if (error) {
       console.error("[recordConsultancyIncome]", error);
+      if (scheduleId) {
+        // Undo the block. Leaving it would withhold slots for a consultation
+        // that was never recorded, and nothing on any screen would explain it.
+        await db.from("consultancy_schedules").delete().eq("id", scheduleId);
+      }
       return { data: null, error: "Failed to record consultancy income." };
     }
 
@@ -268,10 +331,110 @@ export async function recordConsultancyIncome(
     revalidatePath("/dentist/payments");
     revalidatePath("/dentist/analytics");
     revalidatePath("/dentist");
+    // The reserved slot changes what the booking screens may offer.
+    if (scheduleId) {
+      revalidatePath("/dentist/appointments");
+      revalidatePath("/receptionist/appointments");
+      revalidatePath(SETTINGS_PATH);
+    }
     return { data: data as ConsultancyIncome, error: null };
   } catch (err) {
     console.error("[recordConsultancyIncome] unexpected:", err);
     return { data: null, error: "Unexpected error" };
+  }
+}
+
+/**
+ * Edit an already-recorded consultation: the fee, and whether it has been paid.
+ *
+ * Both remain editable after creation on purpose. A consultation is commonly
+ * booked before the amount is agreed and paid some time after that, so a record
+ * that could not be revised would force the dentist to guess a figure at
+ * booking time or delete and re-enter the row — which would also drop the
+ * reserved slot.
+ *
+ * The date and the reserved slot are NOT editable here. Moving the time means
+ * moving the consultancy_schedules block that depends on it, which is a
+ * different operation with its own conflict rules.
+ */
+export async function updateConsultancyIncome(
+  id: string,
+  input: unknown
+): Promise<ActionResult<ConsultancyIncome>> {
+  try {
+    if (!id) return { data: null, error: "Consultation ID is required" };
+
+    const parsed = UpdateConsultancyIncomeSchema.safeParse(input);
+    if (!parsed.success) {
+      return { data: null, error: parsed.error.errors[0]?.message ?? "Invalid input" };
+    }
+
+    const { db, profile } = await resolveSession();
+    if (!profile) return { data: null, error: "Unauthorized" };
+    if (profile.role !== "dentist") {
+      return { data: null, error: "Forbidden: only dentists can edit consultancy income." };
+    }
+
+    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    // `amount` is explicitly nullable — clearing it back to "not yet known" is
+    // a legitimate edit, so `undefined` (absent) and `null` (cleared) differ.
+    if (parsed.data.amount !== undefined) updates.amount = parsed.data.amount;
+    if (parsed.data.is_paid !== undefined) updates.is_paid = parsed.data.is_paid;
+
+    const { data, error } = await db
+      .from("consultancy_income")
+      .update(updates)
+      .eq("id", id)
+      .eq("clinic_id", profile.clinic_id)
+      .eq("dentist_id", profile.id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("[updateConsultancyIncome]", error);
+      return { data: null, error: "Failed to update the consultation." };
+    }
+    if (!data) return { data: null, error: "Consultation not found." };
+
+    revalidatePath("/dentist/external-consultations");
+    revalidatePath("/dentist/payments");
+    revalidatePath("/dentist/analytics");
+    revalidatePath("/dentist");
+    return { data: data as ConsultancyIncome, error: null };
+  } catch (err) {
+    console.error("[updateConsultancyIncome] unexpected:", err);
+    return { data: null, error: "Unexpected error" };
+  }
+}
+
+/**
+ * How many recorded external consultations have not been paid for.
+ *
+ * A count, not the rows: this feeds the dashboard Actions card, which needs to
+ * know whether there is anything to chase, not what it is. `head: true` means
+ * PostgREST returns the count and no body.
+ */
+export async function getUnpaidConsultationCount(): Promise<ActionResult<number>> {
+  try {
+    const { db, profile } = await resolveSession();
+    if (!profile) return { data: null, error: "Unauthorized" };
+    if (profile.role !== "dentist") return { data: 0, error: null };
+
+    const { count, error } = await db
+      .from("consultancy_income")
+      .select("id", { count: "exact", head: true })
+      .eq("clinic_id", profile.clinic_id)
+      .eq("dentist_id", profile.id)
+      .eq("is_paid", false);
+
+    if (error) {
+      console.error("[getUnpaidConsultationCount]", error);
+      return { data: 0, error: null };
+    }
+    return { data: count ?? 0, error: null };
+  } catch (err) {
+    console.error("[getUnpaidConsultationCount] unexpected:", err);
+    return { data: 0, error: null };
   }
 }
 

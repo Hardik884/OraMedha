@@ -11,7 +11,7 @@ import { PatientFinancialTimeline } from "@/components/dentist/PatientFinancialT
 import { AppointmentFollowUpsSection } from "@/components/dentist/AppointmentFollowUpsSection";
 import { ClinicalTextCard } from "@/components/shared/ClinicalTextCard";
 import { MedicalHistoryCard } from "@/components/shared/MedicalHistoryCard";
-import { AppointmentRadiographsSection } from "@/components/shared/AppointmentRadiographsSection";
+import { AppointmentInvestigativeReportsSection } from "@/components/shared/AppointmentInvestigativeReportsSection";
 import { PatientDentalChartSection } from "@/components/dental-chart/PatientDentalChartSection";
 import { getAppointment } from "@/actions/appointments";
 import { getOutstandingBalance } from "@/actions/payments";
@@ -137,6 +137,20 @@ export default async function DentistAppointmentDetailPage({ params }: Props) {
         canEdit
       />
 
+      {/*
+        ── Dental Chart ──────────────────────────────────────
+        Sits between the history and the findings deliberately: the chart is
+        what the clinician reads the mouth against while examining, so it comes
+        before the findings that examination produces, and after the history
+        that frames it.
+      */}
+      <PatientDentalChartSection
+        patientId={appt.patient_id}
+        patientName={appt.patient.name}
+        appointmentId={appt.id}
+        fullViewHref={`/dentist/patients/${appt.patient_id}/dental-chart?from=${appt.id}`}
+      />
+
       {/* ── Oral & Radiographic Findings (dentist only) ──────── */}
       <ClinicalTextCard
         appointmentId={appt.id}
@@ -148,8 +162,8 @@ export default async function DentistAppointmentDetailPage({ params }: Props) {
         rows={4}
       />
 
-      {/* ── Radiographic Documents (IOPA / OPG / CBCT) ───────── */}
-      <AppointmentRadiographsSection appointmentId={appt.id} patientId={appt.patient_id} />
+      {/* ── Investigative and Diagnostic Reports ──────────────── */}
+      <AppointmentInvestigativeReportsSection appointmentId={appt.id} patientId={appt.patient_id} />
 
       {/* ── Provisional Diagnosis (dentist only) ─────────────── */}
       <ClinicalTextCard
@@ -160,13 +174,6 @@ export default async function DentistAppointmentDetailPage({ params }: Props) {
         initialValue={appt.provisional_diagnosis}
         canEdit
         rows={3}
-      />
-
-      {/* ── Dental Chart: current tooth-by-tooth state for this patient ─── */}
-      <PatientDentalChartSection
-        patientId={appt.patient_id}
-        patientName={appt.patient.name}
-        appointmentId={appt.id}
       />
 
       {/* ── Treatments: Current Treatment + Past Treatment History ── */}

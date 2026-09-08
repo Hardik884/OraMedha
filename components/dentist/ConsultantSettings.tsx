@@ -54,8 +54,12 @@ export function ConsultantSettings({
 function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
   const [consultants, setConsultants] = useState<Consultant[]>(initial);
   const [name, setName] = useState("");
+  const [designation, setDesignation] = useState("");
+  const [phone, setPhone] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
+  const [editingDesignation, setEditingDesignation] = useState("");
+  const [editingPhone, setEditingPhone] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -67,13 +71,21 @@ function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
       return;
     }
     startTransition(async () => {
-      const res = await createConsultant({ name: trimmed });
+      // Designation and phone are both optional — a consultant is a directory
+      // entry for revenue allocation, not a messaging recipient.
+      const res = await createConsultant({
+        name: trimmed,
+        designation: designation.trim() || undefined,
+        phone: phone.trim() || undefined,
+      });
       if (res.error || !res.data) {
         setError(res.error ?? "Failed to add consultant.");
         return;
       }
       setConsultants((prev) => [...prev, res.data!].sort((a, b) => a.name.localeCompare(b.name)));
       setName("");
+      setDesignation("");
+      setPhone("");
     });
   }
 
@@ -85,7 +97,11 @@ function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
       return;
     }
     startTransition(async () => {
-      const res = await updateConsultant(id, { name: trimmed });
+      const res = await updateConsultant(id, {
+        name: trimmed,
+        designation: editingDesignation.trim() || undefined,
+        phone: editingPhone.trim() || undefined,
+      });
       if (res.error || !res.data) {
         setError(res.error ?? "Failed to update consultant.");
         return;
@@ -95,6 +111,8 @@ function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
       );
       setEditingId(null);
       setEditingName("");
+      setEditingDesignation("");
+      setEditingPhone("");
     });
   }
 
@@ -129,14 +147,48 @@ function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
           </div>
         )}
 
-        <div className="flex items-end gap-2">
-          <div className="flex-1">
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="flex-1 min-w-[12rem]">
             <Field label="Consultant Name" htmlFor="consultant-name">
               <Input
                 id="consultant-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Dr. Anita Rao"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    add();
+                  }
+                }}
+              />
+            </Field>
+          </div>
+          <div className="flex-1 min-w-[10rem]">
+            <Field label="Designation" htmlFor="consultant-designation">
+              <Input
+                id="consultant-designation"
+                value={designation}
+                onChange={(e) => setDesignation(e.target.value)}
+                placeholder="e.g. Endodontist"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    add();
+                  }
+                }}
+              />
+            </Field>
+          </div>
+          <div className="flex-1 min-w-[10rem]">
+            {/* Optional, and labelled as such — nothing here requires it. */}
+            <Field label="Phone (optional)" htmlFor="consultant-phone">
+              <Input
+                id="consultant-phone"
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="e.g. 9876543210"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
@@ -164,12 +216,30 @@ function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
               <div key={c.id} className="flex items-center justify-between gap-2 px-3 py-2.5">
                 {editingId === c.id ? (
                   <>
-                    <Input
-                      value={editingName}
-                      onChange={(e) => setEditingName(e.target.value)}
-                      className="flex-1"
-                      autoFocus
-                    />
+                    <div className="flex flex-1 flex-wrap gap-2">
+                      <Input
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        className="flex-1 min-w-[9rem]"
+                        aria-label="Consultant name"
+                        autoFocus
+                      />
+                      <Input
+                        value={editingDesignation}
+                        onChange={(e) => setEditingDesignation(e.target.value)}
+                        className="flex-1 min-w-[8rem]"
+                        aria-label="Designation"
+                        placeholder="Designation"
+                      />
+                      <Input
+                        type="tel"
+                        value={editingPhone}
+                        onChange={(e) => setEditingPhone(e.target.value)}
+                        className="flex-1 min-w-[8rem]"
+                        aria-label="Phone (optional)"
+                        placeholder="Phone (optional)"
+                      />
+                    </div>
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
@@ -194,13 +264,23 @@ function ConsultantDirectory({ initial }: { initial: Consultant[] }) {
                   </>
                 ) : (
                   <>
-                    <span className="text-sm text-text-primary">{c.name}</span>
+                    <div className="min-w-0">
+                      <span className="text-sm text-text-primary">{c.name}</span>
+                      {c.designation && (
+                        <span className="text-sm text-text-secondary"> · {c.designation}</span>
+                      )}
+                      {c.phone && (
+                        <p className="text-xs text-text-secondary mt-0.5">{c.phone}</p>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => {
                           setEditingId(c.id);
                           setEditingName(c.name);
+                          setEditingDesignation(c.designation ?? "");
+                          setEditingPhone(c.phone ?? "");
                         }}
                         className="h-8 w-8 flex items-center justify-center rounded-lg border border-border text-text-body hover:bg-surface-muted"
                         aria-label={`Edit ${c.name}`}

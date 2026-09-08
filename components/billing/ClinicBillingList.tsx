@@ -1,6 +1,8 @@
-import Link from "next/link";
+import { Suspense } from "react";
 import { FileText } from "lucide-react";
 import { getClinicBillsList } from "@/actions/billing";
+import { BillPreviewDialog } from "@/components/billing/BillPreviewDialog";
+import { BillingSearch } from "@/components/billing/BillingSearch";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -52,20 +54,34 @@ export async function ClinicBillingList({ baseHref, search, page = 1 }: ClinicBi
 
   if (bills.length === 0) {
     return (
-      <div className="bg-surface border border-border rounded-xl">
-        <EmptyState
-          icon={<FileText className="h-5 w-5" aria-hidden />}
-          title="No bills yet"
-          description="Bills appear here for every appointment with a billable charge or payment."
-        />
+      <div className="space-y-3">
+        <Suspense>
+        <BillingSearch initialSearch={search} />
+      </Suspense>
+        <div className="bg-surface border border-border rounded-xl">
+          <EmptyState
+            icon={<FileText className="h-5 w-5" aria-hidden />}
+            title={search ? "No matching bills" : "No bills yet"}
+            description={
+              search
+                ? `Nothing matched "${search}". Try a different name or phone number.`
+                : "Bills appear here for every appointment with a billable charge or payment."
+            }
+          />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
+      <Suspense>
+        <BillingSearch initialSearch={search} />
+      </Suspense>
+
       <p className="text-xs text-text-secondary">
         {total} {total === 1 ? "bill" : "bills"}
+        {search ? ` matching "${search}"` : ""}
       </p>
 
       {bills.map((bill) => (
@@ -91,12 +107,13 @@ export async function ClinicBillingList({ baseHref, search, page = 1 }: ClinicBi
               value={formatCurrency(bill.overpayment > 0 ? bill.overpayment : bill.balanceDue)}
               valueClass={bill.balanceDue > 0 ? "text-danger" : "text-success"}
             />
-            <Link
-              href={`${baseHref}/appointments/${bill.appointmentId}/bill?from=billing`}
-              className="text-xs font-medium px-3 py-1.5 rounded-md border border-border text-text-primary hover:bg-surface-muted transition-colors shrink-0"
-            >
-              View Bill
-            </Link>
+            {/* Opens over the list rather than navigating into the
+                Appointments section — see BillPreviewDialog. */}
+            <BillPreviewDialog
+              appointmentId={bill.appointmentId}
+              patientName={bill.patientName}
+              baseHref={baseHref}
+            />
           </div>
         </div>
       ))}

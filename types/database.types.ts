@@ -716,39 +716,51 @@ export type Database = {
       }
       consultancy_income: {
         Row: {
-          amount: number
+          amount: number | null
           clinic_id: string
           created_at: string
           date: string
           dentist_id: string
           description: string | null
+          end_time: string | null
           external_clinic: string | null
           id: string
+          is_paid: boolean
           notes: string | null
+          schedule_id: string | null
+          start_time: string | null
           updated_at: string
         }
         Insert: {
-          amount: number
+          amount?: number | null
           clinic_id: string
           created_at?: string
           date: string
           dentist_id: string
           description?: string | null
+          end_time?: string | null
           external_clinic?: string | null
           id?: string
+          is_paid?: boolean
           notes?: string | null
+          schedule_id?: string | null
+          start_time?: string | null
           updated_at?: string
         }
         Update: {
-          amount?: number
+          amount?: number | null
           clinic_id?: string
           created_at?: string
           date?: string
           dentist_id?: string
           description?: string | null
+          end_time?: string | null
           external_clinic?: string | null
           id?: string
+          is_paid?: boolean
           notes?: string | null
+          schedule_id?: string | null
+          start_time?: string | null
           updated_at?: string
         }
         Relationships: [
@@ -826,25 +838,31 @@ export type Database = {
         Row: {
           clinic_id: string
           created_at: string
+          designation: string | null
           id: string
           is_active: boolean
           name: string
+          phone: string | null
           updated_at: string
         }
         Insert: {
           clinic_id: string
           created_at?: string
+          designation?: string | null
           id?: string
           is_active?: boolean
           name: string
+          phone?: string | null
           updated_at?: string
         }
         Update: {
           clinic_id?: string
           created_at?: string
+          designation?: string | null
           id?: string
           is_active?: boolean
           name?: string
+          phone?: string | null
           updated_at?: string
         }
         Relationships: [

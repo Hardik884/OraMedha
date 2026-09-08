@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/layouts/PageHeader";
 import { DashboardKPIs } from "@/components/dentist/DashboardKPIs";
 import { QueueWidget } from "@/components/queue/QueueWidget";
+import { DashboardActions } from "@/components/dentist/DashboardActions";
 import { UpcomingAppointments } from "@/components/dentist/UpcomingAppointments";
 import { ClinicDentistName } from "@/components/shared/ClinicDentistName";
 import { NewInquiryButton } from "@/components/dentist/NewInquiryButton";
@@ -91,6 +92,15 @@ export default async function DentistDashboardPage() {
           </div>
 
           <div className="space-y-4">
+            {/* Compact "what needs doing" list. Sits above the queue because it
+                is the shorter, more urgent of the two, and because the metric
+                row above is deliberately uniform — this is where attention is
+                directed instead. */}
+            <DashboardActions
+              waitingCount={
+                initialQueue.filter((entry) => entry.status === "waiting").length
+              }
+            />
             <QueueWidget
               initialQueue={initialQueue}
               clinicId={clinicId}

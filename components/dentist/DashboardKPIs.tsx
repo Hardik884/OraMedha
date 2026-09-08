@@ -13,42 +13,42 @@ import {
   Footprints,
 } from "lucide-react";
 
-type KPITone = "neutral" | "mint" | "amber" | "cool";
-
-/**
- * Four quiet card tones. Each is a tinted surface + border + icon chip, so all
- * three parts have to move together per theme — hence dedicated tokens rather
- * than reusing the generic status ramp.
+/*
+ * One card style, deliberately.
+ *
+ * These cards used four tinted variants (mint / amber / cool / neutral), two of
+ * them assigned by value — "Waiting Now" and "No-Shows" turned amber above
+ * zero. That reads as severity, and severity is the one thing a count of
+ * today's appointments cannot tell you: a busy clinic is not a clinic in
+ * trouble, and eight amber cards on a normal Tuesday train people to ignore
+ * the colour.
+ *
+ * So the metric row is uniform and quiet, and the things that ARE actionable
+ * live in <DashboardActions>, which shows only what needs attention. Status
+ * colour still means status elsewhere — queue badges, appointment states,
+ * balances owed — where it distinguishes one row from another rather than
+ * decorating all of them.
  */
-const TONE_STYLES: Record<KPITone, { card: string; iconBg: string; iconText: string }> = {
-  neutral: { card: 'bg-surface border-border', iconBg: 'bg-surface-muted', iconText: 'text-text-secondary' },
-  mint:    { card: 'bg-kpi-mint border-kpi-mint-border', iconBg: 'bg-kpi-mint-chip', iconText: 'text-accent' },
-  amber:   { card: 'bg-kpi-amber border-kpi-amber-border', iconBg: 'bg-kpi-amber-chip', iconText: 'text-warning' },
-  cool:    { card: 'bg-kpi-cool border-kpi-cool-border', iconBg: 'bg-kpi-cool-chip', iconText: 'text-info' },
-};
+
 interface KPICardProps {
   label: string;
   value: string;
   icon: React.ReactNode;
   sub?: string;
-  tone?: KPITone;
 }
 
-function KPICard({ label, value, icon, sub, tone = "neutral" }: KPICardProps) {
-  const styles = TONE_STYLES[tone];
+function KPICard({ label, value, icon, sub }: KPICardProps) {
   return (
-    <div
-      className={`rounded-xl border p-4 sm:p-5 space-y-3 shadow-[0_1px_2px_rgba(21,25,24,0.04)] transition-shadow duration-200 hover:shadow-[0_4px_12px_-2px_rgba(21,25,24,0.06)] ${styles.card}`}
-    >
+    <div className="rounded-xl border border-border bg-surface p-3 sm:p-4 space-y-2 shadow-[0_1px_2px_rgba(21,25,24,0.04)] transition-shadow duration-200 hover:shadow-[0_4px_12px_-2px_rgba(21,25,24,0.06)]">
       <div className="flex items-center justify-between">
         <p className="text-xs font-medium text-text-secondary tracking-wide">{label}</p>
-        <div className={`h-7 w-7 rounded-lg flex items-center justify-center shrink-0 ${styles.iconBg} ${styles.iconText}`}>
+        <div className="h-6 w-6 rounded-lg flex items-center justify-center shrink-0 bg-surface-muted text-text-secondary">
           {icon}
         </div>
       </div>
       <div>
-        <p className="text-2xl sm:text-3xl font-bold text-text-primary tracking-tight leading-none">{value}</p>
-        {sub && <p className="text-xs text-text-secondary mt-1.5">{sub}</p>}
+        <p className="text-xl sm:text-2xl font-bold text-text-primary tracking-tight leading-none">{value}</p>
+        {sub && <p className="text-xs text-text-secondary mt-1">{sub}</p>}
       </div>
     </div>
   );
@@ -116,42 +116,36 @@ export async function DashboardKPIs({ clinicId: propClinicId, timezone: propTime
         value={kpis.seenPatientsToday.toString()}
         icon={<UserCheck className="h-3.5 w-3.5" aria-hidden />}
         sub="Completed"
-        tone="mint"
       />
       <KPICard
         label="Completion Rate"
         value={`${completionPct}%`}
         icon={<TrendingUp className="h-3.5 w-3.5" aria-hidden />}
         sub={kpis.totalAppointmentsToday > 0 ? `${kpis.seenPatientsToday} of ${kpis.totalAppointmentsToday}` : undefined}
-        tone="cool"
       />
       <KPICard
         label="Waiting Now"
         value={kpis.waitingPatients.toString()}
         icon={<Clock className="h-3.5 w-3.5" aria-hidden />}
         sub="In queue"
-        tone={kpis.waitingPatients > 0 ? "amber" : "neutral"}
       />
       <KPICard
         label="No-Shows"
         value={kpis.noShowsToday.toString()}
         icon={<AlertCircle className="h-3.5 w-3.5" aria-hidden />}
         sub="Today"
-        tone={kpis.noShowsToday > 0 ? "amber" : "neutral"}
       />
       <KPICard
         label="Revenue"
         value={formatCurrency(kpis.revenueToday)}
         icon={<DollarSign className="h-3.5 w-3.5" aria-hidden />}
         sub="Today"
-        tone="mint"
       />
       <KPICard
         label="New Patients"
         value={kpis.newPatientsToday.toString()}
         icon={<UserPlus className="h-3.5 w-3.5" aria-hidden />}
         sub="Registered today"
-        tone="cool"
       />
       <KPICard
         label="Walk-ins"
