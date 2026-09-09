@@ -115,8 +115,10 @@
   --color-tooth-crown-line: #7C3AED;
   --color-tooth-root-canal: #ECFEFF;
   --color-tooth-root-canal-line: #0E7490;
-  --color-tooth-abscess: #FDF2F8;
-  --color-tooth-abscess-line: #BE185D;
+  /* A visibly deeper pink than caries's near-white red tint — the two used
+     to sit close enough in fill lightness to read as the same colour. */
+  --color-tooth-abscess: #FCE7F3;
+  --color-tooth-abscess-line: #9D174D;
   --color-tooth-missing: #EEF2F0;
   --color-tooth-missing-line: #9BA39D;
   --color-tooth-implant: #F0F4F8;
@@ -391,8 +393,10 @@
   --color-tooth-crown-line: #4C2E82;
   --color-tooth-root-canal: #93C2C7;
   --color-tooth-root-canal-line: #164E52;
-  --color-tooth-abscess: #C79AB0;
-  --color-tooth-abscess-line: #6B1740;
+  /* Pushed further toward magenta than the light-mode pair above so it
+     doesn't collapse into caries's dusty red at dark-mode lightness. */
+  --color-tooth-abscess: #D999BE;
+  --color-tooth-abscess-line: #86198F;
   --color-tooth-missing: #0F1412;
   --color-tooth-missing-line: #5A6862;
   --color-tooth-implant: #9AA9B5;
