@@ -181,6 +181,50 @@ RULES:
 - Keep responses friendly and concise — patients may be on mobile.`;
 }
 
+// =============================================================================
+// DASHBOARD ACTIONS PROMPT
+// =============================================================================
+
+/** One already-computed action item to be rephrased, never analysed. */
+export interface DashboardActionFact {
+  readonly id: string;
+  /** The deterministic sentence already computed by the app — the only fact the model may draw on, and the fallback if generation fails or is rejected. */
+  readonly fact: string;
+}
+
+/**
+ * buildDashboardActionSummaryPrompt
+ *
+ * Rewrites the dashboard's existing "needs attention" items into short, plain
+ * status lines — one per item, same order, same count. This is a wording pass
+ * only: every fact below was already computed deterministically (Business
+ * Brain or the equivalent existing dashboard counts), and the model's only job
+ * is to phrase each one as a single clear sentence. It may not add, merge,
+ * reorder, or invent anything, and every number it writes must already appear
+ * in the matching fact — enforced after generation, not just requested here.
+ */
+export function buildDashboardActionSummaryPrompt(items: readonly DashboardActionFact[]): string {
+  const lines = items.map((item, i) => `${i + 1}. ${item.fact}`).join("\n");
+
+  return `You are writing short status lines for a dentist's daily dashboard. They are busy and will read each line in passing between patients.
+
+Rewrite each numbered fact below as ONE short, clear sentence.
+
+FACTS
+${lines}
+
+HOW TO WRITE IT
+- Return exactly ${items.length} line(s), numbered the same way ("1.", "2.", ...), one rewritten sentence per line, in the same order as the facts.
+- Each line is ONE sentence. Plain, everyday words. No jargon.
+- Do not merge two facts into one line, split one fact into two lines, skip a line, or add a line that has no matching fact.
+- Do not invent, change, round, or add any number, amount, count, or percentage. Every figure you write must be copied exactly from the matching fact, or left out.
+- Do not tell the dentist what to do. Describe only what needs attention — never "should", "must", "consider", "recommend", "try", "need to", "ought to".
+- Do not add reasons, causes, or context that is not already in the fact.
+- No preamble, no headings, no blank lines, no extra commentary — output only the numbered lines.
+
+Rewritten lines:`;
+}
+
 /**
  * buildDiagnosisExplanationPrompt
  *

@@ -8,7 +8,12 @@ import {
   guardOutboundPrompt,
   withAITimeout,
 } from "@/lib/ai/gemini";
-import { buildDiagnosisExplanationPrompt } from "@/lib/ai/prompts";
+import {
+  buildDiagnosisExplanationPrompt,
+  buildDashboardActionSummaryPrompt,
+  type DashboardActionFact,
+} from "@/lib/ai/prompts";
+import { parseDashboardActionSummary } from "@/lib/ai/dashboard-action-summary";
 import {
   explanationInputFor,
   verifyExplanation,
@@ -137,6 +142,92 @@ export async function explainDiagnosis(
     }
     console.error("[explainDiagnosis]", error);
     return { data: null, error: EXPLANATION_UNAVAILABLE };
+  }
+}
+
+/** Kept short: this is a handful of one-line rewrites, not a conversation. */
+const DASHBOARD_ACTIONS_TIMEOUT_MS = 8_000;
+
+/** Most items a dashboard load will ever ask to have rephrased at once. Keeps the prompt small and the failure mode (whole batch discarded) cheap. */
+const MAX_DASHBOARD_ACTION_ITEMS = 8;
+
+export interface DashboardActionSummary {
+  readonly id: string;
+  readonly text: string;
+}
+
+/**
+ * Rephrase the dashboard's existing "needs attention" items into single, plain
+ * sentences — one Gemini call for the whole card rather than one per item, so
+ * the card renders after a single round trip.
+ *
+ * This is deliberately NOT the same shape as explainDiagnosis: there is no new
+ * analysis here, no evidence, no hypotheses — each item's `fact` is already a
+ * complete, correct sentence computed by the existing Business Brain / dashboard
+ * logic, and the model's only job is to phrase it more clearly. Per CLAUDE.md
+ * §8/§13.11, a rejected or failed generation must never block the dashboard: the
+ * caller renders each item's own `fact` as a deterministic fallback, so the
+ * result of this action is always an optional improvement, never a dependency.
+ *
+ * @param items Already-computed, patient-identifier-free facts. Each is also
+ *              this item's own fallback text — see parseDashboardActionSummary.
+ */
+export async function summarizeDashboardActions(
+  items: DashboardActionFact[],
+): Promise<ActionResult<DashboardActionSummary[]>> {
+  try {
+    const { profile } = await resolveSession();
+    if (!profile || profile.role !== "dentist") {
+      return { data: null, error: "Unauthorized" };
+    }
+
+    const bounded = items
+      .filter((item) => item.id && item.fact)
+      .slice(0, MAX_DASHBOARD_ACTION_ITEMS);
+    if (bounded.length === 0) {
+      return { data: [], error: null };
+    }
+
+    const prompt = guardOutboundPrompt(buildDashboardActionSummaryPrompt(bounded));
+
+    const raw = await withAITimeout(async () => {
+      const model = getGeminiModel();
+      const result = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          // Low temperature: this is a rewording task, not a creative one.
+          temperature: 0.2,
+          maxOutputTokens: 60 * bounded.length,
+        },
+      });
+      return result.response.text();
+    }, DASHBOARD_ACTIONS_TIMEOUT_MS);
+
+    const verified = parseDashboardActionSummary(raw, bounded);
+    return {
+      data: bounded.map((item) => ({
+        id: item.id,
+        // Falls back to the item's own deterministic fact when the model's line
+        // for it was missing, malformed, or failed verification — never an error
+        // for the whole card over one bad line.
+        text: verified.get(item.id) ?? item.fact,
+      })),
+      error: null,
+    };
+  } catch (error) {
+    if (error instanceof AIError) {
+      console.error("[summarizeDashboardActions] AI unavailable:", error.message);
+    } else {
+      console.error("[summarizeDashboardActions]", error);
+    }
+    // Unlike explainDiagnosis, failure here still returns data: every item's
+    // deterministic fact, so the card renders its concise fallback rather than
+    // an error state (CLAUDE.md §13.11 — AI is an enhancement, never a
+    // dependency for a page that already has the underlying data).
+    return {
+      data: items.slice(0, MAX_DASHBOARD_ACTION_ITEMS).map((item) => ({ id: item.id, text: item.fact })),
+      error: null,
+    };
   }
 }
 
