@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { CalendarClock } from "lucide-react";
 import { setPaymentPlan } from "@/actions/payments";
+import { CalendarPicker } from "@/components/ui/calendar-picker";
 import { cn } from "@/lib/utils";
 import { formatDate } from "@/lib/utils";
 
@@ -89,12 +90,12 @@ export function PaymentPlanControl({
 
   return (
     <div className="flex items-center gap-1.5">
-      <input
-        type="date"
+      <CalendarPicker
         value={date}
         min={todayIso()}
-        onChange={(e) => setDate(e.target.value)}
-        className="rounded-md border border-border bg-background px-2 py-1 text-xs text-text-primary"
+        onChange={setDate}
+        placeholder="Pick a date"
+        className="h-8 w-40 px-2.5 py-1 text-xs"
       />
       <button
         type="button"

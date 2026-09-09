@@ -27,8 +27,10 @@ interface PatientFollowUpsTabProps {
  *
  * Server Component — follow-up timeline panel on patient profile pages.
  *
- * Shows overdue / upcoming / completed / cancelled follow-ups. Clicking any
- * follow-up opens the shared inline Follow-up dialog (no navigation).
+ * Shows upcoming / overdue / completed / cancelled follow-ups, in that order,
+ * latest due date to oldest — upcoming's dates are always later than overdue's,
+ * so upcoming leads. Clicking any follow-up opens the shared inline Follow-up
+ * dialog (no navigation).
  *
  * Dentist: sees "+ New Follow-Up" button.
  * Receptionist: read-only create is hidden.
@@ -112,26 +114,16 @@ export async function PatientFollowUpsTab({
         </div>
       ) : (
         <div className="space-y-6">
-          {/* Overdue */}
-          {overdue.length > 0 && (
-            <TimelineSection title="Overdue" titleClass="text-danger">
-              {overdue.map((f) => {
-                const diffDays = daysBetween(f.due_date, today);
-                return (
-                  <FollowUpTimelineRow
-                    key={f.id}
-                    followUp={f}
-                    isOverdue
-                    diffLabel={`${diffDays} day${diffDays !== 1 ? "s" : ""} overdue`}
-                    patientId={patientId}
-                    patientName={patientName}
-                    role={dialogRole}
-                  />
-                );
-              })}
-            </TimelineSection>
-          )}
-
+          {/*
+           * Upcoming BEFORE Overdue.
+           *
+           * followUps arrives sorted latest-due-date-first (getFollowUpsForPatient),
+           * matching the clinic-wide /dentist/follow-ups list. Every upcoming due_date
+           * is >= today and every overdue one is < today, so upcoming is always the
+           * chronologically LATER half of the two — rendering it first is what keeps
+           * this tab's visible order latest-to-oldest instead of splitting the list at
+           * "today" and inverting it.
+           */}
           {/* Upcoming */}
           {upcoming.length > 0 && (
             <TimelineSection title="Upcoming">
@@ -146,6 +138,26 @@ export async function PatientFollowUpsTab({
                         ? "Due today"
                         : `${diffDays} day${diffDays !== 1 ? "s" : ""} remaining`
                     }
+                    patientId={patientId}
+                    patientName={patientName}
+                    role={dialogRole}
+                  />
+                );
+              })}
+            </TimelineSection>
+          )}
+
+          {/* Overdue */}
+          {overdue.length > 0 && (
+            <TimelineSection title="Overdue" titleClass="text-danger">
+              {overdue.map((f) => {
+                const diffDays = daysBetween(f.due_date, today);
+                return (
+                  <FollowUpTimelineRow
+                    key={f.id}
+                    followUp={f}
+                    isOverdue
+                    diffLabel={`${diffDays} day${diffDays !== 1 ? "s" : ""} overdue`}
                     patientId={patientId}
                     patientName={patientName}
                     role={dialogRole}

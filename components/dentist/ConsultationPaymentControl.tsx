@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Pencil, X } from "lucide-react";
+import { Check, CircleDollarSign, Pencil, X } from "lucide-react";
 
 import { updateConsultancyIncome } from "@/actions/consultants";
 import { Input } from "@/components/ui/input";
@@ -138,28 +138,22 @@ export function ConsultationPaymentControl({
         )}
       </div>
 
-      <button
+      <Button
         type="button"
         role="switch"
         aria-checked={isPaid}
-        disabled={isPending}
+        size="xs"
+        isLoading={isPending}
         onClick={() => save({ is_paid: !isPaid })}
         className={cn(
-          "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50",
           isPaid
-            ? "bg-success-bg text-success border-success-border"
-            : "bg-surface text-text-secondary border-border hover:bg-surface-muted"
+            ? "bg-success text-success-foreground hover:bg-success-hover"
+            : "bg-surface-muted text-text-primary border border-border-strong hover:bg-border"
         )}
       >
-        <span
-          className={cn(
-            "inline-block h-2.5 w-2.5 rounded-full border transition-colors",
-            isPaid ? "bg-success border-success" : "bg-transparent border-border-strong"
-          )}
-          aria-hidden
-        />
+        {isPaid ? <Check className="h-3 w-3" aria-hidden /> : <CircleDollarSign className="h-3 w-3" aria-hidden />}
         {isPaid ? "Paid" : "Not Paid"}
-      </button>
+      </Button>
 
       {error && <p className="text-[11px] text-danger">{error}</p>}
     </div>

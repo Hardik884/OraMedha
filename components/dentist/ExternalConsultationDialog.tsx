@@ -6,6 +6,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Button, type ButtonVariant, type ButtonSize } from "@/components/ui/button";
+import { Check, CircleDollarSign } from "lucide-react";
 import { Field } from "@/components/ui/field";
 import { CalendarPicker } from "@/components/ui/calendar-picker";
 import { cn } from "@/lib/utils";
@@ -198,28 +199,22 @@ export function ExternalConsultationDialog({
 
           <Field label="Payment" htmlFor="ext-paid">
             <div className="flex items-center gap-2">
-              <button
+              <Button
                 id="ext-paid"
                 type="button"
                 role="switch"
                 aria-checked={isPaid}
+                size="sm"
                 onClick={() => setIsPaid((v) => !v)}
                 className={cn(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
                   isPaid
-                    ? "bg-success-bg text-success border-success-border"
-                    : "bg-surface text-text-secondary border-border hover:bg-surface-muted"
+                    ? "bg-success text-success-foreground hover:bg-success-hover"
+                    : "bg-surface-muted text-text-primary border border-border-strong hover:bg-border"
                 )}
               >
-                <span
-                  className={cn(
-                    "inline-block h-3.5 w-3.5 rounded-full border transition-colors",
-                    isPaid ? "bg-success border-success" : "bg-transparent border-border-strong"
-                  )}
-                  aria-hidden
-                />
+                {isPaid ? <Check className="h-3.5 w-3.5" aria-hidden /> : <CircleDollarSign className="h-3.5 w-3.5" aria-hidden />}
                 {isPaid ? "Paid" : "Not Paid"}
-              </button>
+              </Button>
             </div>
           </Field>
 

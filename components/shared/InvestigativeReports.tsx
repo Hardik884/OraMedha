@@ -5,8 +5,7 @@ import {
   uploadAppointmentDocument,
   deleteAppointmentDocument,
 } from "@/actions/treatments";
-import { INVESTIGATIVE_DOCUMENT_TYPES, type TreatmentDocument } from "@/types";
-import { Select } from "@/components/ui/select";
+import type { TreatmentDocument } from "@/types";
 import { FileText, ImageIcon, Upload, Trash2, Download } from "lucide-react";
 
 type DocWithUrl = TreatmentDocument & { url: string | null };
@@ -54,7 +53,6 @@ export function InvestigativeReports({
   canManage,
 }: InvestigativeReportsProps) {
   const [isPending, startTransition] = useTransition();
-  const [docType, setDocType] = useState<string>(INVESTIGATIVE_DOCUMENT_TYPES[0]);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -79,7 +77,6 @@ export function InvestigativeReports({
     fd.append("file", file);
     fd.append("appointment_id", appointmentId);
     fd.append("patient_id", patientId);
-    fd.append("document_type", docType);
 
     uploadAppointmentDocument(fd).then((res) => {
       setUploading(false);
@@ -113,20 +110,6 @@ export function InvestigativeReports({
 
       {canManage && (
         <div className="flex flex-wrap items-center gap-2">
-          <Select
-            aria-label="Document type"
-            value={docType}
-            onChange={(e) => setDocType(e.target.value)}
-            disabled={uploading}
-            className="w-32"
-          >
-            {INVESTIGATIVE_DOCUMENT_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </Select>
-
           <label className="inline-flex items-center gap-2 px-3 py-2 text-sm border border-dashed border-border-strong rounded-lg cursor-pointer hover:bg-background text-text-body">
             <Upload className="h-3.5 w-3.5" aria-hidden />
             {uploading ? "Uploading…" : "Upload"}
