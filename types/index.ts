@@ -172,6 +172,81 @@ export const TOOTH_STATUS_LABELS: Record<ToothStatus, string> = {
 };
 
 /**
+ * ToothCondition — what a charted tooth IS. Fixed vocabulary, replacing the
+ * free-text `patient_teeth.condition` column the Dental Chart UI used to
+ * expose as an open text field (see migration 20260909000000). Independent
+ * of TreatmentStage: a tooth can carry a condition (e.g. a crown) with no
+ * treatment currently underway, or be `normal` while a treatment stage is
+ * still tracked for something planned.
+ */
+export const ToothCondition = {
+  NORMAL:              "normal",
+  CARIES:              "caries",
+  FRACTURED:           "fractured",
+  RESTORED_FILLED:     "restored_filled",
+  CROWN:               "crown",
+  ROOT_CANAL_TREATED:  "root_canal_treated",
+  ABSCESS:             "abscess",
+  MISSING_EXTRACTED:   "missing_extracted",
+  IMPLANT:             "implant",
+} as const;
+export type ToothCondition = (typeof ToothCondition)[keyof typeof ToothCondition];
+
+export const TOOTH_CONDITION_LABELS: Record<ToothCondition, string> = {
+  normal:              "Normal",
+  caries:              "Caries",
+  fractured:           "Fractured",
+  restored_filled:     "Restored / Filled",
+  crown:               "Crown",
+  root_canal_treated:  "Root Canal Treated",
+  abscess:             "Abscess",
+  missing_extracted:   "Missing / Extracted",
+  implant:             "Implant",
+};
+
+/** Display order for the Condition dropdown and legend — matches the product spec's listed order. */
+export const TOOTH_CONDITION_ORDER: readonly ToothCondition[] = [
+  "normal",
+  "caries",
+  "fractured",
+  "restored_filled",
+  "crown",
+  "root_canal_treated",
+  "abscess",
+  "missing_extracted",
+  "implant",
+];
+
+/**
+ * TreatmentStage — what stage a tooth's treatment is at, if any is underway.
+ * Fixed vocabulary matching the treatment-stage concepts already used
+ * elsewhere in the app (planned/in_progress/completed on `treatments.status`,
+ * plus `recommended` for a tooth flagged before a treatment record exists).
+ * Nullable on patient_teeth: a tooth with nothing underway has no stage.
+ */
+export const TreatmentStage = {
+  RECOMMENDED: "recommended",
+  PLANNED:     "planned",
+  IN_PROGRESS: "in_progress",
+  COMPLETED:   "completed",
+} as const;
+export type TreatmentStage = (typeof TreatmentStage)[keyof typeof TreatmentStage];
+
+export const TREATMENT_STAGE_LABELS: Record<TreatmentStage, string> = {
+  recommended: "Recommended",
+  planned:     "Planned",
+  in_progress: "In Progress",
+  completed:   "Completed",
+};
+
+export const TREATMENT_STAGE_ORDER: readonly TreatmentStage[] = [
+  "recommended",
+  "planned",
+  "in_progress",
+  "completed",
+];
+
+/**
  * Valid appointment status transition map.
  * Used in actions/appointments.ts to enforce lifecycle order.
  */
@@ -616,13 +691,30 @@ function isValidFdiToothNumber(dentitionType: DentitionType, toothNumber: number
   return (FDI_TOOTH_NUMBERS[dentitionType] as readonly number[]).includes(toothNumber);
 }
 
+const TOOTH_CONDITION_VALUES = [
+  "normal",
+  "caries",
+  "fractured",
+  "restored_filled",
+  "crown",
+  "root_canal_treated",
+  "abscess",
+  "missing_extracted",
+  "implant",
+] as const;
+
+const TREATMENT_STAGE_VALUES = ["recommended", "planned", "in_progress", "completed"] as const;
+
 export const UpsertToothSchema = z
   .object({
     patient_id: z.string().uuid("Patient is required"),
     dentition_type: z.enum(["adult", "primary"]).default("adult"),
     tooth_number: z.number().int(),
-    status: z.enum(["normal", "recommended", "planned", "in_progress", "completed", "missing"]),
-    condition: z.string().max(500).optional().or(z.literal("")).transform((v) => v || undefined),
+    tooth_condition: z.enum(TOOTH_CONDITION_VALUES),
+    // null (not just optional) is a real, meaningful value here: "no
+    // treatment stage set" — distinct from omitting the field, which would
+    // leave an existing stage untouched on a bulk apply.
+    treatment_stage: z.enum(TREATMENT_STAGE_VALUES).nullable(),
     notes: z.string().max(2000).optional().or(z.literal("")).transform((v) => v || undefined),
   })
   .refine((v) => isValidFdiToothNumber(v.dentition_type, v.tooth_number), {
@@ -636,8 +728,8 @@ export const BulkUpdateTeethSchema = z.object({
   patient_id: z.string().uuid("Patient is required"),
   dentition_type: z.enum(["adult", "primary"]).default("adult"),
   tooth_numbers: z.array(z.number().int()).min(1, "Select at least one tooth").max(32),
-  status: z.enum(["normal", "recommended", "planned", "in_progress", "completed", "missing"]),
-  condition: z.string().max(500).optional().or(z.literal("")).transform((v) => v || undefined),
+  tooth_condition: z.enum(TOOTH_CONDITION_VALUES),
+  treatment_stage: z.enum(TREATMENT_STAGE_VALUES).nullable(),
   notes: z.string().max(2000).optional().or(z.literal("")).transform((v) => v || undefined),
 });
 export type BulkUpdateTeethInput = z.infer<typeof BulkUpdateTeethSchema>;

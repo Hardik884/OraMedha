@@ -15,13 +15,15 @@ import { useState } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Field } from "@/components/ui/field";
 import { bulkUpdateTeeth } from "@/actions/dental-chart";
-import { TOOTH_STATUS_LABELS } from "@/lib/dental-chart/status";
-import { TOOTH_STATUS_ORDER } from "@/lib/dental-chart/teeth";
-import type { DentitionType, ToothStatus } from "@/types";
+import { TOOTH_CONDITION_LABELS, TREATMENT_STAGE_LABELS } from "@/lib/dental-chart/status";
+import { TOOTH_CONDITION_ORDER, TREATMENT_STAGE_ORDER } from "@/types";
+import type { DentitionType, ToothCondition, TreatmentStage } from "@/types";
+
+/** Value the Treatment Status <select> uses for "no stage set" — Select's DOM value is always a string, so `null` needs a sentinel. */
+const NO_STAGE = "__none__";
 
 export type BulkUpdateTeethDialogProps = {
   open: boolean;
@@ -40,8 +42,8 @@ export function BulkUpdateTeethDialog({
   toothNumbers,
   onSaved,
 }: BulkUpdateTeethDialogProps) {
-  const [status, setStatus] = useState<ToothStatus>("recommended");
-  const [condition, setCondition] = useState("");
+  const [condition, setCondition] = useState<ToothCondition>("normal");
+  const [stage, setStage] = useState<TreatmentStage | null>("recommended");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,8 +55,8 @@ export function BulkUpdateTeethDialog({
       patient_id: patientId,
       dentition_type: dentitionType,
       tooth_numbers: toothNumbers,
-      status,
-      condition,
+      tooth_condition: condition,
+      treatment_stage: stage,
       notes,
     });
     setSaving(false);
@@ -62,7 +64,6 @@ export function BulkUpdateTeethDialog({
       setError(result.error);
       return;
     }
-    setCondition("");
     setNotes("");
     onSaved();
     onClose();
@@ -83,23 +84,29 @@ export function BulkUpdateTeethDialog({
           </div>
         )}
 
-        <Field label="Status" htmlFor="bulk-status">
-          <Select id="bulk-status" value={status} onChange={(e) => setStatus(e.target.value as ToothStatus)}>
-            {TOOTH_STATUS_ORDER.map((s) => (
-              <option key={s} value={s}>
-                {TOOTH_STATUS_LABELS[s]}
+        <Field label="Condition" htmlFor="bulk-condition">
+          <Select id="bulk-condition" value={condition} onChange={(e) => setCondition(e.target.value as ToothCondition)}>
+            {TOOTH_CONDITION_ORDER.map((c) => (
+              <option key={c} value={c}>
+                {TOOTH_CONDITION_LABELS[c]}
               </option>
             ))}
           </Select>
         </Field>
 
-        <Field label="Condition" htmlFor="bulk-condition">
-          <Input
-            id="bulk-condition"
-            value={condition}
-            onChange={(e) => setCondition(e.target.value)}
-            placeholder="Optional — applied to every selected tooth"
-          />
+        <Field label="Treatment Status" htmlFor="bulk-stage">
+          <Select
+            id="bulk-stage"
+            value={stage ?? NO_STAGE}
+            onChange={(e) => setStage(e.target.value === NO_STAGE ? null : (e.target.value as TreatmentStage))}
+          >
+            <option value={NO_STAGE}>No treatment underway</option>
+            {TREATMENT_STAGE_ORDER.map((s) => (
+              <option key={s} value={s}>
+                {TREATMENT_STAGE_LABELS[s]}
+              </option>
+            ))}
+          </Select>
         </Field>
 
         <Field label="Notes" htmlFor="bulk-notes">

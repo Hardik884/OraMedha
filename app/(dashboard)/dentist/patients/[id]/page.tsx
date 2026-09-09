@@ -115,7 +115,7 @@ export default async function DentistPatientProfilePage({ params, searchParams }
         <PatientDentalChartSection
           patientId={id}
           patientName={patientName}
-          fullViewHref={`/dentist/patients/${id}/dental-chart`}
+          canExpand
         />
       )}
 

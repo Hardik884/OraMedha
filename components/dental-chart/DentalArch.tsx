@@ -16,8 +16,33 @@
 
 import { Tooth } from "./Tooth";
 import { getToothType, type ToothIdentity } from "@/lib/dental-chart/teeth";
+import { TOOTH_CONDITION_LABELS, TREATMENT_STAGE_LABELS, TREATMENT_STAGE_CLASSES } from "@/lib/dental-chart/status";
 import type { PatientTooth } from "@/types";
 import { cn } from "@/lib/utils";
+
+/**
+ * Small corner badge for a tooth's TreatmentStage — the chart's second
+ * visual channel, independent of the tooth's own condition colour (see
+ * ToothLegend, which documents exactly this rendering). Each stage carries a
+ * distinct SHAPE, not just a colour: hollow+dashed / hollow+solid ring /
+ * pulsing filled dot / plain filled dot — so the four remain distinguishable
+ * without colour vision. Absent entirely when no treatment is underway.
+ */
+function StageBadge({ stage }: { stage: NonNullable<PatientTooth["treatment_stage"]> }) {
+  const tone = TREATMENT_STAGE_CLASSES[stage];
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full",
+        stage === "recommended" && "bg-transparent border-2 border-dashed border-warning",
+        stage === "planned" && "bg-surface border-2 border-solid border-accent",
+        stage === "in_progress" && cn(tone.dot, "border border-surface animate-pulse"),
+        stage === "completed" && cn(tone.dot, "border border-surface"),
+      )}
+    />
+  );
+}
 
 export type DentalArchProps = {
   teeth: ToothIdentity[];
@@ -92,19 +117,21 @@ function ArchHalf({
     <div className="flex items-start gap-1.5 sm:gap-2">
       {teeth.map((identity) => {
         const tooth = toothByNumber.get(identity.toothNumber) ?? null;
-        const status = tooth?.status ?? "normal";
+        const condition = tooth?.tooth_condition ?? "normal";
+        const stage = tooth?.treatment_stage ?? null;
         const isSelected = selectedTeeth.has(identity.toothNumber);
         const isActive = activeToothNumber === identity.toothNumber;
         const numberLabel = (
           <span
             className={cn(
-              "text-[11px] font-medium tabular-nums transition-colors",
-              isActive ? "text-accent font-semibold" : "text-text-secondary"
+              "text-[11px] font-semibold tabular-nums transition-colors",
+              isActive ? "text-accent" : "text-text-primary"
             )}
           >
             {identity.toothNumber}
           </span>
         );
+        const label = `Tooth ${identity.toothNumber} — ${TOOTH_CONDITION_LABELS[condition]}${stage ? `, ${TREATMENT_STAGE_LABELS[stage]}` : ""}`;
 
         return (
           <button
@@ -112,8 +139,8 @@ function ArchHalf({
             type="button"
             onClick={() => onToothClick(identity.toothNumber)}
             aria-pressed={multiSelectMode ? isSelected : isActive}
-            aria-label={`Tooth ${identity.toothNumber} — ${status.replace("_", " ")}`}
-            title={`Tooth ${identity.toothNumber}`}
+            aria-label={label}
+            title={label}
             className={cn(
               "flex flex-col items-center gap-1 rounded-lg px-1 py-1.5 transition-all",
               "hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1",
@@ -122,12 +149,15 @@ function ArchHalf({
             )}
           >
             {arch === "upper" && numberLabel}
-            <Tooth
-              toothType={getToothType(identity.dentitionType, identity.position)}
-              arch={arch}
-              status={status}
-              size={38}
-            />
+            <span className="relative inline-flex">
+              <Tooth
+                toothType={getToothType(identity.dentitionType, identity.position)}
+                arch={arch}
+                condition={condition}
+                size={38}
+              />
+              {stage && <StageBadge stage={stage} />}
+            </span>
             {arch === "lower" && numberLabel}
           </button>
         );

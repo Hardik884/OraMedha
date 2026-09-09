@@ -216,7 +216,9 @@ describe("updateTreatment — dental chart linking", () => {
       dentition_type: "adult",
       tooth_number: 36,
       status: "planned",
-      condition: "Deep caries",
+      condition: "caries",
+      tooth_condition: "caries",
+      treatment_stage: "planned",
       notes: "Sensitive to cold",
       deleted_at: null,
     });
@@ -226,10 +228,11 @@ describe("updateTreatment — dental chart linking", () => {
 
     expect(result.error).toBeNull();
     expect(tables.patient_teeth).toHaveLength(1); // no duplicate row
-    expect(tables.patient_teeth[0].status).toBe("completed");
-    // The sync only knows about status — the dentist's own chart notes must
-    // survive a treatment-driven sync untouched.
-    expect(tables.patient_teeth[0].condition).toBe("Deep caries");
+    expect(tables.patient_teeth[0].treatment_stage).toBe("completed");
+    expect(tables.patient_teeth[0].status).toBe("completed"); // legacy mirror
+    // The sync only knows about the treatment's stage — the dentist's own
+    // chart condition and notes must survive a treatment-driven sync untouched.
+    expect(tables.patient_teeth[0].tooth_condition).toBe("caries");
     expect(tables.patient_teeth[0].notes).toBe("Sensitive to cold");
   });
 

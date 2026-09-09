@@ -16,19 +16,20 @@ import { useEffect, useState } from "react";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Field } from "@/components/ui/field";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { TreatmentDetailDialog } from "@/components/dentist/TreatmentDetailModal";
 import { TreatmentFormDialog } from "@/components/dentist/TreatmentFormDialog";
-import { upsertToothState, linkTreatmentToTooth, unlinkTreatmentFromTooth } from "@/actions/dental-chart";
-import { getTreatmentsForPatient } from "@/actions/treatments";
-import { TOOTH_STATUS_LABELS } from "@/lib/dental-chart/status";
-import { TOOTH_STATUS_ORDER } from "@/lib/dental-chart/teeth";
+import { upsertToothState, unlinkTreatmentFromTooth } from "@/actions/dental-chart";
+import { TOOTH_STATUS_LABELS, TOOTH_CONDITION_LABELS, TREATMENT_STAGE_LABELS } from "@/lib/dental-chart/status";
+import { TOOTH_CONDITION_ORDER, TREATMENT_STAGE_ORDER } from "@/types";
 import { TREATMENT_STATUS_LABELS, formatCurrency, formatDateTime } from "@/lib/utils";
-import { Stethoscope, History as HistoryIcon, Link2, X } from "lucide-react";
-import type { ToothChartEntry, ToothHistory, DentitionType, ToothStatus, Treatment } from "@/types";
+import { Stethoscope, History as HistoryIcon, X } from "lucide-react";
+import type { ToothChartEntry, ToothHistory, DentitionType, ToothStatus, ToothCondition, TreatmentStage } from "@/types";
+
+/** Value the Treatment Status <select> uses for "no stage set" — Select's DOM value is always a string, so `null` needs a sentinel. */
+const NO_STAGE = "__none__";
 
 export type ToothDetailPanelProps = {
   open: boolean;
@@ -52,32 +53,20 @@ export function ToothDetailPanel({
   dentitionType,
   onSaved,
 }: ToothDetailPanelProps) {
-  const [status, setStatus] = useState<ToothStatus>("normal");
-  const [condition, setCondition] = useState("");
+  const [condition, setCondition] = useState<ToothCondition>("normal");
+  const [stage, setStage] = useState<TreatmentStage | null>(null);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewingTreatmentId, setViewingTreatmentId] = useState<string | null>(null);
-
-  // ── Link an existing (past or current) treatment to this tooth ──────────
-  const [linkPickerOpen, setLinkPickerOpen] = useState(false);
-  const [patientTreatments, setPatientTreatments] = useState<Treatment[] | null>(null);
-  const [loadingTreatments, setLoadingTreatments] = useState(false);
-  const [selectedTreatmentId, setSelectedTreatmentId] = useState("");
-  const [linking, setLinking] = useState(false);
-  const [linkError, setLinkError] = useState<string | null>(null);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!entry) return;
-    setStatus(entry.tooth?.status ?? "normal");
-    setCondition(entry.tooth?.condition ?? "");
+    setCondition(entry.tooth?.tooth_condition ?? "normal");
+    setStage(entry.tooth?.treatment_stage ?? null);
     setNotes(entry.tooth?.notes ?? "");
     setError(null);
-    setLinkPickerOpen(false);
-    setPatientTreatments(null);
-    setSelectedTreatmentId("");
-    setLinkError(null);
   }, [entry]);
 
   if (!entry) return null;
@@ -90,8 +79,8 @@ export function ToothDetailPanel({
       patient_id: patientId,
       dentition_type: dentitionType,
       tooth_number: entry.toothNumber,
-      status,
-      condition,
+      tooth_condition: condition,
+      treatment_stage: stage,
       notes,
     });
     setSaving(false);
@@ -99,39 +88,6 @@ export function ToothDetailPanel({
       setError(result.error);
       return;
     }
-    onSaved();
-  }
-
-  async function handleOpenLinkPicker() {
-    setLinkPickerOpen((v) => !v);
-    setLinkError(null);
-    if (patientTreatments !== null) return; // already loaded
-    setLoadingTreatments(true);
-    const result = await getTreatmentsForPatient(patientId);
-    setLoadingTreatments(false);
-    if (result.error) {
-      setLinkError(result.error);
-      return;
-    }
-    setPatientTreatments((result.data as Treatment[] | null) ?? []);
-  }
-
-  async function handleLink() {
-    if (!entry || !selectedTreatmentId) return;
-    setLinking(true);
-    setLinkError(null);
-    const result = await linkTreatmentToTooth({
-      treatment_id: selectedTreatmentId,
-      dentition_type: dentitionType,
-      tooth_number: entry.toothNumber,
-    });
-    setLinking(false);
-    if (result.error) {
-      setLinkError(result.error);
-      return;
-    }
-    setLinkPickerOpen(false);
-    setSelectedTreatmentId("");
     onSaved();
   }
 
@@ -147,16 +103,6 @@ export function ToothDetailPanel({
     onSaved();
   }
 
-  // Treatments eligible to link: not deleted (already excluded by the
-  // action), and not already linked to THIS tooth (those already appear in
-  // the Linked Treatments list above — offering them again would just be a
-  // confusing no-op). A treatment linked to a DIFFERENT tooth is still
-  // offered — selecting it moves the link here, which is a legitimate "I
-  // charted the wrong tooth" correction.
-  const linkableTreatments = (patientTreatments ?? []).filter(
-    (t) => !(t.tooth_number === entry?.toothNumber && t.dentition_type === dentitionType)
-  );
-
   return (
     <>
       <Dialog open={open} onClose={onClose} title={`Tooth ${entry.toothNumber}`} size="md">
@@ -168,27 +114,33 @@ export function ToothDetailPanel({
           )}
 
           <div className="space-y-3">
-            <Field label="Status" htmlFor="tooth-status">
+            <Field label="Condition" htmlFor="tooth-condition">
               <Select
-                id="tooth-status"
-                value={status}
-                onChange={(e) => setStatus(e.target.value as ToothStatus)}
+                id="tooth-condition"
+                value={condition}
+                onChange={(e) => setCondition(e.target.value as ToothCondition)}
               >
-                {TOOTH_STATUS_ORDER.map((s) => (
-                  <option key={s} value={s}>
-                    {TOOTH_STATUS_LABELS[s]}
+                {TOOTH_CONDITION_ORDER.map((c) => (
+                  <option key={c} value={c}>
+                    {TOOTH_CONDITION_LABELS[c]}
                   </option>
                 ))}
               </Select>
             </Field>
 
-            <Field label="Condition" htmlFor="tooth-condition" hint="e.g. Caries, Fractured cusp">
-              <Input
-                id="tooth-condition"
-                value={condition}
-                onChange={(e) => setCondition(e.target.value)}
-                placeholder="Optional clinical condition"
-              />
+            <Field label="Treatment Status" htmlFor="tooth-stage" hint="Leave as “No treatment underway” when nothing is planned for this tooth.">
+              <Select
+                id="tooth-stage"
+                value={stage ?? NO_STAGE}
+                onChange={(e) => setStage(e.target.value === NO_STAGE ? null : (e.target.value as TreatmentStage))}
+              >
+                <option value={NO_STAGE}>No treatment underway</option>
+                {TREATMENT_STAGE_ORDER.map((s) => (
+                  <option key={s} value={s}>
+                    {TREATMENT_STAGE_LABELS[s]}
+                  </option>
+                ))}
+              </Select>
             </Field>
 
             <Field label="Notes" htmlFor="tooth-notes">
@@ -215,10 +167,6 @@ export function ToothDetailPanel({
                 Linked Treatments
               </h3>
               <div className="flex items-center gap-1.5">
-                <Button variant="outline" size="xs" onClick={handleOpenLinkPicker}>
-                  <Link2 className="h-3 w-3" aria-hidden />
-                  Link Existing
-                </Button>
                 <TreatmentFormDialog
                   appointmentId={appointmentId}
                   patientId={patientId}
@@ -234,50 +182,6 @@ export function ToothDetailPanel({
                 </TreatmentFormDialog>
               </div>
             </div>
-
-            {linkPickerOpen && (
-              <div className="rounded-lg border border-border bg-background p-3 space-y-2">
-                {linkError && (
-                  <p className="text-xs text-danger">{linkError}</p>
-                )}
-                {loadingTreatments ? (
-                  <p className="text-xs text-text-secondary">Loading this patient&apos;s treatments…</p>
-                ) : linkableTreatments.length === 0 ? (
-                  <p className="text-xs text-text-disabled">
-                    No other treatments to link — every existing treatment for this patient is already linked here.
-                  </p>
-                ) : (
-                  <>
-                    <Select
-                      value={selectedTreatmentId}
-                      onChange={(e) => setSelectedTreatmentId(e.target.value)}
-                      aria-label="Select a treatment to link"
-                    >
-                      <option value="">Select a past or current treatment…</option>
-                      {linkableTreatments.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.treatment_type} · {t.performed_at ? formatDateTime(t.performed_at) : "not yet performed"} · {TREATMENT_STATUS_LABELS[t.status]}
-                          {t.tooth_number != null ? ` (currently Tooth ${t.tooth_number})` : ""}
-                        </option>
-                      ))}
-                    </Select>
-                    <div className="flex justify-end gap-2">
-                      <Button variant="ghost" size="xs" onClick={() => setLinkPickerOpen(false)}>
-                        Cancel
-                      </Button>
-                      <Button
-                        size="xs"
-                        onClick={handleLink}
-                        isLoading={linking}
-                        disabled={!selectedTreatmentId}
-                      >
-                        {linking ? "Linking…" : "Link"}
-                      </Button>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
 
             {entry.treatments.length === 0 ? (
               <p className="text-xs text-text-disabled">No treatments linked to this tooth yet.</p>
@@ -348,19 +252,47 @@ export function ToothDetailPanel({
   );
 }
 
+type HistoryValue = {
+  // New shape (from 20260909000000 onward).
+  tooth_condition?: ToothCondition;
+  treatment_stage?: TreatmentStage | null;
+  // Legacy shape (rows written before this migration) — still rendered
+  // correctly so existing history keeps displaying rather than going blank.
+  status?: string;
+  condition?: string;
+  notes?: string;
+};
+
+/** A stage/condition label, tolerating either the current or the legacy vocabulary so old and new history rows both render sensibly. */
+function stageOrStatusLabel(v: HistoryValue | null): string | null {
+  if (!v) return null;
+  if (v.treatment_stage) return TREATMENT_STAGE_LABELS[v.treatment_stage];
+  if (v.status) return TOOTH_STATUS_LABELS[v.status as ToothStatus] ?? v.status;
+  return null;
+}
+
+function conditionLabel(v: HistoryValue | null): string | null {
+  if (!v) return null;
+  if (v.tooth_condition) return TOOTH_CONDITION_LABELS[v.tooth_condition];
+  if (v.condition) return v.condition;
+  return null;
+}
+
 function HistoryRow({ history }: { history: ToothHistory }) {
-  const oldValue = history.old_value as { status?: string } | null;
-  const newValue = history.new_value as { status?: string; condition?: string; notes?: string } | null;
+  const oldValue = history.old_value as HistoryValue | null;
+  const newValue = history.new_value as HistoryValue | null;
 
   let summary = "Updated";
-  if (history.action === "status_changed" && newValue?.status) {
-    summary = oldValue?.status
-      ? `Status: ${TOOTH_STATUS_LABELS[oldValue.status as ToothStatus] ?? oldValue.status} → ${TOOTH_STATUS_LABELS[newValue.status as ToothStatus] ?? newValue.status}`
-      : `Status set to ${TOOTH_STATUS_LABELS[newValue.status as ToothStatus] ?? newValue.status}`;
+  if (history.action === "status_changed") {
+    const from = stageOrStatusLabel(oldValue);
+    const to = stageOrStatusLabel(newValue) ?? "No treatment underway";
+    summary = from ? `Treatment status: ${from} → ${to}` : `Treatment status set to ${to}`;
   } else if (history.action === "treatment_linked") {
-    summary = `Linked to a treatment${newValue?.status ? ` — status ${TOOTH_STATUS_LABELS[newValue.status as ToothStatus] ?? newValue.status}` : ""}`;
+    const stage = stageOrStatusLabel(newValue);
+    summary = `Linked to a treatment${stage ? ` — status ${stage}` : ""}`;
   } else if (history.action === "condition_updated") {
-    summary = newValue?.condition ? `Condition noted: ${newValue.condition}` : "Condition updated";
+    const condition = conditionLabel(newValue);
+    summary = condition ? `Condition set to ${condition}` : "Condition updated";
   } else if (history.action === "note_added") {
     summary = "Note updated";
   }

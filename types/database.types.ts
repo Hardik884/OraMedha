@@ -34,6 +34,36 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_pending_actions: {
+        Row: {
+          args: Json
+          created_at: string
+          created_invocation_id: string
+          expires_at: string
+          token: string
+          tool_name: string
+          user_id: string
+        }
+        Insert: {
+          args: Json
+          created_at?: string
+          created_invocation_id: string
+          expires_at: string
+          token: string
+          tool_name: string
+          user_id: string
+        }
+        Update: {
+          args?: Json
+          created_at?: string
+          created_invocation_id?: string
+          expires_at?: string
+          token?: string
+          tool_name?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       appointment_history: {
         Row: {
           action: Database["public"]["Enums"]["appointment_history_action"]
@@ -68,6 +98,13 @@ export type Database = {
             columns: ["appointment_id"]
             isOneToOne: false
             referencedRelation: "active_appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointment_history_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -625,6 +662,13 @@ export type Database = {
             foreignKeyName: "consents_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "consents_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -696,6 +740,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "consents_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -776,6 +827,13 @@ export type Database = {
             columns: ["dentist_id"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "consultancy_income_schedule_id_fkey"
+            columns: ["schedule_id"]
+            isOneToOne: false
+            referencedRelation: "consultancy_schedules"
             referencedColumns: ["id"]
           },
         ]
@@ -1064,6 +1122,13 @@ export type Database = {
             foreignKeyName: "follow_ups_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_ups_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -1114,6 +1179,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_ups_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -1207,7 +1279,11 @@ export type Database = {
           notes: string | null
           patient_id: string
           status: Database["public"]["Enums"]["tooth_status"]
+          tooth_condition: Database["public"]["Enums"]["tooth_condition"]
           tooth_number: number
+          treatment_stage:
+            | Database["public"]["Enums"]["tooth_treatment_stage"]
+            | null
           updated_at: string
           updated_by: string | null
         }
@@ -1221,7 +1297,11 @@ export type Database = {
           notes?: string | null
           patient_id: string
           status?: Database["public"]["Enums"]["tooth_status"]
+          tooth_condition?: Database["public"]["Enums"]["tooth_condition"]
           tooth_number: number
+          treatment_stage?:
+            | Database["public"]["Enums"]["tooth_treatment_stage"]
+            | null
           updated_at?: string
           updated_by?: string | null
         }
@@ -1235,7 +1315,11 @@ export type Database = {
           notes?: string | null
           patient_id?: string
           status?: Database["public"]["Enums"]["tooth_status"]
+          tooth_condition?: Database["public"]["Enums"]["tooth_condition"]
           tooth_number?: number
+          treatment_stage?:
+            | Database["public"]["Enums"]["tooth_treatment_stage"]
+            | null
           updated_at?: string
           updated_by?: string | null
         }
@@ -1412,6 +1496,13 @@ export type Database = {
             foreignKeyName: "payments_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payments_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -1462,6 +1553,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payments_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -1668,6 +1766,13 @@ export type Database = {
             foreignKeyName: "queue_entries_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: true
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "queue_entries_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: true
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -1809,6 +1914,27 @@ export type Database = {
         }
         Relationships: []
       }
+      security_throttle: {
+        Row: {
+          events: string[]
+          key: string
+          locked_until: string | null
+          updated_at: string
+        }
+        Insert: {
+          events?: string[]
+          key: string
+          locked_until?: string | null
+          updated_at?: string
+        }
+        Update: {
+          events?: string[]
+          key?: string
+          locked_until?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       tooth_history: {
         Row: {
           action: Database["public"]["Enums"]["tooth_history_action"]
@@ -1887,6 +2013,13 @@ export type Database = {
             foreignKeyName: "tooth_history_treatment_id_fkey"
             columns: ["treatment_id"]
             isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tooth_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
             referencedRelation: "treatments"
             referencedColumns: ["id"]
           },
@@ -1953,6 +2086,13 @@ export type Database = {
             foreignKeyName: "treatment_documents_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_documents_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -2010,6 +2150,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_documents_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2103,6 +2250,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2205,6 +2359,13 @@ export type Database = {
             columns: ["appointment_id"]
             isOneToOne: false
             referencedRelation: "active_appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatments_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2335,7 +2496,6 @@ export type Database = {
           dentist_id: string | null
           duration_minutes: number | null
           id: string | null
-          notes: string | null
           patient_id: string | null
           scheduled_at: string | null
           source: Database["public"]["Enums"]["appointment_source"] | null
@@ -2349,7 +2509,6 @@ export type Database = {
           dentist_id?: string | null
           duration_minutes?: number | null
           id?: string | null
-          notes?: string | null
           patient_id?: string | null
           scheduled_at?: string | null
           source?: Database["public"]["Enums"]["appointment_source"] | null
@@ -2363,7 +2522,6 @@ export type Database = {
           dentist_id?: string | null
           duration_minutes?: number | null
           id?: string | null
-          notes?: string | null
           patient_id?: string | null
           scheduled_at?: string | null
           source?: Database["public"]["Enums"]["appointment_source"] | null
@@ -2459,6 +2617,13 @@ export type Database = {
             foreignKeyName: "follow_ups_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_ups_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -2509,6 +2674,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_ups_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2631,6 +2803,13 @@ export type Database = {
             foreignKeyName: "payments_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payments_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -2665,7 +2844,6 @@ export type Database = {
           created_at: string | null
           deleted_at: string | null
           id: string | null
-          internal_notes: string | null
           patient_id: string | null
           patient_visible_notes: string | null
           performed_at: string | null
@@ -2680,7 +2858,6 @@ export type Database = {
           created_at?: string | null
           deleted_at?: string | null
           id?: string | null
-          internal_notes?: string | null
           patient_id?: string | null
           patient_visible_notes?: string | null
           performed_at?: string | null
@@ -2695,7 +2872,6 @@ export type Database = {
           created_at?: string | null
           deleted_at?: string | null
           id?: string | null
-          internal_notes?: string | null
           patient_id?: string | null
           patient_visible_notes?: string | null
           performed_at?: string | null
@@ -2709,6 +2885,13 @@ export type Database = {
             columns: ["appointment_id"]
             isOneToOne: false
             referencedRelation: "active_appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatments_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2741,6 +2924,61 @@ export type Database = {
           },
         ]
       }
+      appointment_clinical_notes: {
+        Row: {
+          chief_complaints: string | null
+          clinic_id: string | null
+          id: string | null
+          medical_history: Json | null
+          notes: string | null
+          oral_findings: string | null
+          patient_id: string | null
+          provisional_diagnosis: string | null
+        }
+        Insert: {
+          chief_complaints?: string | null
+          clinic_id?: string | null
+          id?: string | null
+          medical_history?: Json | null
+          notes?: string | null
+          oral_findings?: string | null
+          patient_id?: string | null
+          provisional_diagnosis?: string | null
+        }
+        Update: {
+          chief_complaints?: string | null
+          clinic_id?: string | null
+          id?: string | null
+          medical_history?: Json | null
+          notes?: string | null
+          oral_findings?: string | null
+          patient_id?: string | null
+          provisional_diagnosis?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "appointments_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_patient_id_fkey"
+            columns: ["patient_id"]
+            isOneToOne: false
+            referencedRelation: "active_patients"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_patient_id_fkey"
+            columns: ["patient_id"]
+            isOneToOne: false
+            referencedRelation: "patients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       overdue_follow_ups: {
         Row: {
           appointment_id: string | null
@@ -2766,6 +3004,13 @@ export type Database = {
             columns: ["appointment_id"]
             isOneToOne: false
             referencedRelation: "active_appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_ups_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2822,6 +3067,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_ups_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2900,6 +3152,13 @@ export type Database = {
             foreignKeyName: "consents_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "consents_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -2936,6 +3195,13 @@ export type Database = {
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "consents_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -2988,7 +3254,11 @@ export type Database = {
           id: string | null
           patient_id: string | null
           status: Database["public"]["Enums"]["tooth_status"] | null
+          tooth_condition: Database["public"]["Enums"]["tooth_condition"] | null
           tooth_number: number | null
+          treatment_stage:
+            | Database["public"]["Enums"]["tooth_treatment_stage"]
+            | null
           updated_at: string | null
         }
         Insert: {
@@ -2997,7 +3267,13 @@ export type Database = {
           id?: string | null
           patient_id?: string | null
           status?: Database["public"]["Enums"]["tooth_status"] | null
+          tooth_condition?:
+            | Database["public"]["Enums"]["tooth_condition"]
+            | null
           tooth_number?: number | null
+          treatment_stage?:
+            | Database["public"]["Enums"]["tooth_treatment_stage"]
+            | null
           updated_at?: string | null
         }
         Update: {
@@ -3006,7 +3282,13 @@ export type Database = {
           id?: string | null
           patient_id?: string | null
           status?: Database["public"]["Enums"]["tooth_status"] | null
+          tooth_condition?:
+            | Database["public"]["Enums"]["tooth_condition"]
+            | null
           tooth_number?: number | null
+          treatment_stage?:
+            | Database["public"]["Enums"]["tooth_treatment_stage"]
+            | null
           updated_at?: string | null
         }
         Relationships: [
@@ -3069,6 +3351,13 @@ export type Database = {
             columns: ["appointment_id"]
             isOneToOne: false
             referencedRelation: "active_appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatments_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
             referencedColumns: ["id"]
           },
           {
@@ -3153,6 +3442,13 @@ export type Database = {
             foreignKeyName: "treatments_appointment_id_fkey"
             columns: ["appointment_id"]
             isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatments_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
             referencedRelation: "appointments"
             referencedColumns: ["id"]
           },
@@ -3179,8 +3475,55 @@ export type Database = {
           },
         ]
       }
+      treatment_clinical_notes: {
+        Row: {
+          clinic_id: string | null
+          id: string | null
+          internal_notes: string | null
+          patient_id: string | null
+        }
+        Insert: {
+          clinic_id?: string | null
+          id?: string | null
+          internal_notes?: string | null
+          patient_id?: string | null
+        }
+        Update: {
+          clinic_id?: string | null
+          id?: string | null
+          internal_notes?: string | null
+          patient_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "treatments_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatments_patient_id_fkey"
+            columns: ["patient_id"]
+            isOneToOne: false
+            referencedRelation: "active_patients"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatments_patient_id_fkey"
+            columns: ["patient_id"]
+            isOneToOne: false
+            referencedRelation: "patients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
+      auth_appointment_frozen: {
+        Args: { p_appointment_id: string }
+        Returns: Json
+      }
       auth_clinic_id: { Args: never; Returns: string }
       auth_is_admin: { Args: never; Returns: boolean }
       auth_patient_clinic_id: { Args: never; Returns: string }
@@ -3194,14 +3537,54 @@ export type Database = {
         Args: { p_ids: string[] }
         Returns: undefined
       }
+      clinic_outstanding_balances: {
+        Args: never
+        Returns: {
+          balance: number
+          name: string
+          patient_id: string
+          payment_plan_until: string
+          phone: string
+        }[]
+      }
       create_patient_appointment: {
         Args: { p_notes?: string; p_patient_id: string; p_scheduled_at: string }
         Returns: string
       }
+      purge_expired_security_state: { Args: never; Returns: undefined }
       purge_phi_access_log_rows: { Args: { p_ids: string[] }; Returns: number }
       run_metric_history_job: { Args: never; Returns: undefined }
       run_no_show_detection_job: { Args: never; Returns: undefined }
       run_retention_purge: { Args: { p_dry_run?: boolean }; Returns: Json }
+      throttle_check: {
+        Args: { p_key: string; p_window_ms: number }
+        Returns: {
+          failures: number
+          locked: boolean
+          retry_after_seconds: number
+        }[]
+      }
+      throttle_clear: { Args: { p_key: string }; Returns: undefined }
+      throttle_consume_send: {
+        Args: { p_key: string; p_max: number; p_window_ms: number }
+        Returns: {
+          exhausted: boolean
+          retry_after_seconds: number
+        }[]
+      }
+      throttle_record_failure: {
+        Args: {
+          p_key: string
+          p_lockout_ms: number
+          p_max: number
+          p_window_ms: number
+        }
+        Returns: {
+          failures: number
+          locked: boolean
+          retry_after_seconds: number
+        }[]
+      }
     }
     Enums: {
       appointment_history_action:
@@ -3258,6 +3641,16 @@ export type Database = {
         | "PATIENT_DATA_EXPORTED"
         | "AI_CONTEXT_PREPARED"
       queue_status: "waiting" | "in_progress" | "completed"
+      tooth_condition:
+        | "normal"
+        | "caries"
+        | "fractured"
+        | "restored_filled"
+        | "crown"
+        | "root_canal_treated"
+        | "abscess"
+        | "missing_extracted"
+        | "implant"
       tooth_history_action:
         | "status_changed"
         | "condition_updated"
@@ -3270,6 +3663,11 @@ export type Database = {
         | "in_progress"
         | "completed"
         | "missing"
+      tooth_treatment_stage:
+        | "recommended"
+        | "planned"
+        | "in_progress"
+        | "completed"
       treatment_history_action:
         | "created"
         | "updated"
@@ -3468,6 +3866,17 @@ export const Constants = {
         "AI_CONTEXT_PREPARED",
       ],
       queue_status: ["waiting", "in_progress", "completed"],
+      tooth_condition: [
+        "normal",
+        "caries",
+        "fractured",
+        "restored_filled",
+        "crown",
+        "root_canal_treated",
+        "abscess",
+        "missing_extracted",
+        "implant",
+      ],
       tooth_history_action: [
         "status_changed",
         "condition_updated",
@@ -3481,6 +3890,12 @@ export const Constants = {
         "in_progress",
         "completed",
         "missing",
+      ],
+      tooth_treatment_stage: [
+        "recommended",
+        "planned",
+        "in_progress",
+        "completed",
       ],
       treatment_history_action: [
         "created",

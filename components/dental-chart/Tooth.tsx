@@ -22,20 +22,24 @@
  * codebase's existing precedent for a hand-drawn SVG shape.
  */
 
-import type { ToothStatus } from "@/types";
+import type { ToothCondition } from "@/types";
 import type { ToothType, ArchSide } from "@/lib/dental-chart/teeth";
 import { cn } from "@/lib/utils";
-import { TOOTH_STATUS_CLASSES } from "@/lib/dental-chart/status";
+import { TOOTH_CONDITION_CLASSES } from "@/lib/dental-chart/status";
 
-export type ToothVisualState = ToothStatus;
+export type ToothVisualState = ToothCondition;
 
-const STATUS_STROKE_WIDTH: Record<ToothVisualState, number> = {
+/** A slightly heavier outline is a second, non-colour cue for a condition that needs one to stand out at a glance; every other condition shares the default weight. */
+const CONDITION_STROKE_WIDTH: Record<ToothVisualState, number> = {
   normal: 0.6,
-  recommended: 0.6,
-  planned: 0.6,
-  in_progress: 0.9,
-  completed: 0.6,
-  missing: 0.6,
+  caries: 0.6,
+  fractured: 0.6,
+  restored_filled: 0.6,
+  crown: 0.6,
+  root_canal_treated: 0.6,
+  abscess: 0.9,
+  missing_extracted: 0.6,
+  implant: 0.6,
 };
 
 /**
@@ -79,17 +83,17 @@ const TOOTH_SHAPES: Record<
 export type ToothProps = {
   toothType: ToothType;
   arch: ArchSide;
-  status: ToothVisualState;
+  condition: ToothVisualState;
   size?: number;
   className?: string;
   ariaLabel?: string;
 };
 
-export function Tooth({ toothType, arch, status, size = 40, className, ariaLabel }: ToothProps) {
+export function Tooth({ toothType, arch, condition, size = 40, className, ariaLabel }: ToothProps) {
   const shape = TOOTH_SHAPES[toothType];
-  const tone = TOOTH_STATUS_CLASSES[status];
-  const strokeWidth = STATUS_STROKE_WIDTH[status];
-  const isMissing = status === "missing";
+  const tone = TOOTH_CONDITION_CLASSES[condition];
+  const strokeWidth = CONDITION_STROKE_WIDTH[condition];
+  const isMissing = condition === "missing_extracted";
 
   const [, , vbWidthRaw, vbHeightRaw] = shape.viewBox.split(" ");
   const vbWidth = Number(vbWidthRaw);

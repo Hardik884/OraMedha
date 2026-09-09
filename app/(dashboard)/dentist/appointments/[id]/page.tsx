@@ -148,7 +148,7 @@ export default async function DentistAppointmentDetailPage({ params }: Props) {
         patientId={appt.patient_id}
         patientName={appt.patient.name}
         appointmentId={appt.id}
-        fullViewHref={`/dentist/patients/${appt.patient_id}/dental-chart?from=${appt.id}`}
+        canExpand
       />
 
       {/* ── Oral & Radiographic Findings (dentist only) ──────── */}

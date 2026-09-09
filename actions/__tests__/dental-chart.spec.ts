@@ -183,16 +183,16 @@ describe("getPatientDentalChart", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "completed",
-      condition: "Root canal",
+      tooth_condition: "root_canal_treated",
+      treatment_stage: "completed",
       notes: null,
       deleted_at: null,
     });
     asDentist(tables);
     const result = await getPatientDentalChart(PATIENT_A, "adult");
     const tooth36 = result.data?.teeth.find((t) => t.toothNumber === 36);
-    expect(tooth36?.tooth?.status).toBe("completed");
-    expect(tooth36?.tooth?.condition).toBe("Root canal");
+    expect(tooth36?.tooth?.treatment_stage).toBe("completed");
+    expect(tooth36?.tooth?.tooth_condition).toBe("root_canal_treated");
   });
 
   it("attaches treatments linked via tooth_number to the correct tooth", async () => {
@@ -253,11 +253,12 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "recommended",
-      condition: "Caries",
+      tooth_condition: "caries",
+      treatment_stage: "recommended",
     });
     expect(result.error).toBeNull();
-    expect(result.data?.status).toBe("recommended");
+    expect(result.data?.tooth_condition).toBe("caries");
+    expect(result.data?.treatment_stage).toBe("recommended");
     expect(tables.patient_teeth).toHaveLength(1);
     expect(writeToothHistoryMock).toHaveBeenCalledTimes(1);
   });
@@ -270,8 +271,8 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "recommended",
-      condition: "Caries",
+      tooth_condition: "caries",
+      treatment_stage: "recommended",
       notes: null,
       deleted_at: null,
     });
@@ -280,14 +281,15 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "planned",
+      tooth_condition: "caries",
+      treatment_stage: "planned",
     });
     expect(result.error).toBeNull();
     expect(tables.patient_teeth).toHaveLength(1); // no duplicate row
-    expect(tables.patient_teeth[0].status).toBe("planned");
+    expect(tables.patient_teeth[0].treatment_stage).toBe("planned");
   });
 
-  it("appends tooth_history rather than overwriting — history call carries old and new status", async () => {
+  it("appends tooth_history rather than overwriting — history call carries old and new treatment stage", async () => {
     const tables = baseTables();
     tables.patient_teeth.push({
       id: "pt-1",
@@ -295,8 +297,8 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "recommended",
-      condition: null,
+      tooth_condition: "normal",
+      treatment_stage: "recommended",
       notes: null,
       deleted_at: null,
     });
@@ -305,13 +307,14 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "completed",
+      tooth_condition: "normal",
+      treatment_stage: "completed",
     });
     expect(writeToothHistoryMock).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "status_changed",
-        oldValue: expect.objectContaining({ status: "recommended" }),
-        newValue: expect.objectContaining({ status: "completed" }),
+        oldValue: expect.objectContaining({ treatment_stage: "recommended" }),
+        newValue: expect.objectContaining({ treatment_stage: "completed" }),
       })
     );
   });
@@ -322,7 +325,8 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 99,
-      status: "normal",
+      tooth_condition: "normal",
+      treatment_stage: null,
     });
     expect(result.data).toBeNull();
     expect(result.error).toMatch(/not valid/i);
@@ -334,7 +338,8 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "normal",
+      tooth_condition: "normal",
+      treatment_stage: null,
     });
     expect(result.error).toMatch(/dentist/i);
   });
@@ -347,27 +352,28 @@ describe("upsertToothState", () => {
       patient_id: PATIENT_B,
       dentition_type: "adult",
       tooth_number: 36,
-      status: "normal",
+      tooth_condition: "normal",
+      treatment_stage: null,
     });
     expect(result.error).toBe("Patient not found in this clinic.");
   });
 });
 
 describe("bulkUpdateTeeth (multi-select)", () => {
-  it("applies the same status to every selected tooth in one call", async () => {
+  it("applies the same condition/stage to every selected tooth in one call", async () => {
     const tables = baseTables();
     asDentist(tables);
     const result = await bulkUpdateTeeth({
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_numbers: [14, 15, 16],
-      status: "recommended",
-      condition: "Scaling needed",
+      tooth_condition: "caries",
+      treatment_stage: "recommended",
     });
     expect(result.error).toBeNull();
     expect(result.data).toHaveLength(3);
     expect(tables.patient_teeth.map((t) => t.tooth_number).sort()).toEqual([14, 15, 16]);
-    expect(tables.patient_teeth.every((t) => t.status === "recommended")).toBe(true);
+    expect(tables.patient_teeth.every((t) => t.treatment_stage === "recommended")).toBe(true);
     // One history event per tooth.
     expect(writeToothHistoryMock).toHaveBeenCalledTimes(3);
   });
@@ -379,7 +385,8 @@ describe("bulkUpdateTeeth (multi-select)", () => {
       patient_id: PATIENT_A,
       dentition_type: "adult",
       tooth_numbers: [],
-      status: "recommended",
+      tooth_condition: "caries",
+      treatment_stage: "recommended",
     });
     expect(result.data).toBeNull();
     expect(tables.patient_teeth).toHaveLength(0);

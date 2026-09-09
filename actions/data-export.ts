@@ -131,7 +131,7 @@ async function collect(
 
     db
       .from("patient_teeth")
-      .select("tooth_number, dentition_type, status, condition, notes, updated_at")
+      .select("tooth_number, dentition_type, tooth_condition, treatment_stage, notes, updated_at")
       .eq("patient_id", patientId)
       .is("deleted_at", null)
       .order("tooth_number", { ascending: true }),

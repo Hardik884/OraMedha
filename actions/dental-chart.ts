@@ -214,8 +214,8 @@ export async function upsertToothState(input: unknown): Promise<ActionResult<Pat
       patientId: parsed.data.patient_id,
       dentitionType: parsed.data.dentition_type,
       toothNumber: parsed.data.tooth_number,
-      status: parsed.data.status,
-      condition: parsed.data.condition ?? null,
+      toothCondition: parsed.data.tooth_condition,
+      treatmentStage: parsed.data.treatment_stage,
       notes: parsed.data.notes ?? null,
       performedBy: profile.id,
     });
@@ -262,8 +262,8 @@ export async function bulkUpdateTeeth(input: unknown): Promise<ActionResult<Pati
         patientId: parsed.data.patient_id,
         dentitionType: parsed.data.dentition_type,
         toothNumber,
-        status: parsed.data.status,
-        condition: parsed.data.condition ?? null,
+        toothCondition: parsed.data.tooth_condition,
+        treatmentStage: parsed.data.treatment_stage,
         notes: parsed.data.notes ?? null,
         performedBy: profile.id,
       });

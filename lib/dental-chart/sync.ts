@@ -14,34 +14,56 @@
  * Kept as a lib helper rather than duplicated in both action files, per
  * CLAUDE.md §13.8 ("if a pattern is used in more than two places, extract it
  * into a shared utility").
+ *
+ * FIELDS (see migration 20260909000000): a tooth carries two independent,
+ * fixed-vocabulary fields — `tooth_condition` (what the tooth IS) and
+ * `treatment_stage` (what stage its treatment is at, nullable) — plus a free
+ * `notes` field. The legacy `status`/`condition` columns are also written on
+ * every save, derived from the new fields, purely so any code that still
+ * reads them (or a history row written before this migration) keeps seeing a
+ * value consistent with the current state; nothing in the current UI reads
+ * them back.
  */
 
 import { writeToothHistory, type ToothHistoryAction } from "@/lib/dental-chart/history";
 import { isValidToothNumber } from "@/lib/dental-chart/teeth";
-import type { DentitionType, PatientTooth, ToothStatus } from "@/types";
+import type { DentitionType, PatientTooth, ToothCondition, ToothStatus, TreatmentStage } from "@/types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbClient = any;
+
+/** Best-effort legacy `status` derived from the new fields — see file header. */
+function legacyStatusFor(condition: ToothCondition, stage: TreatmentStage | null): ToothStatus {
+  if (stage) return stage;
+  if (condition === "missing_extracted") return "missing";
+  return "normal";
+}
+
+/** Best-effort legacy free-text `condition` derived from the new field — see file header. */
+function legacyConditionFor(condition: ToothCondition): string | null {
+  return condition === "normal" ? null : condition.replace(/_/g, " ");
+}
 
 export type UpsertToothRowParams = {
   clinicId: string;
   patientId: string;
   dentitionType: DentitionType;
   toothNumber: number;
-  status: ToothStatus;
-  condition?: string | null;
+  toothCondition: ToothCondition;
+  treatmentStage: TreatmentStage | null;
   notes?: string | null;
   performedBy: string | null;
   /** Set when this write originated from linking/saving a treatment. */
   treatmentId?: string | null;
   /**
-   * When true, `condition`/`notes` are left exactly as they are on an
-   * existing row (only `status` and the treatment link are touched) — used
-   * by the treatment-linking sync, which only ever knows about status, not
-   * the dentist's chart notes. Defaults to false: the Dental Chart's own
-   * edit form always submits the tooth's complete current state, so a
-   * direct chart edit is a full overwrite (including intentionally clearing
-   * condition/notes to empty).
+   * When true, `toothCondition`/`notes` are left exactly as they are on an
+   * existing row (only `treatmentStage` and the treatment link are touched)
+   * — used by the treatment-linking sync, which only ever knows about a
+   * treatment's status, not the dentist's clinical condition or chart notes.
+   * Defaults to false: the Dental Chart's own edit form always submits the
+   * tooth's complete current state, so a direct chart edit is a full
+   * overwrite (including intentionally clearing condition/notes back to
+   * "normal"/empty).
    */
   preserveExistingConditionAndNotes?: boolean;
 };
@@ -78,15 +100,17 @@ export async function upsertToothRow(
   const existingRow = existing as PatientTooth | null;
   const nextValue = params.preserveExistingConditionAndNotes
     ? {
-        status: params.status,
-        condition: existingRow?.condition ?? params.condition ?? null,
+        tooth_condition: existingRow?.tooth_condition ?? params.toothCondition,
+        treatment_stage: params.treatmentStage,
         notes: existingRow?.notes ?? params.notes ?? null,
       }
     : {
-        status: params.status,
-        condition: params.condition ?? null,
+        tooth_condition: params.toothCondition,
+        treatment_stage: params.treatmentStage,
         notes: params.notes ?? null,
       };
+  const legacyStatus = legacyStatusFor(nextValue.tooth_condition, nextValue.treatment_stage);
+  const legacyCondition = legacyConditionFor(nextValue.tooth_condition);
 
   let row: PatientTooth | null = null;
   let historyAction: ToothHistoryAction;
@@ -94,17 +118,19 @@ export async function upsertToothRow(
 
   if (existingRow) {
     oldValue = {
-      status: existingRow.status,
-      condition: existingRow.condition,
+      tooth_condition: existingRow.tooth_condition,
+      treatment_stage: existingRow.treatment_stage,
       notes: existingRow.notes,
     };
 
     const { data, error } = await db
       .from("patient_teeth")
       .update({
-        status: nextValue.status,
-        condition: nextValue.condition,
+        tooth_condition: nextValue.tooth_condition,
+        treatment_stage: nextValue.treatment_stage,
         notes: nextValue.notes,
+        status: legacyStatus,
+        condition: legacyCondition,
         updated_by: params.performedBy,
         updated_at: new Date().toISOString(),
       })
@@ -119,9 +145,9 @@ export async function upsertToothRow(
     row = data as PatientTooth;
     historyAction = params.treatmentId
       ? "treatment_linked"
-      : oldValue.status !== nextValue.status
+      : oldValue.treatment_stage !== nextValue.treatment_stage
         ? "status_changed"
-        : oldValue.condition !== nextValue.condition
+        : oldValue.tooth_condition !== nextValue.tooth_condition
           ? "condition_updated"
           : "note_added";
   } else {
@@ -132,9 +158,11 @@ export async function upsertToothRow(
         patient_id: params.patientId,
         dentition_type: params.dentitionType,
         tooth_number: params.toothNumber,
-        status: nextValue.status,
-        condition: nextValue.condition,
+        tooth_condition: nextValue.tooth_condition,
+        treatment_stage: nextValue.treatment_stage,
         notes: nextValue.notes,
+        status: legacyStatus,
+        condition: legacyCondition,
         updated_by: params.performedBy,
       })
       .select()
@@ -163,13 +191,15 @@ export async function upsertToothRow(
 }
 
 /**
- * Maps a treatment's lifecycle status to the tooth status it implies.
- * `cancelled` deliberately returns null — a cancelled treatment shouldn't
- * silently change what the chart says is happening to the tooth.
+ * Maps a treatment's lifecycle status to the tooth treatment stage it
+ * implies. `cancelled` deliberately returns null — a cancelled treatment
+ * shouldn't silently change what the chart says is happening to the tooth.
+ * There is no treatment status that implies `recommended`: that stage is set
+ * directly from the chart, before any treatment record necessarily exists.
  */
-export function toothStatusForTreatmentStatus(
+export function treatmentStageForTreatmentStatus(
   treatmentStatus: "planned" | "in_progress" | "completed" | "cancelled"
-): ToothStatus | null {
+): TreatmentStage | null {
   switch (treatmentStatus) {
     case "planned":
       return "planned";
@@ -193,7 +223,9 @@ export function toothStatusForTreatmentStatus(
  *     tooth from the chart itself.
  *
  * `cancelled` treatments are a deliberate no-op — see
- * toothStatusForTreatmentStatus above.
+ * treatmentStageForTreatmentStatus above. The tooth's own condition and
+ * notes are always preserved: a treatment record has no clinical condition
+ * of its own to overwrite them with.
  */
 export async function syncToothForTreatment(
   db: DbClient,
@@ -209,8 +241,8 @@ export async function syncToothForTreatment(
 ): Promise<void> {
   if (params.toothNumber == null || !params.dentitionType) return;
 
-  const status = toothStatusForTreatmentStatus(params.treatmentStatus);
-  if (!status) return; // cancelled — leave the chart's own status untouched
+  const stage = treatmentStageForTreatmentStatus(params.treatmentStatus);
+  if (!stage) return; // cancelled — leave the chart's own stage untouched
 
   try {
     const result = await upsertToothRow(db, {
@@ -218,7 +250,8 @@ export async function syncToothForTreatment(
       patientId: params.patientId,
       dentitionType: params.dentitionType,
       toothNumber: params.toothNumber,
-      status,
+      toothCondition: "normal", // ignored — preserveExistingConditionAndNotes keeps the real value
+      treatmentStage: stage,
       performedBy: params.performedBy,
       treatmentId: params.treatmentId,
       preserveExistingConditionAndNotes: true,

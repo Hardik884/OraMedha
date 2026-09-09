@@ -95,21 +95,32 @@
   --color-heat-4: #333B36;
   --color-heat-5: #0D6B5E;
 
-  /* Dental chart — clinical states. Light values are enamel-white tints with
-     coloured outlines. Dark mode does NOT invert these (an inverted enamel
-     tint reads as a cavity); it defines its own muted clinical set below. */
+  /* Dental chart — CONDITION fill colours (what the tooth IS, not what stage
+     its treatment is at — see TreatmentStage's own badge colours below, which
+     deliberately reuse the existing status tokens instead of adding a second
+     colour system). Light values are enamel-white tints with coloured
+     outlines, each in its own lightness band so the chart survives colour-
+     vision deficiency even before the legend's text labels are read. Dark
+     mode does NOT invert these (an inverted enamel tint reads as a cavity);
+     it defines its own muted clinical set below. */
   --color-tooth-normal: #FFFFFF;
   --color-tooth-normal-line: #CBD5D0;
-  --color-tooth-recommended: #FFFBEB;
-  --color-tooth-recommended-line: #EAB308;
-  --color-tooth-planned: #EFF6FF;
-  --color-tooth-planned-line: #93C5FD;
-  --color-tooth-in-progress: #EFF6FF;
-  --color-tooth-in-progress-line: #2563EB;
-  --color-tooth-completed: #F0FDF4;
-  --color-tooth-completed-line: #4ADE80;
+  --color-tooth-caries: #FEF2F2;
+  --color-tooth-caries-line: #DC2626;
+  --color-tooth-fractured: #FFF7ED;
+  --color-tooth-fractured-line: #C2410C;
+  --color-tooth-restored: #EFF6FF;
+  --color-tooth-restored-line: #2563EB;
+  --color-tooth-crown: #F5F3FF;
+  --color-tooth-crown-line: #7C3AED;
+  --color-tooth-root-canal: #ECFEFF;
+  --color-tooth-root-canal-line: #0E7490;
+  --color-tooth-abscess: #FDF2F8;
+  --color-tooth-abscess-line: #BE185D;
   --color-tooth-missing: #EEF2F0;
   --color-tooth-missing-line: #9BA39D;
+  --color-tooth-implant: #F0F4F8;
+  --color-tooth-implant-line: #475569;
   /* The enamel gloss highlight painted over a tooth. */
   --color-tooth-gloss: #FFFFFF;
 
@@ -363,22 +374,29 @@
   --color-heat-4: #2A8274;
   --color-heat-5: #45B5A2;
 
-  /* ── Dental chart ─────────────────────────────────────────────────────── */
-  /* Muted clinical tints, not inverted enamel. Each state also sits in its own
-     lightness band so the chart survives colour-vision deficiency, and
-     `in_progress` keeps its heavier stroke width as a second, non-colour cue. */
+  /* ── Dental chart — CONDITION fill colours ────────────────────────────── */
+  /* Muted clinical tints, not inverted enamel. Each condition also sits in
+     its own lightness band so the chart survives colour-vision deficiency
+     even before the legend's labels are read; the tooth outline's stroke
+     width additionally thickens for a status that needs it (see Tooth.tsx). */
   --color-tooth-normal: #B5BAB9;
   --color-tooth-normal-line: #5D6666;
-  --color-tooth-recommended: #E0C893;
-  --color-tooth-recommended-line: #7C5E17;
-  --color-tooth-planned: #98B3C3;
-  --color-tooth-planned-line: #274C60;
-  --color-tooth-in-progress: #98B3C3;
-  --color-tooth-in-progress-line: #1B3E58;
-  --color-tooth-completed: #9FC4A6;
-  --color-tooth-completed-line: #2C5E3C;
+  --color-tooth-caries: #C99B9B;
+  --color-tooth-caries-line: #7C1D1D;
+  --color-tooth-fractured: #E0C89A;
+  --color-tooth-fractured-line: #8A4A17;
+  --color-tooth-restored: #98B3C3;
+  --color-tooth-restored-line: #274C60;
+  --color-tooth-crown: #B7A8D9;
+  --color-tooth-crown-line: #4C2E82;
+  --color-tooth-root-canal: #93C2C7;
+  --color-tooth-root-canal-line: #164E52;
+  --color-tooth-abscess: #C79AB0;
+  --color-tooth-abscess-line: #6B1740;
   --color-tooth-missing: #0F1412;
   --color-tooth-missing-line: #5A6862;
+  --color-tooth-implant: #9AA9B5;
+  --color-tooth-implant-line: #2B3A44;
   --color-tooth-gloss: #F1F5F3;
 
   /* ── Business Brain severity ramp ─────────────────────────────────────── */
