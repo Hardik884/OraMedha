@@ -52,6 +52,26 @@ export const HEALTHY_CLINIC: MetricValues = {
   // would read as partially unmeasured.
   [MetricKey.CAPACITY_BOOKED_NEXT_7D]: 72,
   [MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D]: 0,
+  // The window metrics. Present for the same reason CAPACITY_BOOKED_NEXT_7D is:
+  // this fixture is what the suite calls a COMPLETE metric set, so every rule
+  // that can reach a verdict without a prior period must be able to. Each value
+  // is comfortably inside its threshold, so a healthy clinic stays healthy.
+  // Comfortably below `lapsedPatientLimit` (25). A clinic with a handful of
+  // lapsed patients is every clinic; the rule is about a base that has emptied.
+  [MetricKey.PATIENTS_REACTIVATION_CANDIDATES]: 8,
+  [MetricKey.SCHEDULING_CANCELLATION_RATE_30D]: 4,
+  [MetricKey.SCHEDULING_NO_SHOW_RATE_30D]: 3,
+  [MetricKey.SCHEDULING_BOOKING_LEAD_TIME_DAYS]: 5,
+  [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: 4,
+  // Above `minimumMeasuredVisits` (10), so the overrun rule judges the rate
+  // rather than standing down on sample size.
+  [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: 64,
+  [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 71,
+  [MetricKey.REVENUE_COLLECTION_RATE_30D]: 94,
+  // Above `minimumProductionForRateCheck` (125,000), so the collection-rate rule
+  // judges the rate rather than standing down on a thin denominator.
+  [MetricKey.REVENUE_PRODUCTION_30D]: 480_000,
+  [MetricKey.REVENUE_COLLECTED_30D]: 451_000,
 };
 
 /** Full chair, almost nothing left to book. */

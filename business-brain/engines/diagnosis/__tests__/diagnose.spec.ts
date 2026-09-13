@@ -33,10 +33,18 @@ describe("diagnose — healthy and isolated runs", () => {
     expect(result.error).toBeUndefined();
     expect(result.confidenceBasis).toBe("matcher_decidability");
     // No prior period was supplied, so the three trend evaluators skipped and the
-    // two matchers that need them could not be ruled out: 12 of 14 decidable.
-    // forward_schedule_gap IS decidable here — HEALTHY carries a healthy week
-    // ahead, so its rule ran and measurably found nothing.
-    expect(result.confidence).toBe(0.86);
+    // two matchers that require one — patient_base_erosion and
+    // recall_process_failure, both of which need returning_volume_dropping —
+    // could not be ruled out. Every other matcher ran and measurably found
+    // nothing, forward_schedule_gap included: HEALTHY carries a healthy week
+    // ahead, so its rule ran.
+    //
+    // Derived from MATCHERS rather than written as a literal. The old 0.86 was
+    // 12/14 and went stale the moment the registry grew — a failure that said
+    // nothing about the behaviour under test.
+    expect(result.confidence).toBe(
+      Math.round(((MATCHERS.length - 2) / MATCHERS.length) * 100) / 100,
+    );
 
     // With a prior period every evaluator reaches a verdict, and a quiet day then
     // legitimately reports full decidability.

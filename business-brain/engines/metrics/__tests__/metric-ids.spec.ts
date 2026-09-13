@@ -68,6 +68,12 @@ describe("metric manifest", () => {
         // statement from never having looked.
         MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D,
         MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+        // No visit durations supplied at all, so neither can be measured. Zero
+        // overrun would be the claim "this clinic books accurately" and a zero
+        // sample would be indistinguishable from a measured zero — the precise
+        // distinction the withholding rule exists to keep.
+        MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D,
+        MetricKey.SCHEDULING_MEASURED_VISITS_30D,
         MetricKey.TREATMENT_AVERAGE_CASE_VALUE_30D,
       ].sort(),
     );

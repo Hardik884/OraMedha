@@ -27,6 +27,27 @@ export const MetricKey = {
    */
   SCHEDULING_REPEAT_NON_ATTENDERS_30D: "scheduling.repeat_non_attenders_30d",
   SCHEDULING_BOOKING_LEAD_TIME_DAYS: "scheduling.booking_lead_time_days",
+  /**
+   * How far the time appointments TAKE diverges from the time they are BOOKED
+   * for, across the trailing window (%). Positive means they overrun.
+   *
+   * Computed from the totals rather than as a mean of per-visit ratios: a
+   * 10-minute check that runs 5 minutes long is +50% and barely matters, while an
+   * hour-long case that runs 5 minutes long is +8% and matters just as little.
+   * Averaging the ratios lets the shortest appointments dominate a figure that is
+   * supposed to describe the day.
+   */
+  SCHEDULING_APPOINTMENT_OVERRUN_30D: "scheduling.appointment_overrun_30d",
+  /**
+   * Visits behind {@link SCHEDULING_APPOINTMENT_OVERRUN_30D} — those with BOTH a
+   * called-in and a finished timestamp.
+   *
+   * Its own metric because the overrun rate alone cannot be judged: a +40%
+   * reading over 4 visits and over 80 are different claims, and the evaluator has
+   * no other way to tell them apart. Exactly the role
+   * `appointments.total_today` plays as an activity guard for the daily rules.
+   */
+  SCHEDULING_MEASURED_VISITS_30D: "scheduling.measured_visits_30d",
   // Patients
   PATIENTS_NEW_TODAY: "patients.new_today",
   PATIENTS_RETURNING_TODAY: "patients.returning_today",
@@ -122,6 +143,18 @@ export const METRIC_DESCRIPTORS: Readonly<Record<MetricKey, MetricDescriptor>> =
     name: "Median Booking Lead Time",
     category: MetricCategory.SCHEDULING,
     unit: MetricUnit.DAYS,
+  },
+  [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: {
+    key: MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D,
+    name: "Appointments Running Over Their Booked Time (30 days)",
+    category: MetricCategory.SCHEDULING,
+    unit: MetricUnit.PERCENTAGE,
+  },
+  [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: {
+    key: MetricKey.SCHEDULING_MEASURED_VISITS_30D,
+    name: "Visits With a Measured Length (30 days)",
+    category: MetricCategory.SCHEDULING,
+    unit: MetricUnit.COUNT,
   },
   [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: {
     key: MetricKey.CAPACITY_CHAIR_UTILIZATION_30D,

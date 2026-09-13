@@ -34,15 +34,18 @@ import {
   ATTRITION_NO_SHOW_DOMINANT,
   BASE_EROSION,
   COLLECTION_GAP,
+  CHRONIC_OVERRUN,
   CONGESTION_CAPACITY_BOUND,
   CONGESTION_FLOW_BOUND,
   DATE,
+  DORMANT_PATIENT_BASE,
   DEMAND_SUPPLY_NO_PENDING,
   DEMAND_SUPPLY_WITH_PENDING,
   HIGH_OUTSTANDING,
   ISOLATED_SIGNAL,
   NOW,
   PRIOR,
+  PRODUCTION_COLLECTION_GAP,
   RECALL_BACKLOG,
   FORWARD_SCHEDULE_GAP,
   REPEAT_NON_ATTENDANCE,
@@ -50,6 +53,7 @@ import {
   REVENUE_AMBIGUOUS,
   REVENUE_VOLUME_DRIVEN,
   REVENUE_YIELD_DRIVEN,
+  SUSTAINED_IDLE_CAPACITY,
   run,
   shiftDate,
 } from "../diagnosis/__tests__/fixtures/run-fixtures";
@@ -79,6 +83,10 @@ const SCENARIOS = [
   RECALL_BACKLOG,
   FORWARD_SCHEDULE_GAP,
   REPEAT_NON_ATTENDANCE,
+  DORMANT_PATIENT_BASE,
+  CHRONIC_OVERRUN,
+  PRODUCTION_COLLECTION_GAP,
+  SUSTAINED_IDLE_CAPACITY,
 ];
 
 /** Diagnose every scenario, with and without a history window. */
@@ -181,7 +189,6 @@ function fullEntityContext(): EntityContext {
       scheduledMinutes: 30,
       actualMinutes: 60,
     })),
-    recallContactAttempts: null,
   };
 }
 

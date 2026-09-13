@@ -48,6 +48,8 @@ import {
   noShowRate30d,
   repeatNonAttenders30d,
   bookingLeadTimeDays,
+  appointmentOverrun30d,
+  measuredVisits30d,
 } from "./scheduling-metrics";
 
 /**
@@ -73,6 +75,8 @@ export const METRIC_CALCULATORS: readonly MetricCalculator[] = [
   noShowRate30d,
   repeatNonAttenders30d,
   bookingLeadTimeDays,
+  appointmentOverrun30d,
+  measuredVisits30d,
   // Patients
   newPatientsToday,
   returningPatientsToday,

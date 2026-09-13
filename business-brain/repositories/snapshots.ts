@@ -88,8 +88,14 @@ export interface TreatmentSnapshot {
    * Deliberately defined at the PATIENT level, not per treatment. A repository
    * answers "does this treatment's patient have another visit booked?", which
    * is an approximation of "is this specific treatment booked". Modelling the
-   * latter exactly requires a treatment-to-appointment link, and the workflow
-   * cost of asking a dentist to maintain one is not currently justified.
+   * latter exactly requires a link from planned work to the visit booked to
+   * deliver it, and the workflow cost of asking a dentist to maintain one is not
+   * currently justified.
+   *
+   * Do not mistake `treatments.appointment_id` for that link. It is NOT NULL, but
+   * it records the visit the treatment was WRITTEN DOWN at — for planned work,
+   * the past consultation that planned it. The clinic ledger names it
+   * `recordedAtAppointmentId` for exactly this reason.
    *
    * The direction of the error is known and one-way: the derived metric
    * UNDER-reports. Anything it flags as pending scheduling is genuinely
@@ -139,6 +145,29 @@ export interface PatientRosterEntry {
   readonly lastVisit: string | null;
   /** Whether the patient has at least one upcoming, non-cancelled appointment. */
   readonly hasUpcomingAppointment: boolean;
+}
+
+/**
+ * One attended visit, with the time it was BOOKED for beside the time it
+ * actually took.
+ *
+ * The two numbers come from different ledgers on purpose, and that is the whole
+ * value of the shape: `scheduledMinutes` is the plan a clinic wrote into the
+ * appointment book, `actualMinutes` is what the queue recorded when staff called
+ * the patient in and marked them finished. Neither ledger alone can say whether
+ * a clinic books realistically.
+ *
+ * `actualMinutes` is `null` when either end of the interval was not recorded.
+ * Never inferred from anything else — a guessed duration would fabricate exactly
+ * the quantity this exists to measure, and the calculator drops such rows rather
+ * than treating an unrecorded visit as an on-time one.
+ */
+export interface VisitDurationSnapshot {
+  readonly appointmentId: string;
+  /** Minutes the appointment was booked for, as planned. */
+  readonly scheduledMinutes: number;
+  /** Minutes it actually took, called-in to finished; null when unrecorded. */
+  readonly actualMinutes: number | null;
 }
 
 /**
@@ -294,4 +323,20 @@ export interface ClinicDataSnapshot {
    * OPTIONAL, as above.
    */
   readonly forwardWindow?: ScheduleWindow;
+
+  /**
+   * Attended visits across the SAME trailing window as {@link trailingWindow},
+   * each carrying its booked length beside its measured length.
+   *
+   * A separate field rather than a property of `ScheduleWindow`, because a
+   * schedule window is appointments plus the capacity offered for them — a
+   * forward window has no measured durations at all, and putting an always-empty
+   * array there would invite reading it as "nothing overran next week".
+   *
+   * OPTIONAL, as every window input is. A repository that cannot afford the read
+   * omits it and the overrun metrics are withheld rather than reported as zero —
+   * which matters more here than almost anywhere else, since a reported 0%
+   * overrun is the exact claim "this clinic books accurately".
+   */
+  readonly trailingVisitDurations?: readonly VisitDurationSnapshot[];
 }

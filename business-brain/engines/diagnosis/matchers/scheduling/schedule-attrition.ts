@@ -15,6 +15,23 @@
  * was ignored, an awkward slot time from an unpopular treatment type, or a local
  * illness outbreak from anything else. Those hypotheses stay undetermined with
  * discriminators attached — which is the honest answer, not a gap in the rules.
+ *
+ * ## Three triggers, one pattern
+ *
+ * The two daily rate signals judge TODAY, and both carry a sample guard because at
+ * a five-appointment clinic one cancellation is 20%. `sustained_attrition` judges
+ * the trailing window, where the denominator is large enough to mean something and
+ * comparable to the industry figures. It triggers this same pattern rather than a
+ * new one, deliberately: "appointments booked and then lost" is one bottleneck
+ * whether it is read over a day or a month, and giving the window reading its own
+ * pattern would put a second scheduling card on the dashboard describing the same
+ * appointments.
+ *
+ * The discrimination between cancellation- and no-show-dominant still runs off
+ * TODAY's counts, because those are the only counts the engine has per outcome. On
+ * a day triggered only by the window signal, today's counts may be zero on both
+ * sides — in which case neither dominance is called and both hypotheses stay
+ * undetermined, which is the correct answer rather than a shortcoming.
  */
 
 import { DiagnosisPattern, MetricUnit, SignalCategory, SignalType } from "../../../../domain";
@@ -36,6 +53,7 @@ import {
 const REQUIRED = [
   SignalType.SCHEDULING_HIGH_CANCELLATION_RATE,
   SignalType.SCHEDULING_HIGH_NO_SHOW_RATE,
+  SignalType.SCHEDULING_SUSTAINED_ATTRITION,
 ] as const;
 
 const OPTIONAL = [
@@ -59,7 +77,7 @@ export const scheduleAttritionMatcher: PatternMatcher = {
   category: SignalCategory.SCHEDULING,
   requiredSignals: REQUIRED,
   optionalSignals: OPTIONAL,
-  rule: "Requires either a high cancellation rate or a high no-show rate. Low chair utilization and low daily revenue strengthen it.",
+  rule: "Requires any of a high daily cancellation rate, a high daily no-show rate, or sustained attrition across the trailing window. Low chair utilization and low daily revenue strengthen it.",
 
   match(ctx: MatcherContext): MatcherOutcome {
     const present = ctx.signals.present(REQUIRED);
@@ -75,6 +93,9 @@ export const scheduleAttritionMatcher: PatternMatcher = {
     const cancelled = metricValue(ctx, MetricKey.APPOINTMENTS_CANCELLED_TODAY);
     const noShows = metricValue(ctx, MetricKey.APPOINTMENTS_NO_SHOWS_TODAY);
     const total = metricValue(ctx, MetricKey.APPOINTMENTS_TOTAL_TODAY);
+    const cancellationRate30d = metricValue(ctx, MetricKey.SCHEDULING_CANCELLATION_RATE_30D);
+    const noShowRate30d = metricValue(ctx, MetricKey.SCHEDULING_NO_SHOW_RATE_30D);
+    const windowTriggered = ctx.signals.has(SignalType.SCHEDULING_SUSTAINED_ATTRITION);
     const { dominanceRatio } = ctx.config.discrimination;
     const bothKnown = cancelled !== undefined && noShows !== undefined;
 
@@ -89,7 +110,7 @@ export const scheduleAttritionMatcher: PatternMatcher = {
 
     const arithmetic: EvidenceNote = {
       slug: "discrimination.attrition-mix",
-      description: `Cancellations ${cancelled ?? "unavailable"} versus no-shows ${noShows ?? "unavailable"} out of ${total ?? "an unavailable number of"} booked appointment(s). Ratio ${ratio === undefined ? "undefined" : formatValue(ratio, MetricUnit.RATIO)} against the configured dominance ratio ${formatValue(dominanceRatio, MetricUnit.RATIO)}. Dominance is called only where one side exceeds the other by at least that factor.`,
+      description: `Cancellations ${cancelled ?? "unavailable"} versus no-shows ${noShows ?? "unavailable"} out of ${total ?? "an unavailable number of"} booked appointment(s). Ratio ${ratio === undefined ? "undefined" : formatValue(ratio, MetricUnit.RATIO)} against the configured dominance ratio ${formatValue(dominanceRatio, MetricUnit.RATIO)}. Dominance is called only where one side exceeds the other by at least that factor. Over the trailing window: ${cancellationRate30d ?? "unavailable"}% cancelled and ${noShowRate30d ?? "unavailable"}% not attended${windowTriggered ? ", which is what triggered this pattern — the window rates carry a denominator the single-day counts do not" : ""}. The dominance split is read from today's counts because those are the only per-outcome counts available; where today lost nothing, neither dominance is called.`,
       data: {
         cancelled,
         noShows,
@@ -98,6 +119,9 @@ export const scheduleAttritionMatcher: PatternMatcher = {
         dominanceRatio,
         cancellationDominant,
         noShowDominant,
+        cancellationRate30d,
+        noShowRate30d,
+        windowTriggered,
       },
     };
 

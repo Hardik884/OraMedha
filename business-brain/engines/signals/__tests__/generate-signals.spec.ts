@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { SignalType } from "../../../domain";
 import { MetricKey, buildMetric } from "../../metrics/metric-ids";
+import { EVALUATORS } from "../evaluators/registry";
 import type { SignalEvaluator } from "../evaluators/types";
 import { evaluateSignals, generateSignals } from "../generate-signals";
 import { SignalCategory } from "../../../domain";
@@ -206,9 +207,13 @@ describe("generateSignals — scenarios", () => {
     // every evaluator skipped for missing metrics, so coverage is 0 — not 1
     expect(result.confidence).toBe(0);
     expect(result.confidenceBasis).toBe("input_coverage");
-    // one index trace, one trace per evaluator, one run summary
-    expect(result.traces).toHaveLength(22);
-    expect(result.traces.filter((t) => t.reasoning.startsWith("Skipped:"))).toHaveLength(20);
+    // one index trace, one trace per evaluator, one run summary. Derived from the
+    // registry: a literal here goes stale the moment a rule is added, and its
+    // failure says nothing about the behaviour being tested.
+    expect(result.traces).toHaveLength(EVALUATORS.length + 2);
+    expect(result.traces.filter((t) => t.reasoning.startsWith("Skipped:"))).toHaveLength(
+      EVALUATORS.length,
+    );
   });
 });
 

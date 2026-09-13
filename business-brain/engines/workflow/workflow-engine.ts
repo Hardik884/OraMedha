@@ -510,6 +510,103 @@ const CORRECTIVE_TEMPLATES: Readonly<Record<string, WorkflowTemplate>> = {
     outcome: { description: "Recovered outstanding balances owed for delivered work", valueType: ValueType.REVENUE_RECOVERED },
   },
 
+  dormant_patient_base: {
+    title: "Call the patients who have quietly stopped coming",
+    reason:
+      "A large group has been seen before, has not returned within a recall interval, and is on no recall list",
+    owner: WorkflowOwner.RECEPTIONIST,
+    effort: WorkflowEffort.SUBSTANTIAL,
+    timeframe: WorkflowTimeframe.THIS_WEEK,
+    tasks: [
+      {
+        order: 1,
+        instruction: "Open the inactive patient list, longest absence first",
+        hint: "Patients -> filter: inactive",
+      },
+      { order: 2, instruction: "Set aside 30 minutes daily this week for reactivation calls" },
+      { order: 3, instruction: "Call each patient, check nothing has changed, and offer a specific date" },
+      { order: 4, instruction: "Book on the call rather than promising to ring back" },
+      {
+        order: 5,
+        instruction: "Raise a follow-up for anyone who wants to come later, so they cannot fall off the list again",
+      },
+    ],
+    outcome: {
+      description: "Made contact with patients who had quietly lapsed off the books",
+      valueType: ValueType.RETENTION_IMPROVED,
+    },
+  },
+
+  chronic_appointment_overrun: {
+    title: "Book the time appointments actually take",
+    reason: "Appointments are running materially longer than the slots booked for them",
+    owner: WorkflowOwner.DENTIST,
+    effort: WorkflowEffort.MODERATE,
+    // THIS_WEEK rather than TODAY: nothing is going wrong this morning, and the
+    // fix changes days that have not happened yet.
+    timeframe: WorkflowTimeframe.THIS_WEEK,
+    tasks: [
+      { order: 1, instruction: "Pull the last month's completed appointments with their booked lengths" },
+      { order: 2, instruction: "Note which treatment types routinely finish later than booked" },
+      { order: 3, instruction: "Set a realistic default slot length for each of those types" },
+      {
+        order: 4,
+        instruction: "Update the booking defaults so new appointments use the realistic length",
+        hint: "Settings -> availability",
+      },
+      { order: 5, instruction: "Re-check in a month that the booked day now matches the delivered day" },
+    ],
+    outcome: {
+      description: "Brought booked appointment lengths into line with delivered ones",
+      valueType: ValueType.HOURS_SAVED,
+    },
+  },
+
+  sustained_under_collection: {
+    title: "Reconcile the month's completed work against what was collected",
+    reason: "The clinic collected materially less than it delivered, spread across the month",
+    owner: WorkflowOwner.RECEPTIONIST,
+    effort: WorkflowEffort.SUBSTANTIAL,
+    timeframe: WorkflowTimeframe.THIS_WEEK,
+    tasks: [
+      {
+        order: 1,
+        instruction: "Pull every treatment completed in the last month",
+        hint: "Treatments -> completed",
+      },
+      { order: 2, instruction: "Match each against a payment or a recorded balance" },
+      { order: 3, instruction: "List the ones with neither — those are the work that was never charged" },
+      { order: 4, instruction: "Raise the missing charges and contact those patients" },
+      { order: 5, instruction: "Add the charge-and-settle check to the end of every visit" },
+    ],
+    outcome: {
+      description: "Found delivered work that had never been charged or recorded as owed",
+      valueType: ValueType.REVENUE_RECOVERED,
+    },
+  },
+
+  sustained_idle_capacity: {
+    title: "Match published chair time to the work you actually have",
+    reason: "Chair time has gone unused across the whole month rather than on one quiet day",
+    owner: WorkflowOwner.DENTIST,
+    effort: WorkflowEffort.MODERATE,
+    timeframe: WorkflowTimeframe.THIS_WEEK,
+    tasks: [
+      { order: 1, instruction: "Look at the month's schedule and note which sessions are consistently empty" },
+      { order: 2, instruction: "Work the recall, reactivation and planned-treatment lists into those sessions first" },
+      {
+        order: 3,
+        instruction: "Where a session stays empty week after week, reduce the hours you publish for it",
+        hint: "Settings -> availability",
+      },
+      { order: 4, instruction: "Re-check in a month whether utilization has moved" },
+    ],
+    outcome: {
+      description: "Brought published chair time into line with real demand",
+      valueType: ValueType.HOURS_SAVED,
+    },
+  },
+
   recall_backlog: {
     title: "Work the overdue recall backlog this week",
     reason: "The overdue recall list is above its limit while returning volume held",
@@ -659,6 +756,51 @@ const INVESTIGATIVE_TEMPLATES: Readonly<Record<ConstraintCategory, WorkflowTempl
       { order: 4, instruction: "Record findings so the next analysis can separate the cause" },
     ],
     outcome: { description: "Identified why the week ahead is filling below normal" },
+  },
+
+  [ConstraintCategory.PATIENT_FLOW]: {
+    title: "Investigate why patients are waiting",
+    reason: "Patients queued beyond the clinic's limits and the cause is not visible in the data",
+    owner: WorkflowOwner.DENTIST,
+    effort: WorkflowEffort.QUICK,
+    timeframe: WorkflowTimeframe.TODAY,
+    tasks: [
+      { order: 1, instruction: "Check the queue board for when the backlog built up" },
+      { order: 2, instruction: "Note whether patients arrived together or appointments ran over" },
+      { order: 3, instruction: "Check whether the chairs were full at the time or standing free" },
+      { order: 4, instruction: "Record findings so the next analysis can separate the cause" },
+    ],
+    outcome: { description: "Identified what was creating the queue" },
+  },
+
+  [ConstraintCategory.REACTIVATION]: {
+    title: "Investigate why patients have quietly stopped returning",
+    reason: "A large group has lapsed and nothing in the data says why",
+    owner: WorkflowOwner.DENTIST,
+    effort: WorkflowEffort.QUICK,
+    timeframe: WorkflowTimeframe.THIS_WEEK,
+    tasks: [
+      { order: 1, instruction: "Open the inactive patient list and read through the longest absences" },
+      { order: 2, instruction: "Check whether they share a treatment type, a period, or a member of staff" },
+      { order: 3, instruction: "Call a handful and ask plainly whether anything changed for them" },
+      { order: 4, instruction: "Record findings for the next analysis cycle" },
+    ],
+    outcome: { description: "Identified what the lapsed patients have in common" },
+  },
+
+  [ConstraintCategory.SCHEDULE_ACCURACY]: {
+    title: "Investigate where booked time and real time diverge",
+    reason: "Appointments are taking longer than booked and the pattern is not yet clear",
+    owner: WorkflowOwner.DENTIST,
+    effort: WorkflowEffort.QUICK,
+    timeframe: WorkflowTimeframe.THIS_WEEK,
+    tasks: [
+      { order: 1, instruction: "Review the last month's appointments against their booked lengths" },
+      { order: 2, instruction: "Check whether queue entries are being closed promptly, so the measurement is real" },
+      { order: 3, instruction: "Note which treatment types account for most of the overrun" },
+      { order: 4, instruction: "Record findings so the next analysis can separate the cause" },
+    ],
+    outcome: { description: "Identified which bookings are shorter than the work they carry" },
   },
 };
 

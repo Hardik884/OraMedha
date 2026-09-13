@@ -362,6 +362,73 @@ export const ACTION_PLANS: Readonly<Record<string, readonly ActionPlanStep[]>> =
     { capability: OPEN_APPOINTMENT_SCHEDULER, title: "Book those who agree, on the call" },
   ],
 
+  // Reactivation. Deliberately does NOT open the overdue-follow-up list: these
+  // patients are precisely the ones no follow-up was ever raised for, so that
+  // screen would show the wrong people. The last step raises follow-ups for
+  // whoever wants to come later, which is what stops the same patients lapsing
+  // invisibly a second time.
+  dormant_patient_base: [
+    {
+      capability: OPEN_OVERDUE_RECALL_PATIENTS,
+      primary: true,
+      title: "Open the patients with no visit in six months",
+    },
+    { ...CALL_FROM_APPOINTMENTS, area: DentGrowArea.PATIENTS, title: "Work it as a call list" },
+    { capability: DRAFT_RECALL_INVITATION },
+    { capability: OPEN_APPOINTMENT_SCHEDULER, title: "Book those who agree, on the call" },
+    {
+      capability: SCHEDULE_FOLLOW_UP,
+      title: "Raise a follow-up for anyone who wants to come later",
+      description:
+        "Opens a blank follow-up. Recording an intention is what puts the patient on the recall list, so the next lapse shows up as a backlog rather than as silence.",
+    },
+  ],
+
+  // Schedule accuracy. Every step is about the booking template rather than about
+  // any patient, which is why no call list and no message draft appears here —
+  // there is nobody to contact about a slot length.
+  chronic_appointment_overrun: [
+    {
+      capability: OPEN_WEEKS_COMPLETED_TREATMENTS,
+      primary: true,
+      title: "See which treatments routinely run past their slot",
+    },
+    { capability: OPEN_WEEK_SCHEDULE, title: "Compare against the lengths those visits were booked for" },
+    {
+      capability: OPEN_AVAILABILITY_SETTINGS,
+      title: "Set realistic default lengths for the types that overrun",
+      after: [OPEN_WEEKS_COMPLETED_TREATMENTS],
+    },
+  ],
+
+  // The month-level collection reconciliation. Opens the WEEK's completed
+  // treatments rather than today's: the finding is that no single day looks wrong,
+  // so a single day is the one view guaranteed not to show it.
+  sustained_under_collection: [
+    {
+      capability: OPEN_WEEKS_COMPLETED_TREATMENTS,
+      primary: true,
+      title: "Pull the completed work to reconcile",
+    },
+    { capability: OPEN_OUTSTANDING_BALANCES, title: "Match each against a balance or a payment" },
+    { capability: OPEN_PATIENT_LEDGER, after: [OPEN_WEEKS_COMPLETED_TREATMENTS] },
+    { capability: RECORD_PAYMENT, title: "Raise the charges that were never recorded" },
+    { ...CALL_FROM_BALANCES, after: [OPEN_OUTSTANDING_BALANCES] },
+  ],
+
+  // Sustained idle capacity. Two directions, in order: fill the time from lists the
+  // clinic already owns, and only then reduce what it publishes.
+  sustained_idle_capacity: [
+    { capability: OPEN_WEEK_SCHEDULE, primary: true, title: "See which sessions are consistently empty" },
+    { capability: OPEN_PLANNED_TREATMENTS, title: "Pull work that could fill them" },
+    { capability: OPEN_OVERDUE_RECALL_PATIENTS, title: "Pull patients who are due back" },
+    { capability: OPEN_APPOINTMENT_SCHEDULER, after: [OPEN_WEEK_SCHEDULE] },
+    {
+      capability: OPEN_AVAILABILITY_SETTINGS,
+      title: "Where a session stays empty, reduce the hours you publish",
+    },
+  ],
+
   // The only plan that opens a FORWARD window. Every step points at days that
   // have not happened yet, and the two lists it pulls are the cheapest possible
   // sources of a booking: patients who already chose this clinic.
@@ -423,6 +490,29 @@ export const ACTION_PLANS: Readonly<Record<string, readonly ActionPlanStep[]>> =
       title: "Ask five to ten of them why they have not been back",
       after: [OPEN_OVERDUE_RECALL_PATIENTS],
     },
+  ],
+
+  "investigate.patient_flow": [
+    { capability: OPEN_QUEUE_BOARD, primary: true },
+    { capability: OPEN_TOMORROWS_SCHEDULE, title: "Check how tightly the day is packed" },
+    { capability: OPEN_WEEKS_COMPLETED_TREATMENTS, title: "Check whether visits are running long" },
+  ],
+
+  "investigate.reactivation": [
+    { capability: OPEN_OVERDUE_RECALL_PATIENTS, primary: true },
+    {
+      ...CALL_FROM_APPOINTMENTS,
+      area: DentGrowArea.PATIENTS,
+      title: "Ask five to ten of them plainly whether anything changed",
+      after: [OPEN_OVERDUE_RECALL_PATIENTS],
+    },
+    { capability: OPEN_MONTH_PERFORMANCE_REPORT, title: "Check when the drop-off began" },
+  ],
+
+  "investigate.schedule_accuracy": [
+    { capability: OPEN_WEEKS_COMPLETED_TREATMENTS, primary: true },
+    { capability: OPEN_QUEUE_BOARD, title: "Check that queue entries are being closed promptly" },
+    { capability: OPEN_WEEK_SCHEDULE, title: "Compare booked lengths against what was delivered" },
   ],
 
   "investigate.acquisition": [

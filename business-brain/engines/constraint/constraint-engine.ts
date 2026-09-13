@@ -49,10 +49,22 @@ import { Severity } from "../../types";
 const CATEGORY_BY_PATTERN: Readonly<Record<string, ConstraintCategory>> = {
   [DiagnosisPattern.DEMAND_SUPPLY_MISMATCH]: ConstraintCategory.CAPACITY,
   [DiagnosisPattern.CAPACITY_CEILING]: ConstraintCategory.CAPACITY,
-  [DiagnosisPattern.THROUGHPUT_CONGESTION]: ConstraintCategory.CAPACITY,
+  // NOT capacity. Congestion is the opposite finding about the same resource:
+  // routed into CAPACITY it inherited "your chair was empty today" as its wording
+  // and today's unbooked minutes as its figure, so a clinic whose patients waited
+  // fifty minutes read a card saying its chair sat idle. See
+  // ConstraintCategory.PATIENT_FLOW.
+  [DiagnosisPattern.THROUGHPUT_CONGESTION]: ConstraintCategory.PATIENT_FLOW,
+  // Alongside demand_supply_mismatch on purpose, with no guard in the matcher:
+  // one card carrying a date-level and a window-level reading of the same
+  // bottleneck, at the worse severity, is the whole point of this engine.
+  [DiagnosisPattern.SUSTAINED_IDLE_CAPACITY]: ConstraintCategory.CAPACITY,
   [DiagnosisPattern.SCHEDULE_ATTRITION]: ConstraintCategory.SCHEDULING,
   [DiagnosisPattern.COLLECTION_GAP]: ConstraintCategory.REVENUE_LEAKAGE,
   [DiagnosisPattern.REVENUE_SHORTFALL]: ConstraintCategory.REVENUE_LEAKAGE,
+  // The window-level reading of the same bottleneck the day-level collection_gap
+  // describes. One revenue card, two findings.
+  [DiagnosisPattern.PRODUCTION_COLLECTION_GAP]: ConstraintCategory.REVENUE_LEAKAGE,
   [DiagnosisPattern.PIPELINE_CONVERSION_FAILURE]: ConstraintCategory.TREATMENT_ACCEPTANCE,
   [DiagnosisPattern.PATIENT_BASE_EROSION]: ConstraintCategory.RETENTION,
   [DiagnosisPattern.RECALL_PROCESS_FAILURE]: ConstraintCategory.RETENTION,
@@ -67,6 +79,13 @@ const CATEGORY_BY_PATTERN: Readonly<Record<string, ConstraintCategory>> = {
   // Alongside schedule_attrition on purpose: both describe appointments booked
   // and then lost, so they belong to one bottleneck rather than two headlines.
   [DiagnosisPattern.REPEAT_NON_ATTENDANCE]: ConstraintCategory.SCHEDULING,
+  // Patients nobody ever put on a recall list. A different population from
+  // RETENTION's, needing a different list and different words — see
+  // ConstraintCategory.REACTIVATION.
+  [DiagnosisPattern.DORMANT_PATIENT_BASE]: ConstraintCategory.REACTIVATION,
+  // Its own bottleneck rather than SCHEDULING: schedule_attrition is about
+  // appointments the clinic lost, this is about the lengths it books them for.
+  [DiagnosisPattern.CHRONIC_APPOINTMENT_OVERRUN]: ConstraintCategory.SCHEDULE_ACCURACY,
 };
 
 /** Human-readable name per bottleneck. Factual: names the limit, not a remedy. */
@@ -78,6 +97,9 @@ const CONSTRAINT_NAMES: Readonly<Record<ConstraintCategory, string>> = {
   [ConstraintCategory.RETENTION]: "Patients returning, and being brought back",
   [ConstraintCategory.ACQUISITION]: "New patients reaching the clinic",
   [ConstraintCategory.FORWARD_SCHEDULE]: "Chair time in the week ahead, and how much is sold",
+  [ConstraintCategory.PATIENT_FLOW]: "Time patients spend waiting once they arrive",
+  [ConstraintCategory.REACTIVATION]: "Patients gone quiet, and whether anyone is bringing them back",
+  [ConstraintCategory.SCHEDULE_ACCURACY]: "Time booked for appointments against time they take",
 };
 
 const SEVERITY_RANK: Readonly<Record<string, number>> = {

@@ -93,11 +93,35 @@ const VALUE_BY_CATEGORY: Readonly<Record<ConstraintCategory, ValueSpec | null>> 
     metrics: [MetricKey.APPOINTMENTS_CANCELLED_TODAY, MetricKey.APPOINTMENTS_NO_SHOWS_TODAY],
     describe: () => "Appointments that were booked today and then lost.",
   },
+  // RE-POINTED. This used to be sized with PATIENTS_REACTIVATION_CANDIDATES while
+  // the card's own words counted overdue follow-ups — so the headline figure named
+  // one population and the sentence beneath it named another, and briefing-view.ts
+  // carried an override to paper over the disagreement. The lapsed count now sizes
+  // REACTIVATION, which is the bottleneck it actually describes, and this is sized
+  // by the list it sends staff to work.
   [ConstraintCategory.RETENTION]: {
     type: ValueType.RETENTION_IMPROVED,
     unit: MetricUnit.COUNT,
+    metrics: [MetricKey.FOLLOWUPS_OVERDUE],
+    describe: () => "Recalls the clinic raised, that are now past their due date.",
+  },
+  [ConstraintCategory.REACTIVATION]: {
+    type: ValueType.RETENTION_IMPROVED,
+    unit: MetricUnit.COUNT,
     metrics: [MetricKey.PATIENTS_REACTIVATION_CANDIDATES],
-    describe: () => "Patients not seen for a long time and with nothing booked.",
+    describe: () =>
+      "Patients seen before, not back within a recall interval, with nothing booked.",
+  },
+  // Sized in MINUTES, which is what a waiting room costs. Deliberately the average
+  // wait rather than that average multiplied by the number of patients waiting: the
+  // two figures are measured over different populations — the mean is over waits
+  // that have ENDED, the count is of patients still waiting — so multiplying them
+  // would produce a total nobody measured, in the confident voice of one that was.
+  [ConstraintCategory.PATIENT_FLOW]: {
+    type: ValueType.HOURS_SAVED,
+    unit: MetricUnit.MINUTES,
+    metrics: [MetricKey.QUEUE_AVERAGE_WAITING_TIME],
+    describe: () => "How long patients waited, on average, after arriving today.",
   },
   // No metric measures how many patients did not arrive — an enquiry that never
   // became an appointment leaves no record at all. Sizing acquisition from what
@@ -116,6 +140,18 @@ const VALUE_BY_CATEGORY: Readonly<Record<ConstraintCategory, ValueSpec | null>> 
   // `capacity.open_minutes_next_7d` metric, at which point this becomes a
   // MINUTES spec like CAPACITY above.
   [ConstraintCategory.FORWARD_SCHEDULE]: null,
+  // Unsized, and honestly so — the same reason as FORWARD_SCHEDULE above. What is
+  // at stake is the minutes the clinic loses to under-booked slots, and the only
+  // measurement available is a RATIO (`scheduling.appointment_overrun_30d`). The
+  // absolute minutes could be derived from it, but only for the window it was
+  // measured over, and publishing a 30-day total alongside cards that all state
+  // today's figures would invite reading it as today's loss.
+  //
+  // The percentage is not lost: the briefing states it in the problem's own summary
+  // line, where a share reads as a share. Sizing this properly needs a
+  // `scheduling.overrun_minutes_30d` metric, at which point this becomes a MINUTES
+  // spec like PATIENT_FLOW above.
+  [ConstraintCategory.SCHEDULE_ACCURACY]: null,
 };
 
 export interface ValueResult {

@@ -16,11 +16,25 @@
  *
  * Unlike every other pattern, this one can produce several diagnoses for one
  * clinic-day, so its ids carry the signal type as a qualifier.
+ *
+ * ## The one exception: signals that are declared supporting-only
+ *
+ * A signal in {@link SUPPORTING_ONLY} is skipped here rather than promoted. These
+ * are rules whose own documentation says they are not a finding on their own —
+ * they exist to sharpen another pattern's discrimination, and in isolation they
+ * are genuinely ambiguous. Carrying one forward as "Unclustered signal: patients
+ * are waiting a long time for an appointment" would state as a standalone
+ * observation exactly the claim its evaluator refuses to make.
+ *
+ * The list is deliberately tiny and deliberately explicit. The default remains
+ * that nothing disappears silently; this is the narrow case where surfacing a
+ * signal alone would say something the signal does not support.
  */
 
 import {
   DiagnosisPattern,
   SignalCategory,
+  SignalType,
   type Diagnosis,
   type Signal,
 } from "../../../domain";
@@ -28,12 +42,28 @@ import { buildDiagnosis } from "../support/diagnosis-builder";
 import { signalTypeOf } from "../support/signal-index";
 import type { MatcherContext, MatcherOutcome } from "./types";
 
+/**
+ * Signals that must never be reported on their own.
+ *
+ * `long_booking_lead_time` strengthens `capacity_ceiling` and nothing else. A long
+ * median wait to be seen is equally consistent with a booked-out clinic and with
+ * patients simply choosing later dates; only read alongside near-full capacity
+ * does it mean the first. Its evaluator says so in as many words, and this list is
+ * what makes that statement true of the pipeline rather than just of the comment.
+ */
+const SUPPORTING_ONLY: ReadonlySet<string> = new Set<string>([
+  SignalType.SCHEDULING_LONG_BOOKING_LEAD_TIME,
+]);
+
 /** Signals claimed by no pattern become one minimal diagnosis each. */
 export function matchUnclustered(
   ctx: MatcherContext,
   claimedSignalIds: ReadonlySet<string>,
 ): MatcherOutcome {
-  const orphans = ctx.signals.all.filter((signal) => !claimedSignalIds.has(signal.id));
+  const orphans = ctx.signals.all.filter(
+    (signal) =>
+      !claimedSignalIds.has(signal.id) && !SUPPORTING_ONLY.has(signalTypeOf(signal)),
+  );
   if (orphans.length === 0) {
     return {
       kind: "not_matched",
