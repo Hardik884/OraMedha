@@ -34,6 +34,66 @@ export type Database = {
   }
   public: {
     Tables: {
+      action_completions: {
+        Row: {
+          category: string
+          clinic_id: string
+          completed_at: string
+          completed_by: string | null
+          constraint_id: string
+          created_at: string
+          id: string
+          metric_key: string | null
+          metric_value: number | null
+          note: string | null
+          source: string
+          target_patient_ids: string[]
+        }
+        Insert: {
+          category: string
+          clinic_id: string
+          completed_at?: string
+          completed_by?: string | null
+          constraint_id: string
+          created_at?: string
+          id?: string
+          metric_key?: string | null
+          metric_value?: number | null
+          note?: string | null
+          source: string
+          target_patient_ids?: string[]
+        }
+        Update: {
+          category?: string
+          clinic_id?: string
+          completed_at?: string
+          completed_by?: string | null
+          constraint_id?: string
+          created_at?: string
+          id?: string
+          metric_key?: string | null
+          metric_value?: number | null
+          note?: string | null
+          source?: string
+          target_patient_ids?: string[]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "action_completions_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "action_completions_completed_by_fkey"
+            columns: ["completed_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       ai_pending_actions: {
         Row: {
           args: Json

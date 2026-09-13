@@ -1,23 +1,28 @@
 /**
- * OutcomeEngine
+ * OutcomeEngine — contract
  *
  * RESPONSIBILITY:
- * Measures what actually happened after actions were taken and compares it
- * against the expected result. It closes the loop between decision and reality.
+ * Measures what actually happened after actions were completed. It closes the
+ * loop between decision and reality.
  *
- * Consumes:  executed actions (from ActionEngine) + subsequent metrics
- * Produces:  outcome assessments (expected vs. actual)
+ * Consumes:  action completions + entity-level verification + current metrics
+ * Produces:  Outcome objects, at `insufficient_evidence` or `observed_after`
  *
- * This phase defines the contract only. No outcome logic is implemented.
+ * THE IMPLEMENTATION LIVES IN `./outcome/`.
+ *
+ * This file keeps the abstract contract, matching every other engine in the
+ * module — the concrete function is `deriveOutcomes` in
+ * `./outcome/outcome-engine.ts`, and the I/O types are exported from there
+ * rather than restated here so the two cannot drift.
  */
 
 import { BaseEngine } from "../core";
+import type { OutcomeEngineInput, OutcomeResult } from "./outcome";
 
-/** Placeholder input. The concrete outcome input is defined later. */
-export type OutcomeEngineInput = unknown;
+export type { OutcomeEngineInput } from "./outcome";
 
-/** Placeholder output. The concrete outcome payload is defined later. */
-export type OutcomeEngineOutput = unknown;
+/** The engine's output payload — one Outcome per assessed completion. */
+export type OutcomeEngineOutput = OutcomeResult;
 
 export abstract class OutcomeEngine extends BaseEngine<
   OutcomeEngineInput,

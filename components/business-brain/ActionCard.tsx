@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, ChevronDown, MessageCircle, CalendarPlus, Bell } from "lucide-react";
+import { Check, CheckCircle2, ChevronDown, MessageCircle, CalendarPlus, Bell } from "lucide-react";
+import { completeAction } from "@/actions/business-brain";
 import { cn } from "@/lib/utils";
 import type { ActionCardView, PrimaryActionKind } from "@/lib/business-brain/briefing-view";
 import type { ReminderSummary } from "@/lib/messaging/reminder-types";
@@ -15,6 +16,16 @@ interface ActionCardProps {
   action: ActionCardView;
   /** This card's own patient-to-contact counts, when it has a WhatsApp action. */
   contactSummary?: ReminderSummary;
+  /**
+   * True when this category was already marked done today.
+   *
+   * Resolved on the server from the completion record, not from client state —
+   * so it survives a refresh, which is the entire point of recording completions
+   * durably. Shown as an acknowledgement, never as a reason to hide the card: the
+   * card leaves when the underlying problem is actually solved, and saying it was
+   * done is not the same as it being fixed.
+   */
+  completedToday?: boolean;
 }
 
 const ACTION_ICON: Record<PrimaryActionKind, typeof MessageCircle> = {
@@ -49,11 +60,38 @@ const SECONDARY_BTN_CLS =
  * router.refresh() on completion: the next server read is the only thing
  * that legitimately moves a card or the health score.
  */
-export function ActionCard({ action, contactSummary }: ActionCardProps) {
+export function ActionCard({ action, contactSummary, completedToday = false }: ActionCardProps) {
   const router = useRouter();
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [stepsOpen, setStepsOpen] = useState(false);
   const [contactOpen, setContactOpen] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [doneError, setDoneError] = useState<string | null>(null);
+  const [saving, startSaving] = useTransition();
+
+  function markDone() {
+    setDoneError(null);
+    startSaving(async () => {
+      const res = await completeAction({
+        category: action.category,
+        constraintId: action.problemId,
+        // Sent only when the dentist actually wrote something. An empty string
+        // would fail the schema, and more importantly a note nobody wrote is not
+        // a note.
+        note: note.trim().length > 0 ? note.trim() : undefined,
+      });
+      if (res.error) {
+        setDoneError(res.error);
+        return;
+      }
+      setNoteOpen(false);
+      setNote("");
+      // The server is the only thing that legitimately changes what this page
+      // shows — including whether this card now reads as done.
+      router.refresh();
+    });
+  }
 
   const hasList = action.checklist.length > 0;
   const hasSteps = hasList || !!action.moreInfoLink;
@@ -226,6 +264,82 @@ export function ActionCard({ action, contactSummary }: ActionCardProps) {
           )}
         </div>
       )}
+
+      {/* Done — the durable record that the work happened.
+          
+          Deliberately quiet and deliberately last: it must never read as an
+          easier alternative to the primary button above it, and pressing it
+          changes nothing on screen except an acknowledgement. The card still
+          leaves only when the underlying problem is genuinely solved, which the
+          page discovers on its next read. Saying you did it is not the same as
+          it being fixed, and the UI must not blur the two. */}
+      <div className="border-t border-surface-muted px-5 py-2.5">
+        {completedToday ? (
+          <p className="flex items-center gap-1.5 text-sm text-success">
+            <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+            Marked as done today
+          </p>
+        ) : noteOpen ? (
+          <div className="space-y-2">
+            <label htmlFor={`note-${action.id}`} className="block text-xs font-medium text-text-secondary">
+              Anything worth noting? (optional)
+            </label>
+            <input
+              id={`note-${action.id}`}
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={280}
+              placeholder="e.g. reached 4, the rest are away"
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-text-body placeholder:text-text-disabled focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={markDone}
+                disabled={saving}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-accent text-accent-foreground px-3 py-1.5 text-sm font-semibold disabled:opacity-60 cursor-pointer"
+              >
+                {saving ? "Saving…" : "Mark as done"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setNoteOpen(false);
+                  setNote("");
+                  setDoneError(null);
+                }}
+                disabled={saving}
+                className="text-sm text-text-secondary hover:text-text-body cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+            {doneError && <p className="text-xs text-danger">{doneError}</p>}
+          </div>
+        ) : (
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={markDone}
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 text-sm text-text-body hover:text-text-primary transition-colors disabled:opacity-60 cursor-pointer"
+            >
+              <Check className="h-4 w-4 shrink-0" aria-hidden />
+              {saving ? "Saving…" : "Mark as done"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setNoteOpen(true)}
+              disabled={saving}
+              className="text-xs text-text-disabled hover:text-text-secondary transition-colors cursor-pointer"
+            >
+              Add a note
+            </button>
+            {doneError && <span className="text-xs text-danger">{doneError}</span>}
+          </div>
+        )}
+      </div>
 
       {/* Inline "Contact Patients" — same self-contained workflow the old
           standalone "Patients to contact" section used, now opened directly

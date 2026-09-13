@@ -1289,3 +1289,25 @@ export const DismissProblemSchema = z.object({
   reason: z.string().trim().min(3).max(500),
   days: z.number().int().min(1).max(90),
 });
+
+/**
+ * Marking one Business Brain action as done.
+ *
+ * Two fields, and the shortness is the design: a completion button that opens a
+ * form is a completion button nobody presses. `note` is optional and exists for
+ * the cases where a staff member genuinely wants to say something ("only reached
+ * 4, rest are away"); nothing requires it.
+ *
+ * What is deliberately ABSENT is everything about identity and scope. No
+ * clinic id, no patient ids, no metric reading, no completion timestamp — all
+ * four are resolved server-side. A request body carrying target patient ids would
+ * be a client-controlled claim about which patients a clinic worked, and those
+ * same ids would then be matched against clinic data; `constraintId` is accepted
+ * only as a label tying the completion back to the run that recommended it, and
+ * is never used to look anything up.
+ */
+export const CompleteActionSchema = z.object({
+  category: z.string().min(1).max(64),
+  constraintId: z.string().min(1).max(200),
+  note: z.string().trim().min(1).max(280).optional(),
+});
