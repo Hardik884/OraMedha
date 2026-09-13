@@ -25,6 +25,7 @@
 
 import type { Confidence, Severity } from "../types";
 import type { Persistence } from "./diagnosis";
+import type { RootCauseAnalysis } from "./root-cause";
 import type { MetricTrajectory, TrajectoryLifecycle } from "./trajectory";
 
 export const FindingKind = {
@@ -110,6 +111,12 @@ export interface FindingEvidence {
   readonly trajectories: readonly MetricTrajectory[];
   /** The lead trajectory's lifecycle, when there is one. */
   readonly lifecycle: TrajectoryLifecycle | null;
+  /**
+   * Where this finding is concentrated in the ledger, when the Root-Cause Engine
+   * investigated it. Evidence ON the finding — never a finding of its own. An
+   * analysis that found nothing, or had too little to look at, is kept too.
+   */
+  readonly rootCauses: readonly RootCauseAnalysis[];
 }
 
 export interface Finding {
@@ -145,6 +152,12 @@ export interface RankFactors {
   readonly trend: number;
   readonly consecutiveDays: number;
   readonly affectedPatients: number | null;
+  /**
+   * 1 when a root-cause analysis located where the finding is concentrated with
+   * at least moderate confidence, else 0. A tie-break only: a located problem is
+   * readier to act on, not more serious.
+   */
+  readonly located: number;
 }
 
 export type FindingRole = "top" | "next" | "supporting" | "win" | "no_action";

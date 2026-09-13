@@ -29,6 +29,7 @@ import {
   type MetricTrajectory,
   type Opportunity,
   type Outcome,
+  type RootCauseAnalysis,
   type Value,
   type Workflow,
   TrajectoryState,
@@ -56,6 +57,8 @@ export interface FindingSources {
   readonly outcomes?: readonly Outcome[];
   /** Metric trajectories from the Trajectory Engine, when the run produced them. */
   readonly trajectories?: readonly MetricTrajectory[];
+  /** Root-cause analyses, each naming the finding it belongs to. */
+  readonly rootCauses?: readonly RootCauseAnalysis[];
 }
 
 // ── trajectories ────────────────────────────────────────────────────────────
@@ -309,6 +312,7 @@ function fromConstraint(sources: FindingSources, constraint: Constraint): Findin
       primaryActionId: plan?.primaryActionId ?? null,
       trajectories: related,
       lifecycle: lead?.lifecycle ?? null,
+      rootCauses: [],
     },
   };
 }
@@ -362,6 +366,7 @@ function fromOpportunity(sources: FindingSources, opportunity: Opportunity): Fin
       primaryActionId: opportunity.actionPlan.primaryActionId,
       trajectories: [],
       lifecycle: null,
+      rootCauses: [],
     },
   };
 }
@@ -399,6 +404,7 @@ function fromAchievement(sources: FindingSources, achievement: Achievement): Fin
       primaryActionId: null,
       trajectories: [],
       lifecycle: null,
+      rootCauses: [],
     },
   };
 }
@@ -445,6 +451,7 @@ function fromOutcome(sources: FindingSources, outcome: Outcome): Finding | null 
       primaryActionId: null,
       trajectories: [],
       lifecycle: null,
+      rootCauses: [],
     },
   };
 }
@@ -508,6 +515,7 @@ function fromTrajectories(sources: FindingSources): Finding[] {
         primaryActionId: null,
         trajectories: ordered,
         lifecycle: lead.lifecycle,
+        rootCauses: [],
       },
     } satisfies Finding;
   });
@@ -527,5 +535,32 @@ export function normalizeFindings(sources: FindingSources): readonly Finding[] {
     ...sources.achievements.map((a) => fromAchievement(sources, a)),
     ...(sources.outcomes ?? []).map((o) => fromOutcome(sources, o)).filter((f): f is Finding => f !== null),
   ];
-  return findings.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return attachRootCauses(sources, findings).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * Root causes travel on the finding they explain. An analysis for another clinic,
+ * or for a finding this run did not produce, is refused rather than dropped or
+ * turned into a finding of its own.
+ */
+function attachRootCauses(sources: FindingSources, findings: Finding[]): Finding[] {
+  const analyses = sources.rootCauses ?? [];
+  if (analyses.length === 0) return findings;
+  const ids = new Set(findings.map((f) => f.id));
+  const byParent = new Map<string, RootCauseAnalysis[]>();
+  for (const analysis of analyses) {
+    if (analysis.clinicId !== sources.clinicId) {
+      throw new FindingIntegrityError(`Root cause ${analysis.id} belongs to clinic ${analysis.clinicId}, not ${sources.clinicId}.`);
+    }
+    if (!ids.has(analysis.parentFindingId)) {
+      throw new FindingIntegrityError(`Root cause ${analysis.id} names finding ${analysis.parentFindingId}, which this run did not produce.`);
+    }
+    byParent.set(analysis.parentFindingId, [...(byParent.get(analysis.parentFindingId) ?? []), analysis]);
+  }
+  return findings.map((f) => {
+    const attached = byParent.get(f.id);
+    if (attached === undefined) return f;
+    const ordered = [...attached].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return { ...f, evidence: { ...f.evidence, rootCauses: ordered } };
+  });
 }

@@ -14,8 +14,9 @@
  *   4. impact           the recorded amount — only between findings in the same unit
  *   5. affected patients
  *   6. persistence      consecutive days it has held
- *   7. confidence       more complete evidence first
- *   8. identifier       a stable tie-break, stated as such
+ *   7. located          a root-cause analysis located where it is concentrated
+ *   8. confidence       more complete evidence first
+ *   9. identifier       a stable tie-break, stated as such
  *
  * Stakes come first so an opportunity never outranks a more serious problem just
  * by having a deadline; urgency comes second so, between equally serious
@@ -135,7 +136,7 @@ export function rankFindings(findings: readonly Finding[], input: PrioritizeInpu
       role,
       index + 1,
       f,
-      `${prefix}: ${facts(finding, f, now)}.${trajectoryNote(finding)}`,
+      `${prefix}: ${facts(finding, f, now)}.${trajectoryNote(finding)}${rootCauseNote(finding)}`,
       below === undefined ? null : `Above “${below.title}” because ${compare(finding, below).statement}.`,
       null,
       null,
@@ -146,7 +147,7 @@ export function rankFindings(findings: readonly Finding[], input: PrioritizeInpu
     .sort((x, y) => compare(x.lead, y.lead).order || compare(x.finding, y.finding).order)
     .map(({ finding, lead, reason }) => {
       const f = factors.get(finding.id) as RankFactors;
-      const explanation = `Supports “${lead.title}”: ${reason}. ${capitalise(facts(finding, f, now))}.${trajectoryNote(finding)}`;
+      const explanation = `Supports “${lead.title}”: ${reason}. ${capitalise(facts(finding, f, now))}.${trajectoryNote(finding)}${rootCauseNote(finding)}`;
       return ranked(finding, finding.polarity === "positive" ? "win" : "supporting", null, f, explanation, null, lead.id, reason);
     });
 
@@ -160,7 +161,7 @@ export function rankFindings(findings: readonly Finding[], input: PrioritizeInpu
         "supporting",
         null,
         f,
-        `Unchanged since ${since}, so not raised again until it changes: ${facts(finding, f, now)}.${trajectoryNote(finding)}`,
+        `Unchanged since ${since}, so not raised again until it changes: ${facts(finding, f, now)}.${trajectoryNote(finding)}${rootCauseNote(finding)}`,
         null,
         null,
         null,
@@ -209,6 +210,7 @@ function factorsOf(finding: Finding, now: number): RankFactors {
     trend: e.trend === "worsening" ? 2 : e.trend === "improving" ? 0 : 1,
     consecutiveDays: e.consecutiveDays ?? 0,
     affectedPatients: e.scope.find((m) => m.unit === "patients")?.value ?? null,
+    located: e.rootCauses.some((r) => r.outcome === "explained" && r.confidence >= FINDINGS_CONFIG.moderateConfidence) ? 1 : 0,
   };
 }
 
@@ -240,6 +242,14 @@ function isQuietWarning(finding: Finding): boolean {
 function trajectoryNote(finding: Finding): string {
   const lead = finding.evidence.trajectories[0];
   return lead === undefined ? "" : ` ${lead.statement}`;
+}
+
+/**
+ * Each root-cause analysis's own sentence — including "insufficient evidence to
+ * explain", which is as much a finding about the data as an explanation is.
+ */
+function rootCauseNote(finding: Finding): string {
+  return finding.evidence.rootCauses.map((r) => ` ${r.statement}`).join("");
 }
 
 function noActionReason(finding: Finding, f: RankFactors, now: number): string | null {
@@ -314,6 +324,12 @@ function decide(a: Finding, b: Finding, factors: ReadonlyMap<string, RankFactors
     return {
       order: fb.consecutiveDays - fa.consecutiveDays,
       statement: `it has held longer (${Math.max(fa.consecutiveDays, fb.consecutiveDays)} vs ${Math.min(fa.consecutiveDays, fb.consecutiveDays)} days running)`,
+    };
+  }
+  if (fa.located !== fb.located) {
+    return {
+      order: fb.located - fa.located,
+      statement: "the ledger locates where it is concentrated, while the other has no located concentration yet",
     };
   }
   if (a.evidence.confidence !== b.evidence.confidence) {
