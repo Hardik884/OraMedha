@@ -41,11 +41,37 @@ import {
   ActionChannel,
   type Action,
   type ActionPlan,
+  type RelatedEntity,
   type Workflow,
+  type WorkflowOwner,
+  type WorkflowTimeframe,
 } from "../../domain";
+import type { Priority } from "../../types";
 import { ACTION_CATALOG, buildDraft, type ActionCapability } from "./action-catalog";
 import { ACTION_PLANS, type ActionPlanStep } from "./action-plans";
 import { actionDateWindows } from "./action-dates";
+
+/**
+ * Whatever a plan of prepared actions serves, reduced to what the plan copies.
+ *
+ * A workflow is one source; an opportunity is another. Both hand over their
+ * already-decided priority, owner, timeframe and provenance, and this engine
+ * builds identical kinds of action from either — which is what keeps an
+ * opportunity from growing a parallel action system of its own.
+ */
+export interface ActionPlanSource {
+  /** Template key: a workflow template, or `opportunity.<type>`. */
+  readonly key: string;
+  readonly id: string;
+  readonly title: string;
+  readonly priority: Priority;
+  readonly owner: WorkflowOwner;
+  readonly timeframe: WorkflowTimeframe;
+  readonly constraintId: string;
+  readonly strategyId: string;
+  readonly workflowId: string;
+  readonly involvedEntities: readonly RelatedEntity[];
+}
 
 export interface ActionResult {
   /** One plan per workflow that has a mapping, in the workflows' own order. */
@@ -76,55 +102,88 @@ export function generateActions(
   date: string,
   now: string,
 ): ActionResult {
-  const windows = actionDateWindows(date);
   const plans: ActionPlan[] = [];
 
   for (const workflow of workflows) {
     const steps = ACTION_PLANS[workflow.templateKey];
     if (steps === undefined || steps.length === 0) continue;
-
-    // Ids are resolved in one pass first, so `dependsOn` can reference sibling
-    // action ids rather than capability names — the UI should never have to
-    // re-derive an id to draw a dependency.
-    const idFor = new Map<string, string>();
-    for (const step of steps) {
-      idFor.set(step.capability, actionId(workflow.templateKey, step.capability, clinicId, date));
-    }
-
-    const actions: Action[] = [];
-    steps.forEach((step, index) => {
-      const capability = ACTION_CATALOG.get(step.capability);
-      // Same reasoning as a missing plan: a step naming a capability that does
-      // not exist is a coverage failure, not something to paper over at runtime.
-      if (capability === undefined) return;
-      actions.push(
-        buildAction(step, capability, workflow, index + 1, idFor, clinicId, date, now, windows),
-      );
-    });
-
-    if (actions.length === 0) continue;
-
-    const primaryStep = steps.find((s) => s.primary === true);
-    const primaryActionId =
-      primaryStep !== undefined ? (idFor.get(primaryStep.capability) ?? null) : actions[0].id;
-
-    plans.push({
-      id: `plan.${workflow.templateKey}:${clinicId}:${date}`,
-      workflowId: workflow.id,
-      workflowKey: workflow.templateKey,
-      workflowTitle: workflow.title,
-      priority: workflow.priority,
-      owner: workflow.owner,
-      timeframe: workflow.timeframe,
-      constraintId: workflow.constraintId,
-      strategyId: workflow.strategyId,
-      actions,
-      primaryActionId,
-      createdAt: now,
-    });
+    const plan = prepareActionPlan(
+      {
+        key: workflow.templateKey,
+        id: workflow.id,
+        title: workflow.title,
+        priority: workflow.priority,
+        owner: workflow.owner,
+        timeframe: workflow.timeframe,
+        constraintId: workflow.constraintId,
+        strategyId: workflow.strategyId,
+        workflowId: workflow.id,
+        involvedEntities: workflow.involvedEntities,
+      },
+      steps,
+      clinicId,
+      date,
+      now,
+    );
+    if (plan !== null) plans.push(plan);
   }
 
   return { plans };
+}
+
+/**
+ * Build one plan of prepared actions from catalog steps.
+ *
+ * Returns null when no step names a real capability. Every action carries
+ * `channel: in_app` and `execution: prepare_only`, whoever the source is.
+ */
+export function prepareActionPlan(
+  source: ActionPlanSource,
+  steps: readonly ActionPlanStep[],
+  clinicId: string,
+  date: string,
+  now: string,
+): ActionPlan | null {
+  if (steps.length === 0) return null;
+  const windows = actionDateWindows(date);
+
+  // Ids are resolved in one pass first, so `dependsOn` can reference sibling
+  // action ids rather than capability names — the UI should never have to
+  // re-derive an id to draw a dependency.
+  const idFor = new Map<string, string>();
+  for (const step of steps) {
+    idFor.set(step.capability, actionId(source.key, step.capability, clinicId, date));
+  }
+
+  const actions: Action[] = [];
+  steps.forEach((step, index) => {
+    const capability = ACTION_CATALOG.get(step.capability);
+    // A step naming a capability that does not exist is a coverage failure, not
+    // something to paper over at runtime.
+    if (capability === undefined) return;
+    actions.push(buildAction(step, capability, source, index + 1, idFor, clinicId, date, now, windows));
+  });
+
+  if (actions.length === 0) return null;
+
+  const primaryStep = steps.find((s) => s.primary === true);
+  const primaryActionId =
+    primaryStep !== undefined ? (idFor.get(primaryStep.capability) ?? null) : actions[0].id;
+
+  return {
+    id: `plan.${source.key}:${clinicId}:${date}`,
+    workflowId: source.workflowId,
+    workflowKey: source.key,
+    workflowTitle: source.title,
+    priority: source.priority,
+    owner: source.owner,
+    timeframe: source.timeframe,
+    constraintId: source.constraintId,
+    strategyId: source.strategyId,
+    actions,
+    primaryActionId,
+    createdAt: now,
+  };
 }
 
 function actionId(
@@ -139,7 +198,7 @@ function actionId(
 function buildAction(
   step: ActionPlanStep,
   capability: ActionCapability,
-  workflow: Workflow,
+  workflow: ActionPlanSource,
   order: number,
   idFor: ReadonlyMap<string, string>,
   clinicId: string,
@@ -150,7 +209,7 @@ function buildAction(
   const catalogFilters = capability.filters?.(windows) ?? {};
 
   return {
-    id: idFor.get(step.capability) ?? actionId(workflow.templateKey, step.capability, clinicId, date),
+    id: idFor.get(step.capability) ?? actionId(workflow.key, step.capability, clinicId, date),
     capability: capability.id,
     kind: capability.kind,
     category: capability.category,

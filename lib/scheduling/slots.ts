@@ -193,6 +193,25 @@ export function openMinutes(
   rules: AvailabilityRule[],
   blockedRanges?: Array<{ start: string; end: string }>
 ): number {
+  return openSpans(rules, blockedRanges).reduce((total, [start, end]) => total + (end - start), 0);
+}
+
+/**
+ * openSpans
+ *
+ * The open periods themselves, as [start, end) minutes since midnight, sorted
+ * and non-overlapping: the union of the rules less every blocked range.
+ *
+ * `openMinutes` is exactly the sum of these lengths, so anything reasoning about
+ * WHERE the open time falls (a gap long enough for an appointment) agrees by
+ * construction with the capacity figure every utilization metric divides by.
+ *
+ * Pure: minutes-since-midnight arithmetic only, no Date, no timezone, no clock.
+ */
+export function openSpans(
+  rules: AvailabilityRule[],
+  blockedRanges?: Array<{ start: string; end: string }>
+): Array<[number, number]> {
   const merge = (spans: Array<[number, number]>): Array<[number, number]> => {
     const sorted = spans
       .filter(([s, e]) => e > s)
@@ -214,16 +233,18 @@ export function openMinutes(
     (blockedRanges ?? []).map((b) => [toMinutes(b.start), toMinutes(b.end)])
   );
 
-  let total = 0;
+  const result: Array<[number, number]> = [];
   for (const [start, end] of open) {
-    let covered = end - start;
+    let cursor = start;
     for (const [bStart, bEnd] of blocked) {
-      const overlap = Math.min(end, bEnd) - Math.max(start, bStart);
-      if (overlap > 0) covered -= overlap;
+      if (bEnd <= cursor || bStart >= end) continue;
+      if (bStart > cursor) result.push([cursor, bStart]);
+      cursor = Math.max(cursor, bEnd);
+      if (cursor >= end) break;
     }
-    total += Math.max(0, covered);
+    if (cursor < end) result.push([cursor, end]);
   }
-  return total;
+  return result;
 }
 
 /**

@@ -40,12 +40,13 @@ import type {
   PaymentSnapshot,
   QueueEntrySnapshot,
   TreatmentSnapshot,
+  VisitDurationSnapshot,
 } from "@/business-brain";
 import type { Database } from "@/types/database.types";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
-import { openMinutes, type AvailabilityRule } from "@/lib/scheduling/slots";
 import { getUtcBoundariesForLocalDate } from "@/lib/utils";
-import { addDays, dateRange } from "@/business-brain";
+import { addDays } from "@/business-brain";
+import { fetchScheduleInputs, openMinutesInRange, openMinutesOnDate } from "./schedule-inputs";
 
 /**
  * TYPING NOTE
@@ -85,14 +86,6 @@ interface AppointmentRow {
   created_at: string;
   duration_minutes: number;
   source: string;
-}
-interface UnavailableDateRow {
-  date: string;
-}
-interface ConsultancyBlockDatedRow {
-  date: string;
-  start_time: string;
-  end_time: string;
 }
 interface PatientRow {
   id: string;
@@ -138,30 +131,18 @@ interface QueueRow {
   checked_in_at: string;
   called_at: string | null;
 }
+interface QueueDurationRow {
+  appointment_id: string;
+  called_at: string | null;
+  completed_at: string | null;
+}
 interface FollowUpRow {
   id: string;
   due_date: string;
   status: string;
 }
-interface AvailabilityRuleRow {
-  start_time: string;
-  end_time: string;
-  slot_duration_minutes: number;
-}
 
-/** Postgres `time` columns arrive as "HH:MM:SS"; the slot engine wants "HH:MM". */
-function toHhMm(time: string): string {
-  return time.slice(0, 5);
-}
 
-/**
- * Day-of-week (0 = Sunday) for a "YYYY-MM-DD" business date.
- * Read from the date string itself — the business date is already clinic-local,
- * so converting it through a timezone again would shift it.
- */
-function dayOfWeek(date: string): number {
-  return new Date(`${date}T12:00:00.000Z`).getUTCDay();
-}
 
 export interface SupabaseMetricsRepositoryOptions {
   /**
@@ -254,7 +235,7 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
 
     // One read of the schedule rules covers today, the trailing window and the
     // forward window — see fetchScheduleInputs.
-    const scheduleInputs = await this.fetchScheduleInputs(clinicId, trailingFrom, forwardTo);
+    const scheduleInputs = await fetchScheduleInputs(this.db, clinicId, trailingFrom, forwardTo);
 
     const [
       appointmentsToday,
@@ -268,6 +249,7 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       patientsOnPaymentPlan,
       trailingAppointments,
       forwardAppointments,
+      trailingQueueDurations,
     ] = await Promise.all([
       this.fetchAppointments(clinicId, dayStart, dayEnd),
       this.fetchPatientsRegistered(clinicId, dayStart, dayEnd),
@@ -280,6 +262,7 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       this.fetchPatientsOnPaymentPlan(clinicId, date),
       this.fetchAppointmentsInRange(clinicId, trailingFrom, date, timezone),
       this.fetchAppointmentsInRange(clinicId, forwardFrom, forwardTo, timezone),
+      this.fetchVisitDurations(clinicId, trailingFrom, date),
     ]);
 
     // Depends on today's appointments, so it cannot join the parallel batch.
@@ -315,7 +298,7 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       queueToday,
       followUps,
       capacity: {
-        openMinutesToday: this.openMinutesOnDate(date, scheduleInputs),
+        openMinutesToday: openMinutesOnDate(date, scheduleInputs),
         chairCount,
         typicalAppointmentMinutes,
       },
@@ -324,14 +307,14 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
         to: date,
         appointments: trailingAppointments,
         openChairMinutes:
-          this.openMinutesInRange(trailingFrom, date, scheduleInputs) * chairCount,
+          openMinutesInRange(trailingFrom, date, scheduleInputs) * chairCount,
       },
       forwardWindow: {
         from: forwardFrom,
         to: forwardTo,
         appointments: forwardAppointments,
         openChairMinutes:
-          this.openMinutesInRange(forwardFrom, forwardTo, scheduleInputs) * chairCount,
+          openMinutesInRange(forwardFrom, forwardTo, scheduleInputs) * chairCount,
       },
       patientRoster: roster.map((p) => ({
         id: p.id,
@@ -344,6 +327,16 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       // one place that decides what "no interval configured" means.
       recallIntervalDays: cfg?.recall_interval_days ?? undefined,
       patientsOnPaymentPlan,
+      // Joined here rather than in SQL: the booked length lives on the
+      // appointment and the delivered length on the queue entry, and the
+      // trailing appointments were loaded a few lines above for the window
+      // metrics. Pairing them in memory avoids a second read of the same rows.
+      //
+      // An appointment with no queue entry contributes nothing — not a zero. A
+      // visit nobody checked in is a visit whose length was never measured, and
+      // counting it as on-time would make a clinic that forgets to close its
+      // queue entries look like one that books perfectly.
+      trailingVisitDurations: joinVisitDurations(trailingAppointments, trailingQueueDurations),
     };
   }
 
@@ -430,8 +423,9 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * cleaning while a planned crown goes unbooked reads as `true`, and the
    * crown will not appear in `treatment.accepted_pending_scheduling`.
    *
-   * That imprecision is accepted knowingly. Modelling it exactly needs a
-   * treatment-to-appointment link, which would force the dentist to record
+   * That imprecision is accepted knowingly. Modelling it exactly needs a link
+   * from planned work to its future visit — `treatments.appointment_id` is the
+   * visit the plan was recorded at, not that link — which would force the dentist to record
    * which future visit each planned item belongs to — workflow complexity that
    * is not worth the accuracy at this stage. The approximation still answers
    * the question the clinic actually asks:
@@ -654,6 +648,33 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * `queue_date`, which is the clinic-local business date — so it is compared
    * directly rather than through UTC boundaries.
    */
+  /**
+   * Queue entries across the trailing window, reduced to the two timestamps that
+   * bound a visit.
+   *
+   * Scoped by `queue_date`, which is already the clinic's business date, so no
+   * timezone conversion is needed or wanted here — converting an
+   * already-local date through the clinic offset a second time would shift the
+   * window edges.
+   *
+   * `queue_entries` has no `deleted_at`: it is not a soft-deletable table (see
+   * CLAUDE.md 5.11), so no filter belongs here.
+   */
+  private async fetchVisitDurations(
+    clinicId: string,
+    from: string,
+    to: string,
+  ): Promise<QueueDurationRow[]> {
+    const { data, error } = await this.db
+      .from("queue_entries")
+      .select("appointment_id, called_at, completed_at")
+      .eq("clinic_id", clinicId)
+      .gte("queue_date", from)
+      .lte("queue_date", to);
+    if (error) throw new Error(`queue_entries (durations): ${error.message}`);
+    return rows<QueueDurationRow>(data);
+  }
+
   private async fetchQueue(clinicId: string, date: string): Promise<QueueEntrySnapshot[]> {
     const { data, error } = await this.db
       .from("queue_entries")
@@ -688,115 +709,6 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     return rows<FollowUpRow>(data).map((f) => ({ id: f.id, dueDate: f.due_date, status: f.status }));
   }
 
-  /**
-   * Schedule inputs for a date RANGE, fetched once.
-   *
-   * Capacity is per-day, but querying per day would issue three round-trips for
-   * every date in a 30-day window. Instead the rules, holidays and consultancy
-   * blocks are read once for the widest range needed, and each day's slot count
-   * is computed from them in memory. Query count is therefore constant no matter
-   * how long the windows are.
-   */
-  private async fetchScheduleInputs(clinicId: string, from: string, to: string) {
-    const [rulesResult, unavailableResult, blocksResult] = await Promise.all([
-      this.db
-        .from("availability_rules")
-        .select("day_of_week, start_time, end_time, slot_duration_minutes")
-        .eq("clinic_id", clinicId)
-        .eq("is_active", true),
-      this.db
-        .from("unavailable_dates")
-        .select("date")
-        .eq("clinic_id", clinicId)
-        .gte("date", from)
-        .lte("date", to),
-      this.db
-        .from("consultancy_schedules")
-        .select("date, start_time, end_time")
-        .eq("clinic_id", clinicId)
-        .eq("is_active", true)
-        .gte("date", from)
-        .lte("date", to),
-    ]);
-
-    if (rulesResult.error) throw new Error(`availability_rules: ${rulesResult.error.message}`);
-    if (unavailableResult.error) {
-      throw new Error(`unavailable_dates: ${unavailableResult.error.message}`);
-    }
-    if (blocksResult.error) {
-      throw new Error(`consultancy_schedules: ${blocksResult.error.message}`);
-    }
-
-    const rulesByDow = new Map<number, AvailabilityRule[]>();
-    for (const r of rows<AvailabilityRuleRow & { day_of_week: number }>(rulesResult.data)) {
-      const list = rulesByDow.get(r.day_of_week) ?? [];
-      list.push({
-        startTime: toHhMm(r.start_time),
-        endTime: toHhMm(r.end_time),
-        slotDurationMinutes: r.slot_duration_minutes,
-      });
-      rulesByDow.set(r.day_of_week, list);
-    }
-
-    const closedDates = new Set(rows<UnavailableDateRow>(unavailableResult.data).map((u) => u.date));
-
-    const blocksByDate = new Map<string, Array<{ start: string; end: string }>>();
-    for (const b of rows<ConsultancyBlockDatedRow>(blocksResult.data)) {
-      const list = blocksByDate.get(b.date) ?? [];
-      list.push({ start: toHhMm(b.start_time), end: toHhMm(b.end_time) });
-      blocksByDate.set(b.date, list);
-    }
-
-    return { rulesByDow, closedDates, blocksByDate };
-  }
-
-  /**
-   * Bookable slots the clinic OFFERS on a single date — capacity, not
-   * availability. Booked appointments are deliberately not subtracted: the
-   * engine divides booked by this figure to get utilization, so netting them off
-   * would make utilization always read 0%.
-   *
-   * Reuses `lib/scheduling/slots.ts` (empty `occupied`, no past-slot cutoff) so
-   * capacity is defined in exactly one place, including its handling of rule
-   * boundaries and external-consultancy blocks.
-   */
-  /**
-   * Minutes one chair is open on a date: the union of that weekday's active
-   * rules, less any consultancy block, zero when the clinic is shut.
-   *
-   * Deliberately NOT `getAvailableSlots(...).length`, which is what this used to
-   * be. That function is correct for booking — it validates that a full
-   * appointment fits inside a rule window — but its return is a list of
-   * candidate START TIMES stepped at `slot_duration_minutes`, and those overlap.
-   * A 09:00-13:00 rule stepped every 10 minutes yields 24 candidates for four
-   * hours of chair time. Counting them as capacity inflated the denominator by
-   * the ratio of appointment length to step size, so utilization read roughly a
-   * third of the truth on this clinic's Mondays and a different fraction on its
-   * Fridays.
-   *
-   * Timezone plays no part: rules are wall-clock times and their length is the
-   * same in any zone. Only the closed-date and block lookups are date-keyed, and
-   * the caller already resolves those in clinic-local terms.
-   */
-  private openMinutesOnDate(
-    date: string,
-    inputs: Awaited<ReturnType<SupabaseMetricsDataRepository["fetchScheduleInputs"]>>,
-  ): number {
-    if (inputs.closedDates.has(date)) return 0;
-    const rules = inputs.rulesByDow.get(dayOfWeek(date)) ?? [];
-    if (rules.length === 0) return 0;
-    return openMinutes(rules, inputs.blocksByDate.get(date) ?? []);
-  }
-
-  /** Total slots offered across an inclusive date range. */
-  /** Open minutes per chair summed across an inclusive date range. */
-  private openMinutesInRange(
-    from: string,
-    to: string,
-    inputs: Awaited<ReturnType<SupabaseMetricsDataRepository["fetchScheduleInputs"]>>,
-  ): number {
-    return dateRange(from, to).reduce((sum, d) => sum + this.openMinutesOnDate(d, inputs), 0);
-  }
 
   /** Appointments whose scheduled time falls inside an inclusive date range. */
   private async fetchAppointmentsInRange(
@@ -809,4 +721,62 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     const { end } = getUtcBoundariesForLocalDate(to, timezone);
     return this.fetchAppointments(clinicId, start, end);
   }
+}
+
+/**
+ * Pair each trailing appointment's BOOKED length with the DELIVERED length its
+ * queue entry recorded.
+ *
+ * Exported for its tests: this is the one place two ledgers are joined, and the
+ * join is where the measurement can quietly go wrong.
+ *
+ * Three rules, each guarding a way the figure could lie:
+ *
+ * 1. Only appointments the patient actually attended contribute. A cancelled or
+ *    no-show appointment has a booked length and no delivered one, and including
+ *    it would read as an appointment that took zero minutes.
+ * 2. A visit with no queue entry, or a queue entry missing either timestamp,
+ *    yields `actualMinutes: null` — never a zero. The calculator drops those
+ *    rather than treating an unmeasured visit as a punctual one.
+ * 3. A negative interval (a `completed_at` before its `called_at`, which only
+ *    bad data produces) is discarded rather than clamped. Clamping to zero would
+ *    silently pull the clinic's average down using a row that means nothing.
+ */
+export function joinVisitDurations(
+  appointments: readonly AppointmentSnapshot[],
+  queueRows: readonly { appointment_id: string; called_at: string | null; completed_at: string | null }[],
+): VisitDurationSnapshot[] {
+  const byAppointment = new Map<string, { called: string | null; completed: string | null }>();
+  for (const row of queueRows) {
+    // First entry wins. A patient re-queued on the same appointment is a rare
+    // correction; taking the first keeps the join deterministic either way.
+    if (byAppointment.has(row.appointment_id)) continue;
+    byAppointment.set(row.appointment_id, {
+      called: row.called_at,
+      completed: row.completed_at,
+    });
+  }
+
+  const attended = new Set<string>(["checked_in", "in_progress", "completed"]);
+
+  return appointments
+    .filter((a) => attended.has(a.status))
+    .map((a) => {
+      const entry = byAppointment.get(a.id);
+      return {
+        appointmentId: a.id,
+        scheduledMinutes: a.durationMinutes,
+        actualMinutes: measuredMinutes(entry?.called ?? null, entry?.completed ?? null),
+      };
+    });
+}
+
+/** Whole minutes between two timestamps, or null when either is absent or invalid. */
+function measuredMinutes(called: string | null, completed: string | null): number | null {
+  if (called === null || completed === null) return null;
+  const start = Date.parse(called);
+  const end = Date.parse(completed);
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  const minutes = (end - start) / 60_000;
+  return minutes < 0 ? null : Math.round(minutes);
 }
