@@ -58,11 +58,13 @@ import {
 import type { MetricsOnlyDay } from "../engines/diagnosis-engine";
 import type { DiagnosisContextPort, EntityWindow } from "../engines/diagnosis";
 import { deriveOpportunities } from "../engines/opportunity";
-import { prioritizeFindings } from "../engines/findings";
+import { normalizeFindings, prioritizeFindings, type FindingSources } from "../engines/findings";
+import { deriveRootCauses, rootCauseSubjects, DEFAULT_ROOT_CAUSE_CONFIG } from "../engines/root-cause";
+import type { RootCauseAnalysis } from "../domain";
 import { deriveTrajectories } from "../engines/trajectory";
 import type { MetricTrajectory } from "../domain";
 import type { PrioritizedFindings } from "../domain";
-import { OpportunityType, type Opportunity, type OpportunityAssessment } from "../domain";
+import { ConstraintCategory, OpportunityType, type Opportunity, type OpportunityAssessment } from "../domain";
 import {
   buildLedgerGraph,
   type AppointmentWindowScope,
@@ -92,6 +94,13 @@ const OPPORTUNITY_FORWARD_DAYS = 7;
 const OPPORTUNITY_SCHEDULE_LIMIT = 2000;
 const OPPORTUNITY_MAX_PATIENTS = 1000;
 const OPPORTUNITY_ROW_LIMIT = 5000;
+
+/**
+ * Root-cause reads: the trailing appointment book (and published capacity, only
+ * when an idle-capacity finding asks) over the engine's own window. A cut book is
+ * refused by the engine rather than analysed, so the limit is generous.
+ */
+const ROOT_CAUSE_SCHEDULE_LIMIT = 5000;
 import { deriveBaselines, type MetricBaseline } from "../engines/baseline";
 import { deriveAchievements } from "../engines/achievement";
 import type { Achievement } from "../domain";
@@ -284,6 +293,12 @@ export interface BusinessBrainResult {
    * history was requested, since there is then nothing to be a trajectory of.
    */
   readonly trajectories: readonly MetricTrajectory[];
+  /**
+   * Where each explainable finding is concentrated in the ledger — or why that
+   * could not be said. Also attached to the findings they belong to. Empty unless
+   * the run asked (`options.rootCauses`) and at least one finding qualified.
+   */
+  readonly rootCauses: readonly RootCauseAnalysis[];
   /** Set when a stage rejected its input; identifies the first failure. */
   readonly error?: EngineError;
 }
@@ -414,6 +429,15 @@ export interface RunBusinessBrainOptions {
    * and get exactly the result they always did.
    */
   readonly opportunities?: { readonly now: string };
+  /**
+   * Investigate where this run's problems are concentrated, as of `now`, reading
+   * clinic-local days and sessions in `timezone`.
+   *
+   * Opt-in, and reads only when a finding qualifies: one bounded appointment
+   * window over the trailing month, plus published capacity when an idle-capacity
+   * finding asks. A run with nothing to explain reads nothing.
+   */
+  readonly rootCauses?: { readonly now: string; readonly timezone: string };
   readonly requestedBy?: string;
   readonly role?: string;
 }
@@ -509,6 +533,7 @@ export class BusinessBrain {
     let trajectories: readonly MetricTrajectory[] = [];
     let opportunities: readonly Opportunity[] = [];
     let opportunityAssessments: readonly OpportunityAssessment[] = [];
+    let rootCauses: readonly RootCauseAnalysis[] = [];
     const finish = (
       fields: Pick<BusinessBrainResult, "metrics" | "signals" | "diagnoses" | "trace"> & {
         error?: EngineError;
@@ -529,6 +554,7 @@ export class BusinessBrain {
           opportunities,
           achievements,
           trajectories,
+          rootCauses,
         },
         // The run's logical moment, so the same run always ranks the same way.
         now: startedAt,
@@ -551,6 +577,7 @@ export class BusinessBrain {
         opportunityAssessments,
         findings,
         trajectories,
+        rootCauses,
         constraints,
         strategies,
         valueAtStake,
@@ -836,6 +863,22 @@ export class BusinessBrain {
       opportunityAssessments = detected.assessments;
     }
 
+    // ── Derived: root causes ─────────────────────────────────────────────────
+    if (options.rootCauses !== undefined) {
+      rootCauses = await this.explainFindings(clinicId, date, options.rootCauses, {
+        clinicId,
+        date,
+        constraints,
+        diagnoses: resolved,
+        valueAtStake,
+        workflows,
+        actionPlans,
+        opportunities,
+        achievements,
+        trajectories,
+      });
+    }
+
     const trace = [...signalTrace, ...(diagnosisResult.trace ?? [])];
     return finish({
       metrics,
@@ -994,6 +1037,63 @@ export class BusinessBrain {
       const message = error instanceof Error ? error.message : String(error);
       this.log.warn("Business Brain could not measure opportunities", { clinicId, date, error: message });
       return unmeasured("The clinic ledger could not be read for this run.");
+    }
+  }
+
+  /**
+   * Investigate where this run's explainable findings are concentrated.
+   *
+   * The subjects come from the same normalisation the prioritiser runs, so every
+   * analysis names a finding that will exist. Nothing is read when no finding
+   * qualifies. Never fatal, and never silent: without a ledger, or when a read
+   * fails, each subject is still answered — "insufficient evidence to explain",
+   * with the reason — rather than left without an analysis.
+   */
+  private async explainFindings(
+    clinicId: string,
+    date: string,
+    request: { readonly now: string; readonly timezone: string },
+    sources: FindingSources,
+  ): Promise<readonly RootCauseAnalysis[]> {
+    try {
+      const subjects = rootCauseSubjects(normalizeFindings(sources));
+      if (subjects.length === 0) return [];
+      const base = { clinicId, date, now: request.now, timezone: request.timezone, subjects };
+      const port = this.ledgerPort;
+      if (port === undefined) {
+        return deriveRootCauses({ ...base, schedule: null, capacity: null, unavailableReason: "no clinic ledger is available to this run" });
+      }
+      const from = addDays(date, -(DEFAULT_ROOT_CAUSE_CONFIG.windowDays - 1));
+      try {
+        const [schedule, capacity] = await Promise.all([
+          port.readAppointmentWindow({
+            kind: "appointment_window",
+            clinicId,
+            from,
+            to: date,
+            asOf: request.now,
+            limit: ROOT_CAUSE_SCHEDULE_LIMIT,
+          }),
+          subjects.some((s) => s.category === ConstraintCategory.CAPACITY)
+            ? port.readCapacityWindow({ clinicId, from, to: date })
+            : Promise.resolve(null),
+        ]);
+        return deriveRootCauses({ ...base, schedule: buildLedgerGraph(schedule), capacity });
+      } catch (error) {
+        this.log.warn("Business Brain could not read the ledger for root causes", {
+          clinicId,
+          date,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return deriveRootCauses({ ...base, schedule: null, capacity: null, unavailableReason: "the clinic ledger could not be read for this run" });
+      }
+    } catch (error) {
+      this.log.warn("Business Brain could not derive root causes", {
+        clinicId,
+        date,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
     }
   }
 

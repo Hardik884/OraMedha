@@ -107,6 +107,9 @@ export async function runDashboardBrain(date?: string): Promise<DashboardRun> {
     // past date gets no opportunities rather than ones measured against a week
     // that has already happened.
     ...(date === undefined ? { opportunities: { now: new Date().toISOString() } } : {}),
+    // Where the day's problems are concentrated in the trailing month. Reads only
+    // when a finding qualifies, and attaches to that finding.
+    rootCauses: { now: new Date().toISOString(), timezone },
   });
 
   // Self-healing history.
