@@ -19,21 +19,42 @@ import { addDays } from "@/business-brain";
 import { BusinessBrain, type BusinessBrainResult } from "@/business-brain";
 import { SupabaseMetricsDataRepository } from "./metrics-repository";
 import { SupabaseMetricHistoryStore } from "./metric-history-store";
-import { SupabaseDiagnosisContext } from "./diagnosis-context";
+import { SupabaseClinicLedger } from "./clinic-ledger";
 import { recordRecomputedHistory } from "./persist-metrics";
 
 /**
- * Days of history loaded so the Diagnosis Engine can classify persistence —
- * whether something is a one-off, ongoing, worsening or improving.
+ * Days of history loaded per run.
  *
- * The engine's `minimumHistoryDays` is 3, so 7 gives it a real window while
- * staying inside one clinic-week.
+ * Raised from 7 to 35 because two capabilities need more than a week and the data
+ * was already there: the Baseline Engine needs enough observations to describe
+ * this clinic's normal RANGE rather than just its recent level (its `adequate`
+ * mark is 6 and `strong` is 14), and a week-over-week movement needs a day on
+ * both sides of the comparison. `metric_history` has been recording every metric
+ * every day for as long as the clinic has been live; the run was reading seven of
+ * them.
  *
- * Days already recorded in `metric_history` are read rather than recomputed, so
- * the cost of this is one snapshot per day the persistence job has not yet
- * covered — in a steady state, none.
+ * Five weeks rather than more: it covers the 30-day windows the metrics
+ * themselves describe, plus a few days of slack so a clinic closed on the
+ * comparison day still has a nearby one. Beyond that the reads get wider for no
+ * question anyone is asking yet.
  */
-const HISTORY_DAYS = 7;
+const HISTORY_DAYS = 35;
+
+/**
+ * How many of those days this run may MEASURE itself when the store lacks them.
+ *
+ * The cap matters because the two costs are not comparable: a stored day is one
+ * row of a range read, while a missing day is a full clinic snapshot. Without it,
+ * the first load for a clinic with a cold store would run 35 snapshots inside a
+ * page render.
+ *
+ * Seven keeps the recent window — the part persistence reasons over — complete on
+ * the first load, while the write-back below and the hourly job fill the rest in
+ * behind it. Older days that are neither stored nor measured are simply absent,
+ * which every consumer already handles honestly: persistence treats an
+ * unsupplied day as unknown, and a baseline reports the observations it has.
+ */
+const MAX_RECOMPUTED_HISTORY_DAYS = 7;
 
 export interface DashboardRun {
   readonly result: BusinessBrainResult;
@@ -72,14 +93,20 @@ export async function runDashboardBrain(date?: string): Promise<DashboardRun> {
   const brain = new BusinessBrain({
     repository,
     historyStore: new SupabaseMetricHistoryStore(supabase),
-    // Entity-level rows, so the discriminators the matchers attach are actually
+    // The relational ledger, which also serves the Diagnosis Engine's entity
+    // questions — so the discriminators the matchers attach are actually
     // measured rather than left as a list of what would have settled them.
     // Read-only and still on the request's own session, so RLS applies.
-    contextPort: new SupabaseDiagnosisContext(supabase, timezone),
+    ledgerPort: new SupabaseClinicLedger(supabase, timezone),
   });
 
   const result = await brain.runBusinessBrain(clinicId, businessDate, {
     historyDays: HISTORY_DAYS,
+    maxRecomputedHistoryDays: MAX_RECOMPUTED_HISTORY_DAYS,
+    // Only a run for today can describe time still ahead. A caller asking about a
+    // past date gets no opportunities rather than ones measured against a week
+    // that has already happened.
+    ...(date === undefined ? { opportunities: { now: new Date().toISOString() } } : {}),
   });
 
   // Self-healing history.

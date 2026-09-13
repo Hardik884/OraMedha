@@ -18,11 +18,47 @@ import type {
   ActionDraftKind,
   BusinessBrainResult,
   Constraint,
+  Diagnosis,
   Metric,
+  Opportunity,
+  OpportunityQuantity,
+  Priority,
   Severity,
 } from "@/business-brain";
 import { WorkflowOwner } from "@/business-brain";
 import { BRIEFING_MESSAGE_KINDS } from "@/lib/messaging/templates";
+
+// ── How long this has been going on ──────────────────────────────────────────
+
+/**
+ * Whether the reader should treat the trend as good news, bad news, or neither.
+ *
+ * Separate from severity, which says how big the problem is. A small problem that
+ * is getting worse and a large one that is receding are different messages, and
+ * the card needs to colour them differently without implying either is the more
+ * urgent.
+ */
+export type TrendTone = "worsening" | "improving" | "neutral";
+
+/**
+ * The plain-language read on a problem's history.
+ *
+ * The Diagnosis Engine has always classified this — transient, intermittent,
+ * sustained, worsening, improving, with the consecutive-day count behind it — and
+ * the projection threw it away, so a dentist saw a flat statement of today for a
+ * problem the engine knew was in its third day.
+ *
+ * Null when the engine could not classify it. That is the common case for a new
+ * clinic and it must stay silent rather than defaulting to "new today", which
+ * would be a claim about history rather than an absence of it.
+ */
+export interface TrendView {
+  /** Two or three words for the chip: "New today", "3rd day running". */
+  readonly label: string;
+  readonly tone: TrendTone;
+  /** One sentence, shown only when the card is expanded. */
+  readonly detail: string;
+}
 
 // ── Left column: one problem, in plain words ─────────────────────────────────
 
@@ -49,6 +85,12 @@ export interface ProblemView {
   readonly howToFix: string;
   /** Plain evidence, shown only when the card is expanded. */
   readonly whyWeThink: string;
+  /**
+   * How long this has been going on, when the engine could classify it.
+   *
+   * Null rather than a default: see {@link TrendView}.
+   */
+  readonly trend: TrendView | null;
 }
 
 // ── Right column: one thing to do, with a checklist ──────────────────────────
@@ -105,11 +147,49 @@ export interface ActionCardView {
    * categories have no per-patient message.
    */
   readonly messageKind?: ActionDraftKind;
+  /**
+   * Measured opportunities that belong to this card's finding — both halves of
+   * each (the open time or delivered work, and the patients or balance on the
+   * other side). Absent when none attaches. Carried on the existing card rather
+   * than as a card of their own: an opportunity is a sharper reading of the same
+   * finding, not a second thing to do.
+   */
+  readonly opportunities?: readonly OpportunityView[];
+}
+
+/**
+ * An opportunity in the page's language.
+ *
+ * Every line states a recorded figure. None of them ranks a patient, predicts a
+ * booking or forecasts revenue — the engine never produced any of those, and the
+ * words here must not add them.
+ */
+export interface OpportunityView {
+  readonly id: string;
+  readonly type: Opportunity["type"];
+  readonly headline: string;
+  /** The capacity or delivered-work side. */
+  readonly surplusLine: string;
+  /** The patients or balance side. */
+  readonly demandLine: string;
+  /** A recorded amount and what it is not, or null when none is recorded. */
+  readonly impactLine: string | null;
+  readonly priority: Priority;
+  /** ISO-8601; null when the opportunity has no deadline. Formatting is the page's job. */
+  readonly expiresAt: string | null;
+  /** The prepared plan's first action, from the existing catalog. */
+  readonly primaryActionId: string | null;
 }
 
 export interface BriefingView {
   readonly problems: readonly ProblemView[];
   readonly actions: readonly ActionCardView[];
+  /**
+   * Opportunities with no card to sit on — the run raised no finding about the
+   * same resource, or it was merged away. Not rendered yet; carried so the next
+   * UI step has them without re-deriving anything.
+   */
+  readonly unattachedOpportunities?: readonly OpportunityView[];
 }
 
 // ── Plain-language copy, keyed by problem category ───────────────────────────
@@ -187,6 +267,42 @@ const COPY: Record<string, CategoryCopy> = {
     // line as a share instead. See ConstraintCategory.FORWARD_SCHEDULE.
     atStakeLabel: null,
   },
+  patient_flow: {
+    title: "Patients waited too long after arriving",
+    explanation:
+      "People sat in the waiting room longer than they should have. A long wait is the thing patients remember and the thing they mention in reviews, and unlike most problems here it costs you nothing to fix — it is usually about how the day is arranged rather than how much work there is.",
+    howToFix:
+      "Look at when the queue built up. If the chairs were free at the time, spread the bookings out and stagger arrival times. If they were full, the day simply had more work in it than it could hold.",
+    whyWeThink: "Patients were queueing and waiting longer than the clinic's own limits.",
+    summaryFallback: "Patients waited longer than they should have today.",
+    atStakeLabel: "average wait today",
+  },
+  reactivation: {
+    title: "Patients have quietly stopped coming back",
+    explanation:
+      "These patients have been to the clinic before, have not been back in a long time, and have nothing booked — and none of them is on your recall list, because no follow-up was ever raised for them. They are invisible until somebody goes looking.",
+    howToFix:
+      "Open the list of patients not seen in six months, longest absence first, and call them. Raise a follow-up for anyone who wants to come later, so they cannot drop off the list again.",
+    whyWeThink:
+      "Patients on the roster have no visit within a recall interval and nothing booked, while the overdue recall list is within its normal limit — so these are different people from the ones that list covers.",
+    summaryFallback: "Patients who used to come have stopped, and none is on the recall list.",
+    atStakeLabel: "patients gone quiet",
+  },
+  schedule_accuracy: {
+    title: "Appointments take longer than the time booked for them",
+    explanation:
+      "Over the last month, visits have consistently run past the slot they were booked into. Nobody queued today, so the difference is being absorbed by the day running late rather than showing up as a waiting room — which is why it is easy to miss and why it repeats every week.",
+    howToFix:
+      "Look at which treatments routinely finish later than booked, and lengthen the default slot you book them into, so a full day on paper is a day the clinic can actually deliver.",
+    whyWeThink:
+      "Comparing the time each appointment was booked for against the time between calling the patient in and finishing with them, across enough visits that no single long appointment explains it.",
+    summaryFallback: "Appointments are running longer than the time booked for them.",
+    // No at-stake figure: what is at stake is minutes, and the only measurement
+    // available is a ratio over the window. The share is stated in the summary
+    // line instead, where a share reads as a share. See
+    // ConstraintCategory.SCHEDULE_ACCURACY in the Value Engine.
+    atStakeLabel: null,
+  },
   acquisition: {
     title: "Fewer new patients than usual",
     explanation:
@@ -198,6 +314,18 @@ const COPY: Record<string, CategoryCopy> = {
     atStakeLabel: null,
   },
 };
+
+/**
+ * The categories COPY covers, exported so a completeness test can compare them
+ * against `ConstraintCategory`.
+ *
+ * A category with no entry here still renders — it falls back to the constraint's
+ * own name and description, which are written in the engine's vocabulary
+ * ("bottleneck", "findings point here") and are exactly the words this page
+ * exists to keep off the screen. That degradation is silent, which is why it
+ * needs a test rather than a code review.
+ */
+export const COPY_CATEGORIES: readonly string[] = Object.keys(COPY);
 
 /**
  * Action-card headings, keyed the same as COPY but answering a different
@@ -214,6 +342,9 @@ const ACTION_TITLE: Record<string, string> = {
   retention: "Reach out to patients who are overdue",
   acquisition: "Give new enquiries a closer look",
   forward_schedule: "Fill next week's open slots",
+  patient_flow: "Ease the wait in your waiting room",
+  reactivation: "Call the patients who have stopped coming",
+  schedule_accuracy: "Book the time your appointments really take",
 };
 
 // ── Live counts for concrete summaries ───────────────────────────────────────
@@ -272,6 +403,35 @@ function summaryFor(
     );
     if (s) return s;
   }
+  if (category === "reactivation") {
+    // Never the patientCount override: that map is keyed by WhatsApp message
+    // population, and this card deliberately has none — its patients are the ones
+    // with no follow-up, which is the opposite of the recall send list. Reading it
+    // here would state the recall list's size under the lapsed card's heading.
+    const s = count(
+      metricValue(metrics, "patients.reactivation_candidates"),
+      "1 patient has been seen before but hasn't been back, with nothing booked.",
+      "{n} patients have been seen before but haven't been back, with nothing booked.",
+    );
+    if (s) return s;
+  }
+  if (category === "patient_flow") {
+    const v = metricValue(metrics, "queue.average_waiting_time");
+    if (v !== null && v > 0) {
+      return `Patients waited ${formatAtStake(v, "minutes")} on average after arriving.`;
+    }
+  }
+  if (category === "schedule_accuracy") {
+    const overrun = metricValue(metrics, "scheduling.appointment_overrun_30d");
+    const sample = metricValue(metrics, "scheduling.measured_visits_30d");
+    if (overrun !== null && overrun > 0) {
+      // The sample is named because it is what makes the figure credible: the
+      // same percentage over 4 visits would be one difficult morning.
+      return sample !== null && sample > 0
+        ? `Appointments ran ${Math.round(overrun)}% longer than booked, across ${Math.round(sample)} visits.`
+        : `Appointments ran ${Math.round(overrun)}% longer than the time booked for them.`;
+    }
+  }
   return copy.summaryFallback;
 }
 
@@ -316,6 +476,14 @@ const PRIMARY_ACTIONS: Partial<Record<string, readonly PrimaryActionKind[]>> = {
   // on, and ActionCard drops a contact button with no message kind anyway. The
   // checklist under Steps sends staff to both lists.
   forward_schedule: ["book_appointment"],
+  // Booking and a follow-up, but NO contact action: these patients have no
+  // prepared message. The recall invitation belongs to `retention`, whose
+  // population is the overdue follow-up list — and this card exists precisely
+  // because these are DIFFERENT people. Pointing both at one message kind would
+  // make the two send lists resolve to the same patients and undo the split.
+  reactivation: ["book_appointment", "create_follow_up"],
+  // patient_flow: nothing inline shortens a wait that has already happened.
+  // schedule_accuracy: the fix is a booking default in settings, not an inline act.
   // acquisition: no directly-executable action exists today.
 };
 
@@ -333,6 +501,12 @@ const MORE_INFO_LINK: Record<string, BriefingButton> = {
   retention: { label: "Open overdue recalls", href: "/dentist/follow-ups?status=pending" },
   acquisition: { label: "Open patients", href: "/dentist/patients" },
   forward_schedule: { label: "Open next week's schedule", href: "/dentist/appointments" },
+  patient_flow: { label: "Open the queue", href: "/dentist/queue" },
+  reactivation: {
+    label: "Open patients not seen in six months",
+    href: "/dentist/patients?filter=inactive",
+  },
+  schedule_accuracy: { label: "Open the schedule", href: "/dentist/appointments" },
 };
 
 // ── The one card that says something no other PMS can ────────────────────────
@@ -364,6 +538,186 @@ function idleChairAndUnbookedTreatmentAreOneStory(result: BusinessBrainResult): 
         (h) => h.id.endsWith("#h.unconverted_demand") && h.status === "supported",
       ),
   );
+}
+
+/**
+ * Whether the capacity bottleneck is about the MONTH rather than about today.
+ *
+ * `sustained_idle_capacity` and the today-level capacity patterns deliberately
+ * share one constraint category, so the Constraint Engine gives a clinic one
+ * capacity card instead of two competing headlines. That is right, and it leaves
+ * this projection one job: when the ONLY thing that fired is the window reading,
+ * the card must not say "your chair was empty today" and must not headline today's
+ * idle minutes — today was fine, which is exactly the point.
+ *
+ * Read from the run's diagnoses rather than inferred from the metrics, for the
+ * same reason the merge check is: a 30-day utilization figure being low is not the
+ * same as the engine having decided it is a finding.
+ */
+function capacityIsMonthLevelOnly(result: BusinessBrainResult): boolean {
+  const capacityPatterns = new Set([
+    "demand_supply_mismatch",
+    "capacity_ceiling",
+    "sustained_idle_capacity",
+  ]);
+  const present = (result.diagnoses ?? [])
+    .map((d) => d.pattern as string)
+    .filter((p) => capacityPatterns.has(p));
+  return present.length > 0 && present.every((p) => p === "sustained_idle_capacity");
+}
+
+/** The capacity card, worded for a month rather than for a day. */
+function monthLevelCapacityProblem(
+  result: BusinessBrainResult,
+  constraint: Constraint,
+  metrics: readonly Metric[],
+): ProblemView {
+  const utilization = metricValue(metrics, "capacity.chair_utilization_30d");
+  return {
+    id: constraint.id,
+    title: "Chair time is going unused month after month",
+    severity: constraint.severity,
+    category: constraint.category,
+    summary:
+      utilization !== null
+        ? `Over the last 30 days you booked ${Math.round(utilization)}% of the chair time you opened.`
+        : "Chair time has been going unused across the month, not just on one day.",
+    explanation:
+      "This is not one quiet day — it is the shape of a normal month for this clinic. That matters because you cannot respond to a quiet Tuesday, but you can change what a normal week looks like.",
+    // No at-stake figure on purpose. The sized value for this bottleneck is
+    // TODAY's unbooked minutes, and today was not the problem; showing it here
+    // would put a small, irrelevant number under a month-level heading.
+    atStake: null,
+    atStakeLabel: null,
+    howToFix:
+      "Fill the empty sessions from lists you already have — planned treatment with no next visit, and patients who are due back. Where a session stays empty week after week, publish fewer hours for it instead.",
+    whyWeThink:
+      "Booked chair time across the last 30 days was below the level this clinic should sustain, measured against the hours it actually opened — closed days count towards neither side.",
+    trend: trendFor(drivingDiagnosis(result, constraint)),
+  };
+}
+
+// ── Trend projection ─────────────────────────────────────────────────────────
+
+/**
+ * Which contributing diagnosis's history the card reports.
+ *
+ * The one that DRIVES the constraint's severity. That is not an arbitrary pick —
+ * the Constraint Engine already sets a bottleneck's severity to its worst
+ * contributing diagnosis, never an average, and reporting that same diagnosis's
+ * history keeps the card's two claims about one finding rather than two. Ties
+ * break on diagnosis id, which the Constraint Engine already sorts, so the
+ * output is byte-identical across runs.
+ */
+const SEVERITY_RANK_FOR_TREND: Readonly<Record<string, number>> = {
+  info: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function drivingDiagnosis(
+  result: BusinessBrainResult,
+  constraint: Constraint,
+): Diagnosis | null {
+  const ids = new Set(constraint.relatedDiagnosisIds ?? []);
+  const contributing = (result.diagnoses ?? []).filter((d) => ids.has(d.id));
+  if (contributing.length === 0) return null;
+
+  return contributing.reduce((worst, d) => {
+    const a = SEVERITY_RANK_FOR_TREND[d.severity] ?? 0;
+    const b = SEVERITY_RANK_FOR_TREND[worst.severity] ?? 0;
+    if (a !== b) return a > b ? d : worst;
+    return d.id < worst.id ? d : worst;
+  });
+}
+
+/** "2nd", "3rd", "11th" — ordinals a clinic reads without stumbling. */
+function ordinal(n: number): string {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
+
+/**
+ * Turn the engine's persistence classification into words for the card.
+ *
+ * Every branch states a measurement. None of them says what to do about it, and
+ * none of them claims a cause — "worsening" is a statement that the breach got
+ * bigger, not a theory about why.
+ *
+ * `insufficient_history` returns null. A clinic three days old genuinely has no
+ * history to report, and filling the chip with "New today" would turn an absence
+ * of data into a claim about the clinic.
+ */
+export function trendFor(diagnosis: Diagnosis | null): TrendView | null {
+  if (diagnosis === null) return null;
+  const detail = diagnosis.persistenceDetail;
+  const days = detail?.consecutiveDays ?? 1;
+
+  switch (diagnosis.persistence) {
+    case "insufficient_history":
+      return null;
+
+    case "transient":
+      return {
+        label: "New today",
+        tone: "neutral",
+        detail: "This is the first day it has shown up in the records we hold.",
+      };
+
+    case "intermittent":
+      // Says WHY it is being described loosely when missing data is the reason.
+      // Presenting a data gap as clinic behaviour would be a quiet lie.
+      return {
+        label: "On and off",
+        tone: "neutral",
+        detail: detail?.cappedByUnknown
+          ? "It has come and gone over recent days, and some of those days could not be measured, so we can't say whether it is settling or building."
+          : `It has come and gone rather than persisting — seen on ${detail?.priorFiredDays ?? 0} of the recent days we hold.`,
+      };
+
+    case "sustained":
+      return {
+        label: days >= 2 ? `${ordinal(days)} day running` : "Ongoing",
+        tone: "neutral",
+        detail:
+          days >= 2
+            ? `It has been there ${days} days in a row, at about the same level.`
+            : "It has persisted rather than being a one-off, at about the same level.",
+      };
+
+    case "worsening":
+      return {
+        label: "Worsening",
+        tone: "worsening",
+        detail:
+          days >= 2
+            ? `It has been there ${days} days in a row and has been getting bigger, not holding steady.`
+            : "It has been getting bigger rather than holding steady.",
+      };
+
+    case "improving":
+      return {
+        label: "Improving",
+        tone: "improving",
+        detail:
+          "It is still here, but smaller than it was over the recent days we hold — moving in the right direction.",
+      };
+
+    default:
+      return null;
+  }
 }
 
 /** Minutes as a clinic would say them aloud: "2 hr 30 min", "45 min". */
@@ -436,6 +790,10 @@ function mergedProblem(
       "Work the planned-treatment list against your open slots: call each patient who has no next visit and offer them a specific time from the gaps in this week's schedule.",
     whyWeThink:
       "Chair time went unused on a day when patients with planned treatment had nothing booked, so the demand to fill it was already on your own books.",
+    // Keyed to the capacity half, the constraint this merged card carries and is
+    // snoozed against — so the history shown is the history of the finding the
+    // card is filed under, not of the half folded into it.
+    trend: trendFor(drivingDiagnosis(result, capacity)),
   };
 }
 
@@ -514,6 +872,9 @@ const DONE_REASON: Record<string, string> = {
   retention: "Recalls actioned",
   acquisition: "Enquiries followed up",
   forward_schedule: "Next week filled",
+  patient_flow: "Waiting time addressed",
+  reactivation: "Lapsed patients contacted",
+  schedule_accuracy: "Booking lengths corrected",
 };
 
 /**
@@ -568,6 +929,34 @@ export function buildBriefing(
       continue;
     }
 
+    // The capacity bottleneck, when only the window reading fired. Handled before
+    // the generic path because every one of its strings differs — the today-level
+    // copy would describe a day that was, in fact, fine.
+    if (constraint.category === "capacity" && capacityIsMonthLevelOnly(result)) {
+      problems.push(monthLevelCapacityProblem(result, constraint, metrics));
+      const monthWorkflow = result.workflows.find((w) => w.constraintId === constraint.id);
+      actions.push({
+        id: `action-${constraint.id}`,
+        problemId: constraint.id,
+        category: constraint.category,
+        title: "Match published chair time to the work you have",
+        reason: monthLevelCapacityProblem(result, constraint, metrics).summary,
+        checklist: (monthWorkflow?.tasks ?? []).map((t) => ({ id: t.id, label: t.instruction })),
+        primaryActions: (PRIMARY_ACTIONS["capacity"] ?? []).map((kind) => ({
+          kind,
+          label: PRIMARY_ACTION_LABEL[kind],
+        })),
+        moreInfoLink: MORE_INFO_LINK["capacity"] ?? null,
+        ownerLabel: monthWorkflow ? (OWNER_LABEL[monthWorkflow.owner] ?? "You") : "You",
+        // THIS WEEK, never Today: nothing about a month-long level is fixed before
+        // the first patient, and labelling it "Today" would make the urgent cards
+        // beside it indistinguishable from this one.
+        timeframeLabel: "This week",
+        doneReason: "Chair time addressed",
+      });
+      continue;
+    }
+
     const copy = COPY[constraint.category];
     const values = result.valueAtStake.get(constraint.id);
     const value = values?.[0];
@@ -598,6 +987,7 @@ export function buildBriefing(
       atStakeLabel: atStake ? (copy?.atStakeLabel ?? null) : null,
       howToFix: copy?.howToFix ?? "",
       whyWeThink: copy?.whyWeThink ?? "",
+      trend: trendFor(drivingDiagnosis(result, constraint)),
     });
 
     // The matching workflow supplies the concrete checklist steps.
@@ -630,5 +1020,114 @@ export function buildBriefing(
     });
   }
 
-  return { problems, actions };
+  return attachOpportunities({ problems, actions }, result, suppressedCategories);
+}
+
+// ── Opportunities ────────────────────────────────────────────────────────────
+
+function measure(quantities: readonly OpportunityQuantity[], label: string): OpportunityQuantity | undefined {
+  return quantities.find((q) => q.label.startsWith(label));
+}
+
+const plural = (n: number, one: string, many: string) => (Math.round(n) === 1 ? one : many.replace("{n}", String(Math.round(n))));
+
+/** Project one opportunity into plain lines. Exported for its tests. */
+export function opportunityView(o: Opportunity): OpportunityView {
+  const base = {
+    id: o.id,
+    type: o.type,
+    priority: o.priority,
+    expiresAt: o.window.expiresAt,
+    primaryActionId: o.actionPlan.primaryActionId,
+    impactLine: null as string | null,
+  };
+
+  if (o.type === "forward_capacity_match") {
+    const gaps = o.surplus.measured[0]?.value ?? 0;
+    const waiting = o.demand.measured[0]?.value ?? 0;
+    const atLeast = o.demand.lowerBound ? "at least " : "";
+    return {
+      ...base,
+      headline: plural(
+        o.measuredValue.value,
+        "Room for 1 more booking next week, from patients already waiting",
+        "Room for {n} more bookings next week, from patients already waiting",
+      ),
+      surplusLine: plural(gaps, "1 appointment-length gap is open over the next 7 days.", "{n} appointment-length gaps are open over the next 7 days."),
+      demandLine: `${atLeast}${plural(waiting, "1 patient with planned treatment or an overdue recall has nothing booked.", "{n} patients with planned treatment or an overdue recall have nothing booked.")}`,
+      impactLine: o.impact
+        ? `${rupees(o.impact.amount.value)} of treatment is already planned for them — quoted, not yet accepted.`
+        : null,
+    };
+  }
+
+  if (o.type === "freed_slot_refill") {
+    const minutes = o.surplus.measured[0]?.value ?? 0;
+    const candidates = o.demand.measured[0]?.value ?? 0;
+    return {
+      ...base,
+      headline: "A cancelled slot is still open",
+      surplusLine: `A ${formatAtStake(minutes, "minutes")} slot was cancelled and nobody has taken it.`,
+      demandLine: plural(candidates, "1 patient waiting for a booking could be offered it.", "{n} patients waiting for a booking could be offered it."),
+    };
+  }
+
+  const owed = o.measuredValue.value;
+  const charged = o.surplus.measured[0]?.value ?? 0;
+  const patients = measure(o.demand.measured, "patients owing")?.value ?? 0;
+  const aged = measure(o.demand.measured, "owed by patients whose latest")?.value ?? 0;
+  return {
+    ...base,
+    headline: `${rupees(owed)} is owed for work already done`,
+    surplusLine: `${rupees(charged)} was charged for the delivered work behind it.`,
+    demandLine:
+      aged > 0
+        ? `${plural(patients, "1 patient still owes it", "{n} patients still owe it")}; ${rupees(aged)} is for work a month old or more.`
+        : `${plural(patients, "1 patient still owes it", "{n} patients still owe it")}.`,
+    impactLine: "Charges less payments on record — not a prediction of what will be collected.",
+  };
+}
+
+/**
+ * Put each opportunity on the card for the finding about the same resource.
+ *
+ * Matched by constraint first, then by related category, so a merged card (which
+ * carries the capacity constraint) still receives an opportunity linked to the
+ * treatment-acceptance half folded into it. An opportunity whose finding the
+ * clinic has snoozed is withheld with it — a snooze would mean nothing if the same
+ * finding came back through a side door.
+ */
+function attachOpportunities(
+  view: BriefingView,
+  result: BusinessBrainResult,
+  suppressedCategories?: ReadonlySet<string>,
+): BriefingView {
+  const opportunities = result.opportunities ?? [];
+  if (opportunities.length === 0) return view;
+
+  const constraintCategory = new Map(result.constraints.map((c) => [c.id, c.category as string]));
+  const attached = new Map<string, OpportunityView[]>();
+  const unattached: OpportunityView[] = [];
+
+  for (const opportunity of opportunities) {
+    const linkedCategory = opportunity.constraintId ? constraintCategory.get(opportunity.constraintId) : undefined;
+    if (linkedCategory !== undefined && suppressedCategories?.has(linkedCategory)) continue;
+
+    const related = new Set<string>(opportunity.relatedCategories);
+    const card =
+      view.actions.find((a) => a.problemId === opportunity.constraintId) ??
+      view.actions.find((a) => related.has(a.category) || related.has(constraintCategory.get(a.problemId) ?? ""));
+    const projected = opportunityView(opportunity);
+    if (card === undefined) {
+      unattached.push(projected);
+      continue;
+    }
+    attached.set(card.id, [...(attached.get(card.id) ?? []), projected]);
+  }
+
+  return {
+    problems: view.problems,
+    actions: view.actions.map((a) => (attached.has(a.id) ? { ...a, opportunities: attached.get(a.id) } : a)),
+    ...(unattached.length > 0 ? { unattachedOpportunities: unattached } : {}),
+  };
 }

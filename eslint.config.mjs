@@ -28,6 +28,17 @@ const PURE_ENGINE_FILES = [
   "business-brain/engines/signals/**/*.ts",
   "business-brain/engines/diagnosis/**/*.ts",
   "business-brain/engines/action/**/*.ts",
+  // The ledger graph walks relational facts an adapter already fetched. It is the
+  // module most tempting to "just query" from, so it gets the same boundary.
+  "business-brain/ledger/**/*.ts",
+  // Opportunities pair recorded surplus with recorded demand. Nothing here may
+  // read a database, call a model or reach the network to "find" more demand.
+  "business-brain/engines/opportunity/**/*.ts",
+  // The prioritiser ranks what producers already found. It must never fetch more.
+  "business-brain/engines/findings/**/*.ts",
+  // Trajectories are measured from history the run already holds. No reads, no
+  // clock, no model — and nothing that could quietly become a forecast.
+  "business-brain/engines/trajectory/**/*.ts",
 ];
 
 const FORBIDDEN_IMPORT_PATTERNS = [

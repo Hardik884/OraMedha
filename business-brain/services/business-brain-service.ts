@@ -50,12 +50,26 @@ import {
   portMethodsFor,
   DentGrowDiagnosisEngine,
   addDays,
+  daysBetween,
   isIsoDate,
   type DeepPartial as DiagnosisDeepPartial,
   type DiagnosisConfig,
 } from "../engines/diagnosis";
 import type { MetricsOnlyDay } from "../engines/diagnosis-engine";
 import type { DiagnosisContextPort, EntityWindow } from "../engines/diagnosis";
+import { deriveOpportunities } from "../engines/opportunity";
+import { prioritizeFindings } from "../engines/findings";
+import { deriveTrajectories } from "../engines/trajectory";
+import type { MetricTrajectory } from "../domain";
+import type { PrioritizedFindings } from "../domain";
+import { OpportunityType, type Opportunity, type OpportunityAssessment } from "../domain";
+import {
+  buildLedgerGraph,
+  type AppointmentWindowScope,
+  type ClinicLedgerGraph,
+  type ClinicLedgerPort,
+  type PatientLedgerScope,
+} from "../ledger";
 
 /**
  * How far back entity context reaches, and how many rows it may return.
@@ -67,6 +81,20 @@ import type { DiagnosisContextPort, EntityWindow } from "../engines/diagnosis";
  */
 const ENTITY_WINDOW_DAYS = 30;
 const ENTITY_ROW_LIMIT = 500;
+
+/**
+ * Opportunity reads. The forward window matches the engine's default and
+ * `capacity.booked_next_7d`. The schedule limit is generous because a cut
+ * appointment book is refused outright (it would overstate free time). Open work
+ * is capped by patients, and a cut population is reported as a lower bound.
+ */
+const OPPORTUNITY_FORWARD_DAYS = 7;
+const OPPORTUNITY_SCHEDULE_LIMIT = 2000;
+const OPPORTUNITY_MAX_PATIENTS = 1000;
+const OPPORTUNITY_ROW_LIMIT = 5000;
+import { deriveBaselines, type MetricBaseline } from "../engines/baseline";
+import { deriveAchievements } from "../engines/achievement";
+import type { Achievement } from "../domain";
 import {
   calibrateThresholds,
   mergeOverrides,
@@ -198,8 +226,89 @@ export interface BusinessBrainResult {
    * Deterministic like every stage above it.
    */
   readonly actionPlans: readonly ActionPlan[];
+  /**
+   * What is NORMAL for this clinic, per metric, from its own measured history.
+   *
+   * A derived output rather than a pipeline stage: nothing downstream of Metrics
+   * consumes it, so it changes no stage's contract. Empty when no history was
+   * loaded, and a metric with too few observations is absent rather than given a
+   * fabricated range.
+   */
+  readonly baselines: readonly MetricBaseline[];
+  /**
+   * Measured improvements against this clinic's own normal — the positive
+   * reading of the same evidence, and a sibling of {@link constraints} rather
+   * than a stage after them.
+   *
+   * Capped at three by the Achievement Engine. Empty is the common and correct
+   * answer: a clinic running inside its usual range has no wins to report, and
+   * saying so anyway would be the praise this layer refuses to invent.
+   */
+  readonly achievements: readonly Achievement[];
+  /**
+   * The metric set from an earlier day, for callers that want to show a movement
+   * rather than a level — a score delta, for instance.
+   *
+   * Absent when history does not reach back far enough. Supplied from the history
+   * this run already loaded, so a caller never pays for a second read, and never
+   * needs its own notion of which day to compare against.
+   */
+  readonly comparison?: BusinessBrainComparison;
+  /**
+   * Measured surplus paired with measured demand, from the clinic ledger.
+   *
+   * Empty unless the run was asked for opportunities (`options.opportunities`)
+   * AND has a ledger port. A derived output, not a stage: nothing downstream
+   * consumes it, and a ledger failure costs the dentist nothing but this list.
+   */
+  readonly opportunities: readonly Opportunity[];
+  /**
+   * Why each opportunity type was or was not emitted. Empty when opportunities
+   * were not requested; `insufficient_data` for every type when they were
+   * requested and could not be measured — never an empty list that reads as
+   * "nothing to act on".
+   */
+  readonly opportunityAssessments: readonly OpportunityAssessment[];
+  /**
+   * Every producer's output — constraints, opportunities, achievements — as one
+   * prioritised list: the single most important finding, the next few, what
+   * supports them, the wins, and what needs no action. Each placement carries its
+   * measured reason. Computed from this result alone, so it adds no read and can
+   * never disagree with the objects it normalises.
+   */
+  readonly findings: PrioritizedFindings;
+  /**
+   * How each tracked metric has been moving over the history this run already
+   * loaded — no additional read. One per catalogued metric, insufficient ones
+   * included, so "could not judge" is visible rather than absent. Empty when no
+   * history was requested, since there is then nothing to be a trajectory of.
+   */
+  readonly trajectories: readonly MetricTrajectory[];
   /** Set when a stage rejected its input; identifies the first failure. */
   readonly error?: EngineError;
+}
+
+/** An earlier measured day, offered as the comparison point for a movement. */
+export interface BusinessBrainComparison {
+  /** Business date the metrics describe. */
+  readonly date: string;
+  /** Whole days between that date and the run date. */
+  readonly daysAgo: number;
+  readonly metrics: readonly Metric[];
+  /**
+   * Baselines positioned for THAT day, not for today.
+   *
+   * Supplied because a caller comparing two scores has to compute both sides the
+   * same way, and a score that reads baselines would otherwise judge the earlier
+   * day against today's readings — giving the earlier day today's credits, which
+   * makes the "previous score" it reports simply untrue.
+   *
+   * The medians come from the same history; only the current value and therefore
+   * the band position differ. The comparison day is excluded from its own history
+   * for the same reason today is excluded from today's: a day folded into the
+   * band it is judged against is being compared with itself.
+   */
+  readonly baselines: readonly MetricBaseline[];
 }
 
 /** Construction dependencies. The repository is the only external collaborator. */
@@ -226,6 +335,20 @@ export interface BusinessBrainDependencies {
    * hypotheses they settle are settled.
    */
   readonly contextPort?: DiagnosisContextPort;
+  /**
+   * Relational access to the clinic's ledgers.
+   *
+   * OPTIONAL, and a strict superset of `contextPort`: a ledger port also serves
+   * the Diagnosis Engine's entity questions, so supplying one is enough. When
+   * both are given, `contextPort` wins for diagnosis — an explicit narrower port
+   * is a deliberate choice and must not be silently replaced.
+   *
+   * Nothing in the daily run reads the ledger yet. It is exposed through
+   * {@link BusinessBrain.readPatientLedger} and
+   * {@link BusinessBrain.readAppointmentWindow} so an intelligence feature can
+   * walk entities without another flattened metric.
+   */
+  readonly ledgerPort?: ClinicLedgerPort;
   readonly logger?: Logger;
   /** Threshold overrides forwarded to the Signal Engine. */
   readonly signalConfig?: DeepPartial<SignalThresholdConfig>;
@@ -257,6 +380,24 @@ export interface RunBusinessBrainOptions {
    */
   readonly historyDays?: number;
   /**
+   * Most missing history days this run may RECOMPUTE from the live database.
+   *
+   * Unlimited when omitted, which is the behaviour every existing caller had.
+   * It exists because `historyDays` and the cost of `historyDays` are not the
+   * same thing: a day already in the store is one row of a range read, while a
+   * day the store lacks is a full clinic snapshot. Asking for five weeks of
+   * history against a cold store therefore means five weeks of snapshots on a
+   * page render.
+   *
+   * When the cap bites, the NEWEST missing days are recomputed and older ones are
+   * left out entirely. That ordering is deliberate: persistence reasons over the
+   * recent consecutive run, and dropping the oldest days keeps the supplied
+   * window contiguous at the end that matters instead of punching a hole in it.
+   * Baselines tolerate the sparser history honestly — that is what
+   * `baselineQuality` is for — and the store fills in behind the run.
+   */
+  readonly maxRecomputedHistoryDays?: number;
+  /**
    * Size clinic-dependent thresholds from this clinic's own measured facts
    * rather than the global defaults. Defaults to true.
    *
@@ -264,6 +405,15 @@ export interface RunBusinessBrainOptions {
    * produces daily false alarms at a small clinic and silence at a large one.
    */
   readonly calibrateThresholds?: boolean;
+  /**
+   * Detect opportunities, as of `now`.
+   *
+   * Opt-in because an opportunity is about the time still ahead: it is only
+   * meaningful for a run describing TODAY, and only the caller knows that the
+   * date it passed is today. History runs, back-fills and tests leave it unset
+   * and get exactly the result they always did.
+   */
+  readonly opportunities?: { readonly now: string };
   readonly requestedBy?: string;
   readonly role?: string;
 }
@@ -292,6 +442,7 @@ export class BusinessBrain {
   private readonly repository: MetricsDataRepository;
   private readonly historyStore?: MetricHistoryStore;
   private readonly contextPort?: DiagnosisContextPort;
+  private readonly ledgerPort?: ClinicLedgerPort;
   private readonly log: Logger;
   private readonly clock: () => number;
   private readonly metricsEngine: DentGrowMetricsEngine;
@@ -301,7 +452,8 @@ export class BusinessBrain {
   constructor(deps: BusinessBrainDependencies) {
     this.repository = deps.repository;
     this.historyStore = deps.historyStore;
-    this.contextPort = deps.contextPort;
+    this.contextPort = deps.contextPort ?? deps.ledgerPort;
+    this.ledgerPort = deps.ledgerPort;
     this.log = deps.logger ?? logger;
     this.clock = deps.clock ?? (() => Date.now());
     this.metricsEngine = new DentGrowMetricsEngine(deps.repository, { logger: this.log });
@@ -349,6 +501,14 @@ export class BusinessBrain {
     let workflows: readonly Workflow[] = [];
     let actionPlans: readonly ActionPlan[] = [];
     let valueAtStake: ReadonlyMap<string, readonly Value[]> = new Map();
+    // Derived outputs, not stages: computed from the metrics and the history this
+    // run already has, and consumed by nothing downstream.
+    let baselines: readonly MetricBaseline[] = [];
+    let achievements: readonly Achievement[] = [];
+    let comparison: BusinessBrainComparison | undefined;
+    let trajectories: readonly MetricTrajectory[] = [];
+    let opportunities: readonly Opportunity[] = [];
+    let opportunityAssessments: readonly OpportunityAssessment[] = [];
     const finish = (
       fields: Pick<BusinessBrainResult, "metrics" | "signals" | "diagnoses" | "trace"> & {
         error?: EngineError;
@@ -357,6 +517,23 @@ export class BusinessBrain {
       },
     ): BusinessBrainResult => {
       const completedMs = this.clock();
+      const findings = prioritizeFindings({
+        sources: {
+          clinicId,
+          date,
+          constraints,
+          diagnoses: fields.diagnoses,
+          valueAtStake,
+          workflows,
+          actionPlans,
+          opportunities,
+          achievements,
+          trajectories,
+        },
+        // The run's logical moment, so the same run always ranks the same way.
+        now: startedAt,
+        opportunityAssessments,
+      });
       return {
         clinicId,
         date,
@@ -367,6 +544,13 @@ export class BusinessBrain {
         trace: fields.trace,
         error: fields.error,
         recomputedHistory,
+        baselines,
+        achievements,
+        comparison,
+        opportunities,
+        opportunityAssessments,
+        findings,
+        trajectories,
         constraints,
         strategies,
         valueAtStake,
@@ -434,10 +618,49 @@ export class BusinessBrain {
     // Engine treats a gap as `unknown`, which is the correct outcome.
     const loadedHistory =
       historyDays > 0
-        ? await this.loadHistory(clinicId, date, historyDays)
+        ? await this.loadHistory(
+            clinicId,
+            date,
+            historyDays,
+            options.maxRecomputedHistoryDays,
+          )
         : { days: [] as MetricsOnlyDay[], recomputed: [] as MetricsOnlyDay[] };
     const history = loadedHistory.days;
     recomputedHistory = loadedHistory.recomputed;
+
+    // ── Derived: baselines, achievements, comparison ──────────────────────────
+    //
+    // Placed here rather than at the end because everything below can fail, and a
+    // clinic whose signal run breaks should still be told what is normal for it
+    // and what has improved. None of the three is read by any stage that follows,
+    // which is what makes them derived outputs rather than a new stage.
+    //
+    // `history` deliberately excludes `date` itself, so today is never folded
+    // into the band it is being judged against.
+    const baselineResult = deriveBaselines({ history, current: metrics });
+    baselines = baselineResult.baselines;
+    achievements = deriveAchievements({
+      baselines: baselineResult.byKey,
+      clinicId,
+      date,
+      now: startedAt,
+    }).achievements;
+    comparison = pickComparisonDay(history, date, baselineResult.baselines.length > 0);
+
+    // Trajectories from the same history — no read of their own. Guarded because a
+    // derived output must never cost the run: a history that fails the engine's
+    // tenant check yields no trajectories, and the refusal is logged.
+    if (historyDays > 0) {
+      try {
+        trajectories = deriveTrajectories({ clinicId, date, current: metrics, history }).trajectories;
+      } catch (error) {
+        this.log.warn("Business Brain could not derive trajectories", {
+          clinicId,
+          date,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     // ── Stage 2: Signals ─────────────────────────────────────────────────────
     // Thresholds are sized from this clinic's own facts before evaluation. An
@@ -601,6 +824,18 @@ export class BusinessBrain {
       }),
     );
 
+    // ── Derived: opportunities ───────────────────────────────────────────────
+    if (options.opportunities !== undefined) {
+      const detected = await this.detectOpportunities(
+        clinicId,
+        date,
+        options.opportunities.now,
+        constraints,
+      );
+      opportunities = detected.opportunities;
+      opportunityAssessments = detected.assessments;
+    }
+
     const trace = [...signalTrace, ...(diagnosisResult.trace ?? [])];
     return finish({
       metrics,
@@ -633,6 +868,7 @@ export class BusinessBrain {
     clinicId: string,
     date: string,
     days: number,
+    maxRecomputed?: number,
   ): Promise<{ days: MetricsOnlyDay[]; recomputed: MetricsOnlyDay[] }> {
     const wanted: string[] = [];
     for (let offset = days; offset >= 1; offset -= 1) {
@@ -640,12 +876,42 @@ export class BusinessBrain {
     }
 
     const stored = await this.readStoredHistory(clinicId, wanted);
+
+    // Which of the missing days this run is allowed to measure itself.
+    //
+    // A stored day costs one row of a range read; a missing day costs a full
+    // clinic snapshot. Without a cap, asking for five weeks of history against a
+    // cold store means five weeks of snapshots on a page render.
+    //
+    // NEWEST missing days win, which is why this reverses before slicing:
+    // persistence reasons over the recent consecutive run, so keeping the recent
+    // end intact and dropping the oldest days leaves the supplied window
+    // contiguous where it matters rather than punching a hole in it.
+    const missing = wanted.filter((day) => !stored.has(day));
+    const recomputable = new Set(
+      maxRecomputed === undefined
+        ? missing
+        : [...missing].reverse().slice(0, Math.max(0, maxRecomputed)),
+    );
+    if (missing.length > recomputable.size) {
+      this.log.info("Business Brain skipped recomputing older history days", {
+        clinicId,
+        date,
+        missing: missing.length,
+        recomputing: recomputable.size,
+      });
+    }
+
     const recomputed: MetricsOnlyDay[] = [];
 
     const loaded = await Promise.all(
       wanted.map(async (day): Promise<MetricsOnlyDay | null> => {
         const fromStore = stored.get(day);
         if (fromStore !== undefined) return fromStore;
+        // Over the cap: left out entirely rather than measured. Absent is already
+        // a first-class state everywhere downstream — the persistence window
+        // treats an unsupplied day as unknown, never as a healthy one.
+        if (!recomputable.has(day)) return null;
         try {
           const measured = {
             date: day,
@@ -669,6 +935,88 @@ export class BusinessBrain {
       // Ascending, so a caller writing them back does so in calendar order.
       recomputed: recomputed.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
     };
+  }
+
+  /**
+   * Read the three ledger views the Opportunity Engine pairs, and run it.
+   *
+   * Never fatal, and never silent: without a ledger port, or when a read fails,
+   * every type is assessed `insufficient_data` with the reason — so a caller can
+   * never mistake "could not look" for "nothing to act on".
+   */
+  private async detectOpportunities(
+    clinicId: string,
+    date: string,
+    now: string,
+    constraints: readonly Constraint[],
+  ): Promise<{ opportunities: readonly Opportunity[]; assessments: readonly OpportunityAssessment[] }> {
+    const unmeasured = (reason: string) => ({
+      opportunities: [],
+      assessments: Object.values(OpportunityType).map((type) => ({
+        type,
+        outcome: "insufficient_data" as const,
+        reason,
+        detected: 0,
+      })),
+    });
+    const port = this.ledgerPort;
+    if (port === undefined) return unmeasured("No clinic ledger is available to this run.");
+
+    try {
+      const to = addDays(date, OPPORTUNITY_FORWARD_DAYS);
+      const [capacity, schedule, openWork] = await Promise.all([
+        port.readCapacityWindow({ clinicId, from: date, to }),
+        port.readAppointmentWindow({
+          kind: "appointment_window",
+          clinicId,
+          from: date,
+          to,
+          asOf: now,
+          limit: OPPORTUNITY_SCHEDULE_LIMIT,
+        }),
+        port.readOpenWorkLedger({
+          clinicId,
+          asOf: now,
+          maxPatients: OPPORTUNITY_MAX_PATIENTS,
+          limit: OPPORTUNITY_ROW_LIMIT,
+        }),
+      ]);
+      return deriveOpportunities({
+        clinicId,
+        date,
+        now,
+        capacity,
+        schedule: buildLedgerGraph(schedule),
+        openWork: buildLedgerGraph(openWork),
+        constraints,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.warn("Business Brain could not measure opportunities", { clinicId, date, error: message });
+      return unmeasured("The clinic ledger could not be read for this run.");
+    }
+  }
+
+  /**
+   * Read a bounded set of patients' complete relational history and index it.
+   *
+   * Returns `null` when no ledger port was supplied — "this deployment cannot
+   * answer", never an empty graph that would read as "these patients have no
+   * history". A failed read throws: unlike entity context inside a run, a
+   * caller asking for the ledger directly needs to know it did not get one.
+   */
+  async readPatientLedger(scope: PatientLedgerScope): Promise<ClinicLedgerGraph | null> {
+    if (this.ledgerPort === undefined) return null;
+    return buildLedgerGraph(await this.ledgerPort.readPatientLedger(scope));
+  }
+
+  /**
+   * Read the appointments scheduled in a clinic-local window, with everything
+   * attached to them, and index them. `null` without a ledger port, as above.
+   */
+  async readAppointmentWindow(scope: AppointmentWindowScope): Promise<ClinicLedgerGraph | null> {
+    if (this.ledgerPort === undefined) return null;
+    return buildLedgerGraph(await this.ledgerPort.readAppointmentWindow(scope));
   }
 
   /**
@@ -830,6 +1178,72 @@ export class BusinessBrain {
       });
     }
   }
+}
+
+/**
+ * How far back a "since last week" comparison looks, and how far it may stretch
+ * when that exact day was never measured.
+ *
+ * Seven days, because a week is the shortest honest comparison for a clinic: a
+ * day-over-day reading swings on which weekday it is, and dentistry's weekdays
+ * are not interchangeable. The tolerance exists because a clinic closed on the
+ * matching day has no measurement for it, and refusing to compare at all would
+ * be worse than comparing against the nearest week-ish day and saying which.
+ */
+const COMPARISON_TARGET_DAYS = 7;
+const COMPARISON_MIN_DAYS = 4;
+const COMPARISON_MAX_DAYS = 10;
+
+/**
+ * Choose the day a movement is measured against.
+ *
+ * Prefers exactly a week back; otherwise the measured day closest to it inside
+ * the tolerance, breaking ties toward the OLDER day so the comparison never
+ * quietly shortens into a day-over-day reading.
+ *
+ * Returns undefined when history does not reach back far enough — the caller
+ * then shows a level with no movement, which is the honest output for a clinic
+ * that has not been running long enough to have a last week.
+ */
+function pickComparisonDay(
+  history: readonly MetricsOnlyDay[],
+  date: string,
+  withBaselines: boolean,
+): BusinessBrainComparison | undefined {
+  let best: { day: MetricsOnlyDay; daysAgo: number } | undefined;
+  for (const day of history) {
+    if (day.metrics.length === 0) continue;
+    const daysAgo = daysBetween(day.date, date);
+    if (daysAgo < COMPARISON_MIN_DAYS || daysAgo > COMPARISON_MAX_DAYS) continue;
+
+    const distance = Math.abs(daysAgo - COMPARISON_TARGET_DAYS);
+    if (best === undefined) {
+      best = { day, daysAgo };
+      continue;
+    }
+    const bestDistance = Math.abs(best.daysAgo - COMPARISON_TARGET_DAYS);
+    if (distance < bestDistance || (distance === bestDistance && daysAgo > best.daysAgo)) {
+      best = { day, daysAgo };
+    }
+  }
+  if (best === undefined) return undefined;
+
+  // Baselines as they stood for THAT day: same history, same medians, but the
+  // band position read against that day's values. Its own day is excluded from
+  // its own history, exactly as today is excluded from today's.
+  const baselines = withBaselines
+    ? deriveBaselines({
+        history: history.filter((d) => d.date < (best as { day: MetricsOnlyDay }).day.date),
+        current: best.day.metrics,
+      }).baselines
+    : [];
+
+  return {
+    date: best.day.date,
+    daysAgo: best.daysAgo,
+    metrics: best.day.metrics,
+    baselines,
+  };
 }
 
 /**
