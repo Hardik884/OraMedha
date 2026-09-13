@@ -406,7 +406,6 @@ describe("discriminator catalogue", () => {
       "listNoShowHistory",
       "listOutstandingBalances",
       "listPendingTreatments",
-      "listRecallContactAttempts",
     ]);
   });
 

@@ -23,7 +23,6 @@ import { round2 } from "../../signals/support/numbers";
 import { DISCRIMINATORS } from "../support/discriminators";
 import type {
   DiscriminatorResolver,
-  EntityContext,
   ResolutionOutcome,
   ResolverInput,
 } from "./types";
@@ -182,8 +181,14 @@ const cancellationSlotClustering: DiscriminatorResolver = (ctx, input) => {
   }
 
   const threshold = concentrationShare * 100;
+  // Treatment type is recorded against few lost appointments (see
+  // CancellationEvent.treatmentType). One typed row out of eight is 100% of the
+  // typed set and says nothing about where losses concentrate, so a type share
+  // only counts once the TYPED sample itself clears the minimum.
+  const typeJudgeable = typed >= minimumSample;
   const concentrated =
-    (topHour?.sharePct ?? 0) >= threshold || (topType?.sharePct ?? 0) >= threshold;
+    (topHour?.sharePct ?? 0) >= threshold ||
+    (typeJudgeable && (topType?.sharePct ?? 0) >= threshold);
   const clustering = hypothesis(input, 0);
   const spread = hypothesis(input, 1);
 

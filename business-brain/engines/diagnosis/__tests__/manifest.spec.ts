@@ -15,15 +15,18 @@ import {
   ATTRITION_BALANCED,
   ATTRITION_CANCELLATION_DOMINANT,
   BASE_EROSION,
+  CHRONIC_OVERRUN,
   COLLECTION_GAP,
   CONGESTION_CAPACITY_BOUND,
   CONGESTION_FLOW_BOUND,
   DATE,
+  DORMANT_PATIENT_BASE,
   DEMAND_SUPPLY_NO_PENDING,
   DEMAND_SUPPLY_WITH_PENDING,
   HIGH_OUTSTANDING,
   ISOLATED_SIGNAL,
   PRIOR,
+  PRODUCTION_COLLECTION_GAP,
   RECALL_BACKLOG,
   FORWARD_SCHEDULE_GAP,
   REPEAT_NON_ATTENDANCE,
@@ -31,6 +34,7 @@ import {
   REVENUE_AMBIGUOUS,
   REVENUE_VOLUME_DRIVEN,
   REVENUE_YIELD_DRIVEN,
+  SUSTAINED_IDLE_CAPACITY,
   run,
   shiftDate,
 } from "./fixtures/run-fixtures";
@@ -53,6 +57,10 @@ const SCENARIOS = [
   RECALL_BACKLOG,
   FORWARD_SCHEDULE_GAP,
   REPEAT_NON_ATTENDANCE,
+  DORMANT_PATIENT_BASE,
+  CHRONIC_OVERRUN,
+  PRODUCTION_COLLECTION_GAP,
+  SUSTAINED_IDLE_CAPACITY,
 ];
 
 /** Every diagnosis the corpus produces, with and without history. */
@@ -108,7 +116,7 @@ describe("discriminator manifest", () => {
     }
     // eslint-disable-next-line no-console
     console.log(lines.join("\n"));
-    expect(ALL_DISCRIMINATORS.length).toBe(27);
+    expect(ALL_DISCRIMINATORS.length).toBe(28);
   });
 
   /**

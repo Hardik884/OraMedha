@@ -21,7 +21,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { Database } from "@/types/database.types";
 import type { EntityWindow } from "@/business-brain";
-import { applyEntityResolution, DEFAULT_ENTITY_RESOLUTION } from "@/business-brain";
+import {
+  applyEntityResolution,
+  Availability,
+  DEFAULT_ENTITY_RESOLUTION,
+  DISCRIMINATORS,
+} from "@/business-brain";
 import type { Diagnosis } from "@/business-brain";
 import { computeOutstandingBalance } from "@/lib/billing/balance";
 import { SupabaseDiagnosisContext } from "../diagnosis-context";
@@ -609,13 +614,16 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
   });
 
   describe("what this deployment cannot answer", () => {
-    it("returns NULL for recall contact attempts, never an empty list", async () => {
-      // DentGrow records no contact attempts. `[]` would assert that none were
-      // made — which is one of the two answers the discriminator is trying to
-      // choose between, so returning it would settle the question by accident,
-      // in the direction that blames the clinic.
-      const attempts = await ctx.listRecallContactAttempts(WINDOW);
-      expect(attempts).toBeNull();
+    it("offers no method for recall contact attempts, and catalogues them as data capture", async () => {
+      // DentGrow records no contact attempt or outcome against a follow-up. The
+      // port used to declare a method that could only ever return null; it now
+      // declares nothing, and the discriminator says plainly that the data would
+      // have to be captured. Either way no hypothesis may be settled from it.
+      expect("listRecallContactAttempts" in ctx).toBe(false);
+      expect(DISCRIMINATORS.RECALL_CONTACT_ATTEMPTS.availability).toBe(
+        Availability.REQUIRES_DATA_CAPTURE,
+      );
+      expect(DISCRIMINATORS.RECALL_CONTACT_ATTEMPTS.portMethod).toBeNull();
     });
 
     it("distinguishes that from a method that genuinely found nothing", async () => {
@@ -705,21 +713,17 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
       expect(resolved[0].evidence[0]?.description).toContain("1 of 5 vacated slot(s)");
     });
 
-    it("leaves hypotheses open when the deployment cannot answer", async () => {
-      // The null path, end to end: the adapter returns null for recall contact
-      // attempts, and nothing downstream may read that as "no attempts made".
-      const attempts = await ctx.listRecallContactAttempts(WINDOW);
-      expect(attempts).toBeNull();
-
-      const before = pendingDiagnosis("recall_contact_attempts");
+    it("leaves hypotheses open when a method could not answer", async () => {
+      // The null path, end to end: the service records a failed or unanswerable
+      // fetch as null, and nothing downstream may read that as "no cancellations".
+      const before = pendingDiagnosis("cancellation_timing");
       const after = applyEntityResolution(
         [before],
-        { recallContactAttempts: attempts },
+        { cancellationEvents: null },
         "2026-04-07T06:30:00.000Z",
         DEFAULT_ENTITY_RESOLUTION,
       );
       expect(after[0]).toEqual(before);
-      expect(after[0].discriminators[0].availability).toBe("requires_entity_data");
     });
   });
 });

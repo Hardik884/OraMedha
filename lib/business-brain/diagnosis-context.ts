@@ -3,19 +3,20 @@
  *
  * The Diagnosis Engine reasons over daily aggregates, which is enough to notice
  * that something is wrong but often not enough to say WHICH of several
- * explanations fits. Ten of its twenty-seven discriminators are catalogued as
- * `requires_entity_data`, and this is the data they require: individual
- * cancellations, individual unpaid balances, individual overdue recalls.
+ * explanations fits. Its `requires_entity_data` discriminators need exactly this:
+ * individual cancellations, individual unpaid balances, individual visits.
  *
  * Same split as the other adapters — the port lives in `business-brain/` and
  * knows nothing about Postgres; this is the only place these tables are read.
  *
  * ## What this deployment can and cannot answer
  *
- * Six of the seven methods are answerable from DentGrow's schema. One is not,
- * and it returns `null` rather than an empty array, because `[]` would claim the
- * clinic has no overdue recalls rather than admitting nothing records the
- * answer. See `listRecallContactAttempts`.
+ * All six methods are answerable from DentGrow's schema. A seventh,
+ * `listRecallContactAttempts`, was removed in the ledger tranche: it could only
+ * ever return `null`, because nothing records a contact attempt against a
+ * follow-up, and its discriminator is now catalogued as data capture.
+ *
+ * `SupabaseClinicLedger` extends this class with the general relational reads.
  *
  * Two of the six rest on documented approximations, noted at each method. Both
  * are the same shape as the approximation already accepted for `isScheduled`:
@@ -40,7 +41,6 @@ import type {
   NoShowHistoryRow,
   OutstandingBalanceRow,
   PendingTreatmentRow,
-  RecallContactAttemptRow,
 } from "@/business-brain";
 import { MetricUnit } from "@/business-brain";
 import type { Database } from "@/types/database.types";
@@ -89,8 +89,8 @@ function bounds(window: EntityWindow, timezone: string): { start: string; end: s
 }
 
 export class SupabaseDiagnosisContext implements DiagnosisContextPort {
-  private readonly db: SupabaseClient<Database>;
-  private readonly timezone: string;
+  protected readonly db: SupabaseClient<Database>;
+  protected readonly timezone: string;
 
   /**
    * @param timezone Clinic IANA timezone for the business-date window bounds.
@@ -379,7 +379,9 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    * is a recorded date, not a record that the patient agreed to anything.
    *
    * "Unscheduled" is resolved at the PATIENT level — does this patient have any
-   * upcoming visit — because no treatment-to-appointment link exists. This is
+   * upcoming visit — because nothing links a planned treatment to the future
+   * visit booked to deliver it (`treatments.appointment_id` is the visit the plan
+   * was RECORDED at, not a booking). This is
    * the same approximation the `isScheduled` snapshot field already documents,
    * and it errs the same way: it UNDER-reports. Everything returned is genuinely
    * unbooked; some genuinely unbooked work is missed because the patient happens
@@ -591,31 +593,6 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
             : null,
       };
     });
-  }
-
-  /**
-   * NOT ANSWERABLE by this deployment — returns `null`, never `[]`.
-   *
-   * The discriminator this serves separates "the recall was never attempted"
-   * from "it was attempted and the patient could not be reached". DentGrow
-   * records neither. `follow_ups` has a due date, a status and a
-   * `confirmation_status`, but nothing counts contact attempts or timestamps the
-   * last one, and no communications log exists.
-   *
-   * Returning an empty list would assert that no attempts were made, which is
-   * precisely one of the two answers the discriminator is trying to choose
-   * between — it would resolve the question by accident, in the direction that
-   * blames the clinic. `null` leaves the hypothesis `undetermined`, which is the
-   * honest outcome and what the Diagnosis Engine is built to handle.
-   *
-   * Closing this needs a table recording contact attempts against a follow-up
-   * (channel, moment, outcome). That is a product decision about what staff are
-   * asked to record, not something an adapter can infer.
-   */
-  async listRecallContactAttempts(
-    _window: EntityWindow,
-  ): Promise<readonly RecallContactAttemptRow[] | null> {
-    return null;
   }
 
   /**

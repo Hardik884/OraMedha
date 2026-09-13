@@ -1,8 +1,8 @@
 /**
  * Business Brain — Diagnosis Engine barrel.
  *
- * The port is exported as a type contract only. Nothing in this phase implements
- * or calls it.
+ * The port is exported as a type contract. It is implemented outside the engine
+ * (lib/business-brain) and extended by the clinic ledger port.
  */
 export * from "./config/diagnosis-config";
 export * from "./support/dates";
