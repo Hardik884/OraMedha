@@ -23,6 +23,7 @@ export * from "./action";
 export * from "./opportunity";
 export * from "./findings";
 export * from "./trajectory";
+export * from "./root-cause";
 export * from "./outcome-engine";
 export * from "./value-engine";
 export * from "./learning-engine";

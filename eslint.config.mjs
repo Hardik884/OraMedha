@@ -39,6 +39,7 @@ const PURE_ENGINE_FILES = [
   // Trajectories are measured from history the run already holds. No reads, no
   // clock, no model — and nothing that could quietly become a forecast.
   "business-brain/engines/trajectory/**/*.ts",
+  "business-brain/engines/root-cause/**/*.ts",
 ];
 
 const FORBIDDEN_IMPORT_PATTERNS = [
