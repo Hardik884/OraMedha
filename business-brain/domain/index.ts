@@ -20,6 +20,7 @@ export * from "./achievement";
 export * from "./opportunity";
 export * from "./finding";
 export * from "./trajectory";
+export * from "./root-cause";
 export * from "./action";
 export * from "./outcome";
 export * from "./learning";
