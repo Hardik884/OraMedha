@@ -391,14 +391,15 @@ export async function softDeletePatient(
       return { data: null, error: `Failed to cascade delete (${msg}).` };
     }
 
-    // Remove any active queue entries for this patient. queue_entries has no
-    // soft-delete column — hard-delete waiting/in_progress entries to keep the
-    // live queue clean. completed entries are left for audit.
+    // Remove any active queue entries for this patient from the live queue.
+    // Soft removal (removed_at), like a cancellation: the check-in happened, and
+    // the queue history is evidence that outlives the live board.
     const { error: qErr } = await admin
       .from("queue_entries")
-      .delete()
+      .update({ removed_at: now })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
+      .is("removed_at", null)
       .in("status", ["waiting", "in_progress"]);
     if (qErr) {
       const msg = `queue_entries: ${qErr.message ?? qErr.code ?? JSON.stringify(qErr)}`;

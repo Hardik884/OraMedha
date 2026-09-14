@@ -151,13 +151,14 @@ describe("patient deletion cascade", () => {
   });
 
   it("never hard-deletes a clinical record", () => {
-    // Soft delete is the rule; the two hard deletes are queue entries (live
-    // operational state, no soft-delete column) and reminder/portal-link rows.
+    // Soft delete is the rule; the hard deletes are reminder and portal-link
+    // rows. Queue entries are soft-removed (`removed_at`) since 20260918100100,
+    // so the check-in stays as evidence.
     const hardDeleted = [...body.matchAll(/\.from\(\s*["'`](\w+)["'`]\s*\)[\s\S]{0,200}?\.delete\(/g)]
       .map((m) => m[1]);
 
     expect(hardDeleted.sort()).toEqual(
-      ["patient_portal_links", "queue_entries", "reminder_logs"].sort()
+      ["patient_portal_links", "reminder_logs"].sort()
     );
   });
 

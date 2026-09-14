@@ -183,7 +183,8 @@ export async function getDashboardKPIs(
       .from("queue_entries")
       .select("status")
       .eq("clinic_id", clinicId)
-      .eq("queue_date", todayDate),
+      .eq("queue_date", todayDate)
+      .is("removed_at", null),
 
     supabase
       .from("payments")
@@ -378,7 +379,8 @@ export async function getAnalyticsSummary(
         .from("queue_entries")
         .select("status, checked_in_at, called_at")
         .eq("clinic_id", clinicId)
-        .eq("queue_date", todayDate),
+        .eq("queue_date", todayDate)
+        .is("removed_at", null),
       "analytics: queue today"),
 
     fetchAllRows<{ amount: number; date: string }>(() =>

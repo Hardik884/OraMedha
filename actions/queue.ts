@@ -179,6 +179,7 @@ export async function checkInPatient(
       .select("position")
       .eq("clinic_id", profile.clinic_id)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .order("position", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -252,6 +253,7 @@ export async function advanceQueue(): Promise<ActionResult<null>> {
       .select("id, appointment_id, patient_id")
       .eq("clinic_id", cid)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .eq("status", "in_progress")
       .maybeSingle();
 
@@ -273,20 +275,23 @@ export async function advanceQueue(): Promise<ActionResult<null>> {
     // Find the first waiting entry (lowest position) and promote to in_progress
     const { data: nextData } = await db
       .from("queue_entries")
-      .select("id, appointment_id")
+      .select("id, appointment_id, called_at")
       .eq("clinic_id", cid)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .eq("status", "waiting")
       .order("position", { ascending: true })
       .limit(1)
       .maybeSingle();
 
     if (nextData) {
-      const next = nextData as { id: string; appointment_id: string };
+      const next = nextData as { id: string; appointment_id: string; called_at: string | null };
 
+      // A call-in already recorded (the dentist started this visit while another
+      // patient held the chair) is kept: it is when the patient was called.
       await db
         .from("queue_entries")
-        .update({ status: "in_progress", called_at: new Date().toISOString() })
+        .update({ status: "in_progress", called_at: next.called_at ?? new Date().toISOString() })
         .eq("id", next.id);
 
       // Update appointment status to in_progress
@@ -335,6 +340,7 @@ export async function skipPatient(
       .eq("id", queueEntryId)
       .eq("clinic_id", cid)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .single();
 
     if (!entryData) return { data: null, error: "Queue entry not found." };
@@ -354,6 +360,7 @@ export async function skipPatient(
       .select("position")
       .eq("clinic_id", cid)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .eq("status", "waiting")
       .order("position", { ascending: false })
       .limit(1)
@@ -376,6 +383,7 @@ export async function skipPatient(
       .select("id, position")
       .eq("clinic_id", cid)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .eq("status", "waiting")
       .gt("position", entry.position)
       .order("position", { ascending: true });
@@ -449,6 +457,7 @@ export async function getTodayQueue(): Promise<
         )
         .eq("clinic_id", profile.clinic_id)
         .eq("queue_date", qDate)
+        .is("removed_at", null)
         .order("position", { ascending: true });
 
       if (error) {
@@ -484,6 +493,7 @@ export async function getTodayQueue(): Promise<
       )
       .eq("patient_id", link.patientId)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .order("position", { ascending: true });
 
     if (error) {
@@ -585,6 +595,7 @@ export async function getQueueStatus(patientId: string): Promise<
       .eq("clinic_id", clinicId)
       .eq("patient_id", patientId)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .maybeSingle();
 
     if (!myEntryData) {
@@ -594,6 +605,7 @@ export async function getQueueStatus(patientId: string): Promise<
         .select("position")
         .eq("clinic_id", clinicId)
         .eq("queue_date", qDate)
+        .is("removed_at", null)
         .eq("status", "in_progress")
         .maybeSingle();
 
@@ -621,6 +633,7 @@ export async function getQueueStatus(patientId: string): Promise<
         .select("position")
         .eq("clinic_id", clinicId)
         .eq("queue_date", qDate)
+        .is("removed_at", null)
         .eq("status", "in_progress")
         .maybeSingle();
 
@@ -640,6 +653,7 @@ export async function getQueueStatus(patientId: string): Promise<
       .select("id, position, appointments(duration_minutes)")
       .eq("clinic_id", clinicId)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .eq("status", "waiting")
       .lt("position", myEntry.position);
 
@@ -696,6 +710,7 @@ export async function getQueueStatus(patientId: string): Promise<
       .select("position")
       .eq("clinic_id", clinicId)
       .eq("queue_date", qDate)
+      .is("removed_at", null)
       .eq("status", "in_progress")
       .maybeSingle();
 
@@ -754,7 +769,8 @@ export async function getQueueMetrics(): Promise<
         .from("queue_entries")
         .select("status, checked_in_at, called_at, appointment:appointments(duration_minutes)")
         .eq("clinic_id", cid)
-        .eq("queue_date", qDate),
+        .eq("queue_date", qDate)
+        .is("removed_at", null),
       db.from("clinic_settings").select("chair_count").eq("clinic_id", cid).maybeSingle(),
     ]);
     const chairCount = Math.max(1, (settingsData as { chair_count?: number } | null)?.chair_count ?? 1);

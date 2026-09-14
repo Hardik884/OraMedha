@@ -31,6 +31,7 @@ function makeDb(tables: { queue_entries: Row[]; clinic_settings: Row | null }) {
     const eq: Record<string, unknown> = {};
     const api: Record<string, unknown> = {
       select: () => api,
+      is: () => api,
       eq: (col: string, val: unknown) => {
         eq[col] = val;
         return api;

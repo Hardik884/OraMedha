@@ -2337,6 +2337,7 @@ export type Database = {
           patient_id: string
           position: number
           queue_date: string
+          removed_at: string | null
           status: Database["public"]["Enums"]["queue_status"]
         }
         Insert: {
@@ -2349,6 +2350,7 @@ export type Database = {
           patient_id: string
           position: number
           queue_date?: string
+          removed_at?: string | null
           status?: Database["public"]["Enums"]["queue_status"]
         }
         Update: {
@@ -2361,6 +2363,7 @@ export type Database = {
           patient_id?: string
           position?: number
           queue_date?: string
+          removed_at?: string | null
           status?: Database["public"]["Enums"]["queue_status"]
         }
         Relationships: [
