@@ -17,42 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { dateRange } from "@/business-brain";
 import type { Database } from "@/types/database.types";
 import { openSpans, type AvailabilityRule } from "@/lib/scheduling/slots";
-
-/** Narrow `unknown` PostgREST payloads to the row shape a query selected. */
-function rows<T>(data: unknown): T[] {
-  return (data ?? []) as T[];
-}
-
-interface AvailabilityRuleRow {
-  day_of_week: number;
-  start_time: string;
-  end_time: string;
-  slot_duration_minutes: number;
-}
-
-interface UnavailableDateRow {
-  date: string;
-}
-
-interface ConsultancyBlockDatedRow {
-  date: string;
-  start_time: string;
-  end_time: string;
-}
-
-/** Postgres `time` columns arrive as "HH:MM:SS"; the slot engine wants "HH:MM". */
-function toHhMm(time: string): string {
-  return time.slice(0, 5);
-}
-
-/**
- * Day-of-week (0 = Sunday) for a "YYYY-MM-DD" business date.
- * Read from the date string itself — the business date is already clinic-local,
- * so converting it through a timezone again would shift it.
- */
-function dayOfWeek(date: string): number {
-  return new Date(`${date}T12:00:00.000Z`).getUTCDay();
-}
+import { loadClinicSchedule, rulesForWeekday, weekdayOf } from "@/lib/scheduling/schedule-source";
 
 export interface ScheduleInputs {
   readonly rulesByDow: ReadonlyMap<number, AvailabilityRule[]>;
@@ -63,10 +28,15 @@ export interface ScheduleInputs {
 /**
  * Schedule inputs for a date RANGE, fetched once.
  *
- * Capacity is per-day, but querying per day would issue three round-trips for
- * every date in a 30-day window. Instead the rules, holidays and consultancy
- * blocks are read once for the widest range needed, and each day is computed
- * from them in memory. Query count is constant however long the window is.
+ * Capacity is per-day, but querying per day would issue round-trips for every
+ * date in a 30-day window. Instead the schedule is read once for the widest
+ * range needed, and each day is computed from it in memory.
+ *
+ * The schedule is booking's own (`lib/scheduling/schedule-source.ts`): active
+ * availability rules for a weekday, otherwise the clinic's opening hours, less
+ * holidays and consultancy blocks. The Business Brain never keeps a second idea
+ * of when the clinic is open — a clinic configured by opening hours alone used
+ * to read here as closed every day while it took bookings.
  */
 export async function fetchScheduleInputs(
   db: SupabaseClient<Database>,
@@ -74,51 +44,15 @@ export async function fetchScheduleInputs(
   from: string,
   to: string,
 ): Promise<ScheduleInputs> {
-  const [rulesResult, unavailableResult, blocksResult] = await Promise.all([
-    db
-      .from("availability_rules")
-      .select("day_of_week, start_time, end_time, slot_duration_minutes")
-      .eq("clinic_id", clinicId)
-      .eq("is_active", true),
-    db.from("unavailable_dates").select("date").eq("clinic_id", clinicId).gte("date", from).lte("date", to),
-    db
-      .from("consultancy_schedules")
-      .select("date, start_time, end_time")
-      .eq("clinic_id", clinicId)
-      .eq("is_active", true)
-      .gte("date", from)
-      .lte("date", to),
-  ]);
-
-  if (rulesResult.error) throw new Error(`availability_rules: ${rulesResult.error.message}`);
-  if (unavailableResult.error) {
-    throw new Error(`unavailable_dates: ${unavailableResult.error.message}`);
-  }
-  if (blocksResult.error) {
-    throw new Error(`consultancy_schedules: ${blocksResult.error.message}`);
-  }
-
+  const schedule = await loadClinicSchedule(db, clinicId, from, to);
   const rulesByDow = new Map<number, AvailabilityRule[]>();
-  for (const r of rows<AvailabilityRuleRow>(rulesResult.data)) {
-    const list = rulesByDow.get(r.day_of_week) ?? [];
-    list.push({
-      startTime: toHhMm(r.start_time),
-      endTime: toHhMm(r.end_time),
-      slotDurationMinutes: r.slot_duration_minutes,
-    });
-    rulesByDow.set(r.day_of_week, list);
+  for (let dow = 0; dow < 7; dow += 1) {
+    const rules = rulesForWeekday(schedule, dow);
+    if (rules.length > 0) rulesByDow.set(dow, rules);
   }
-
-  const closedDates = new Set(rows<UnavailableDateRow>(unavailableResult.data).map((u) => u.date));
-
   const blocksByDate = new Map<string, Array<{ start: string; end: string }>>();
-  for (const b of rows<ConsultancyBlockDatedRow>(blocksResult.data)) {
-    const list = blocksByDate.get(b.date) ?? [];
-    list.push({ start: toHhMm(b.start_time), end: toHhMm(b.end_time) });
-    blocksByDate.set(b.date, list);
-  }
-
-  return { rulesByDow, closedDates, blocksByDate };
+  for (const [date, blocks] of schedule.blocksByDate) blocksByDate.set(date, [...blocks]);
+  return { rulesByDow, closedDates: new Set(schedule.closedDates), blocksByDate };
 }
 
 /**
@@ -127,7 +61,7 @@ export async function fetchScheduleInputs(
  */
 export function openSpansOnDate(date: string, inputs: ScheduleInputs): Array<[number, number]> {
   if (inputs.closedDates.has(date)) return [];
-  const rules = inputs.rulesByDow.get(dayOfWeek(date)) ?? [];
+  const rules = inputs.rulesByDow.get(weekdayOf(date)) ?? [];
   if (rules.length === 0) return [];
   return openSpans(rules, inputs.blocksByDate.get(date) ?? []);
 }
