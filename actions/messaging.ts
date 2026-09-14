@@ -16,7 +16,8 @@ import {
   type WhatsAppSendList,
 } from "@/lib/messaging/reminder-types";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { getOverdueFollowUps } from "@/actions/follow-ups";
+import { getOverdueFollowUps, todayForClinic } from "@/actions/follow-ups";
+import { resolveReminderSubject } from "@/lib/messaging/reminder-subject";
 import { getPatientsWithOutstandingBalance } from "@/actions/payments";
 import { getPatientsWithPlannedTreatmentNoVisit } from "@/actions/treatments";
 import { getClinicSettings } from "@/actions/clinic-settings";
@@ -247,6 +248,11 @@ const markSentSchema = z.object({
  * reminder_logs row (clinic-scoped by RLS), which removes the patient from the
  * kind's list for the cooldown window — this is what makes "Mark as sent"
  * survive a refresh instead of being ephemeral client state.
+ *
+ * The row also records what the reminder was about — the follow-up, the planned
+ * treatment or the balance — resolved here from the same populations the send
+ * list uses (migration 20260918100600), so an outcome is matched to the right
+ * subject. Nothing extra is asked of the staff member.
  */
 export async function markReminderSent(
   kind: ActionDraftKind,
@@ -263,11 +269,19 @@ export async function markReminderSent(
       return { data: null, error: "WhatsApp reminders are not enabled for this clinic." };
     }
 
+    const subject = await resolveReminderSubject(db, {
+      clinicId: profile.clinic_id,
+      patientId: parsed.data.patientId,
+      kind: parsed.data.kind,
+      today: await todayForClinic(db, profile.clinic_id),
+    });
+
     const { error } = await db.from("reminder_logs").insert({
       clinic_id: profile.clinic_id,
       patient_id: parsed.data.patientId,
       kind: parsed.data.kind,
       sent_by: profile.id,
+      ...subject,
     });
     if (error) {
       console.error("[markReminderSent]", error);

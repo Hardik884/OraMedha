@@ -2455,6 +2455,9 @@ export type Database = {
           patient_id: string
           sent_at: string
           sent_by: string | null
+          subject_amount: number | null
+          subject_follow_up_id: string | null
+          subject_treatment_id: string | null
         }
         Insert: {
           clinic_id: string
@@ -2464,6 +2467,9 @@ export type Database = {
           patient_id: string
           sent_at?: string
           sent_by?: string | null
+          subject_amount?: number | null
+          subject_follow_up_id?: string | null
+          subject_treatment_id?: string | null
         }
         Update: {
           clinic_id?: string
@@ -2473,6 +2479,9 @@ export type Database = {
           patient_id?: string
           sent_at?: string
           sent_by?: string | null
+          subject_amount?: number | null
+          subject_follow_up_id?: string | null
+          subject_treatment_id?: string | null
         }
         Relationships: [
           {
@@ -2501,6 +2510,62 @@ export type Database = {
             columns: ["sent_by"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_follow_up_id_fkey"
+            columns: ["subject_follow_up_id"]
+            isOneToOne: false
+            referencedRelation: "active_follow_ups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_follow_up_id_fkey"
+            columns: ["subject_follow_up_id"]
+            isOneToOne: false
+            referencedRelation: "follow_ups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_follow_up_id_fkey"
+            columns: ["subject_follow_up_id"]
+            isOneToOne: false
+            referencedRelation: "overdue_follow_ups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_treatment_id_fkey"
+            columns: ["subject_treatment_id"]
+            isOneToOne: false
+            referencedRelation: "active_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_treatment_id_fkey"
+            columns: ["subject_treatment_id"]
+            isOneToOne: false
+            referencedRelation: "patient_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_treatment_id_fkey"
+            columns: ["subject_treatment_id"]
+            isOneToOne: false
+            referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_treatment_id_fkey"
+            columns: ["subject_treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reminder_logs_subject_treatment_id_fkey"
+            columns: ["subject_treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatments"
             referencedColumns: ["id"]
           },
         ]

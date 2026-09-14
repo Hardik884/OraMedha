@@ -460,6 +460,44 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
     });
   });
 
+  // ── F19: reminder subject ───────────────────────────────────────────────────
+  describe("reminder subject", () => {
+    it("is resolved from the send-list populations through the staff session", async () => {
+      const { resolveReminderSubject } = await import("@/lib/messaging/reminder-subject");
+      const p = await insertOne("patients", { clinic_id: CLINIC, name: "Reminded" });
+      const older = await followUp({ patient_id: p.id, due_date: "2026-08-01" });
+      await followUp({ patient_id: p.id, due_date: "2026-08-05" });
+      await followUp({ patient_id: p.id, due_date: "2026-12-01" });
+      const appt = await appointment({ patient_id: p.id, status: "completed" });
+      await insertOne("treatments", { clinic_id: CLINIC, patient_id: p.id, appointment_id: appt.id, treatment_type: "Crown", cost: 2000, status: "planned", created_at: "2026-08-01T00:00:00Z" });
+      const newest = await insertOne("treatments", { clinic_id: CLINIC, patient_id: p.id, appointment_id: appt.id, treatment_type: "Implant", cost: 9000, status: "planned", created_at: "2026-08-02T00:00:00Z" });
+      await insertOne("treatments", { clinic_id: CLINIC, patient_id: p.id, appointment_id: appt.id, treatment_type: "Filling", cost: 700, status: "completed", performed_at: "2026-08-02T05:00:00Z" });
+
+      const receptionist = as("receptionist");
+      const params = { clinicId: CLINIC, patientId: p.id, today: "2026-09-14" };
+      expect(await resolveReminderSubject(receptionist, { ...params, kind: "recall_invitation" })).toEqual({ subject_follow_up_id: older.id, subject_treatment_id: null, subject_amount: null });
+      expect(await resolveReminderSubject(receptionist, { ...params, kind: "treatment_plan_follow_up" })).toEqual({ subject_follow_up_id: null, subject_treatment_id: newest.id, subject_amount: null });
+      expect(await resolveReminderSubject(receptionist, { ...params, kind: "payment_reminder" })).toEqual({ subject_follow_up_id: null, subject_treatment_id: null, subject_amount: 700 });
+
+      const nobody = await insertOne("patients", { clinic_id: CLINIC, name: "Nothing owed" });
+      expect(await resolveReminderSubject(receptionist, { ...params, patientId: nobody.id, kind: "payment_reminder" })).toMatchObject({ subject_amount: null });
+      expect(await resolveReminderSubject(receptionist, { ...params, patientId: nobody.id, kind: "recall_invitation" })).toMatchObject({ subject_follow_up_id: null });
+    });
+
+    it("a subject must belong to the patient and fit the reminder's kind", async () => {
+      const p = await insertOne("patients", { clinic_id: CLINIC, name: "Subject owner" });
+      const other = await insertOne("patients", { clinic_id: CLINIC, name: "Someone else's follow-up" });
+      const foreign = await followUp({ patient_id: other.id });
+      const own = await followUp({ patient_id: p.id });
+      const log = (values: Record<string, unknown>) =>
+        as("receptionist").from("reminder_logs").insert({ clinic_id: CLINIC, patient_id: p.id, sent_by: USERS.receptionist.id, ...values });
+      expect((await log({ kind: "recall_invitation", subject_follow_up_id: foreign.id })).error).not.toBeNull();
+      expect((await log({ kind: "payment_reminder", subject_follow_up_id: own.id })).error).not.toBeNull();
+      expect((await log({ kind: "payment_reminder", subject_amount: -5 })).error).not.toBeNull();
+      expect((await log({ kind: "recall_invitation", subject_follow_up_id: own.id })).error).toBeNull();
+    });
+  });
+
   // ── F5: queue soft removal ──────────────────────────────────────────────────
   describe("queue soft removal", () => {
     async function queueEntry(appt: Record<string, any>, over: Record<string, unknown> = {}) {
