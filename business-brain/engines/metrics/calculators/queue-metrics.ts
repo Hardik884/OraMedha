@@ -2,6 +2,7 @@
  * Metrics Engine — Queue calculators
  */
 
+import { endOfLocalDay } from "../../../utils/dates";
 import type { Metric } from "../../../domain";
 import type { ClinicDataSnapshot, QueueEntrySnapshot } from "../../../repositories";
 import { MetricKey, buildMetric } from "../metric-ids";
@@ -21,9 +22,23 @@ function isWaiting(entry: QueueEntrySnapshot): boolean {
   );
 }
 
-/** Whether the snapshot describes the present, so a still-open wait can be measured up to `asOf`. */
-function describesPresent(s: ClinicDataSnapshot): boolean {
-  return s.knowledge === undefined || s.knowledge.reason === "describes_present";
+/**
+ * Whether a wait still open at `asOf` can be measured up to `asOf`:
+ *
+ *   - the snapshot describes the present, or reads state as known at a moment
+ *     within the day (point in time) — the patient was, as recorded, waiting then;
+ *   - and the day had not ended by `asOf`. A patient still "waiting" once the day
+ *     is over is an entry nobody resolved, not a wait of that length.
+ *
+ * A past day read from current records (before history capture) cannot say
+ * whether the patient was still waiting at `asOf`, so the wait is unmeasured.
+ */
+function openWaitMeasurable(s: ClinicDataSnapshot): boolean {
+  if (s.knowledge !== undefined && s.knowledge.mode !== "point_in_time" && s.knowledge.reason !== "describes_present") {
+    return false;
+  }
+  // Past days are stamped at their last millisecond (end of day less 1 ms).
+  return Date.parse(s.asOf) < Date.parse(endOfLocalDay(s.date, s.timezone ?? "UTC")) - 1;
 }
 
 /** Patients currently waiting: checked in, not called in, appointment not moved on. */
@@ -48,7 +63,7 @@ function waitMinutes(entry: QueueEntrySnapshot, s: ClinicDataSnapshot): number |
   let endIso: string;
   if (entry.startedAt !== null) {
     endIso = entry.startedAt;
-  } else if (isWaiting(entry) && describesPresent(s)) {
+  } else if (isWaiting(entry) && openWaitMeasurable(s)) {
     endIso = s.asOf;
   } else {
     return null;

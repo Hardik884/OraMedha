@@ -110,9 +110,26 @@ describe("averageWaitingTime", () => {
     }
   });
 
-  it("does not measure an open wait on a snapshot that does not describe the present", () => {
+  it("measures an open wait as known at a moment within the day", () => {
     const s = snapshot({
       knowledge: { mode: "point_in_time", knownAt: `${DATE}T12:00:00.000Z` },
+      queueToday: [queueEntry({ checkedInAt: `${DATE}T11:00:00.000Z`, startedAt: null })],
+    });
+    expect(valueOf(averageWaitingTime, s)).toBe(60);
+  });
+
+  it("does not measure an open wait on a past day read from current records", () => {
+    const s = snapshot({
+      knowledge: { mode: "current_state", knownAt: `${DATE}T12:00:00.000Z`, reason: "before_history_capture" },
+      queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: null })],
+    });
+    expect(averageWaitingTime(s)).toBeNull();
+  });
+
+  it("does not measure a wait nobody resolved once the day has ended", () => {
+    const s = snapshot({
+      asOf: `${DATE}T23:59:59.999Z`,
+      knowledge: { mode: "point_in_time", knownAt: `${DATE}T23:59:59.999Z` },
       queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: null })],
     });
     expect(averageWaitingTime(s)).toBeNull();

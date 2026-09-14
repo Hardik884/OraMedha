@@ -203,7 +203,10 @@ describe.skipIf(!LOCAL_UP)("Business Brain pipeline (integration)", () => {
     expect(v(MetricKey.APPOINTMENTS_TOTAL_TODAY)).toBe(2);
     expect(v(MetricKey.REVENUE_COLLECTED_TODAY)).toBe(0);
     expect(v(MetricKey.REVENUE_PENDING_TREATMENT_VALUE)).toBe(80000);
-    expect(v(MetricKey.QUEUE_PATIENTS_WAITING)).toBe(2);
+    // Two entries still marked waiting, but the first one's appointment is
+    // already completed: its call-in was never recorded, and it is not a patient
+    // waiting.
+    expect(v(MetricKey.QUEUE_PATIENTS_WAITING)).toBe(1);
     expect(v(MetricKey.CAPACITY_CHAIR_UTILIZATION)).toBe(12.5);
     expect(v(MetricKey.CAPACITY_AVAILABLE_SLOTS_TODAY)).toBe(14);
   });

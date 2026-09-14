@@ -467,8 +467,11 @@ describe.skipIf(!LOCAL_UP)("SupabaseMetricsDataRepository (integration)", () => 
       expect(v(MetricKey.TREATMENT_ACCEPTED_PENDING_SCHEDULING)).toBe(1);
 
       expect(v(MetricKey.QUEUE_PATIENTS_WAITING)).toBe(1);
-      // (20 min completed + 30 min still waiting at 12:00 IST) / 2
-      expect(v(MetricKey.QUEUE_AVERAGE_WAITING_TIME)).toBe(25);
+      // Only the 20-minute wait is measured. The other patient is still "waiting"
+      // in the current records of a day before history capture, which cannot say
+      // whether they were still waiting at 12:00 IST — so that wait is unmeasured
+      // rather than counted as 30 minutes.
+      expect(v(MetricKey.QUEUE_AVERAGE_WAITING_TIME)).toBe(20);
 
       expect(v(MetricKey.FOLLOWUPS_DUE_TODAY)).toBe(1);
       expect(v(MetricKey.FOLLOWUPS_OVERDUE)).toBe(1);
