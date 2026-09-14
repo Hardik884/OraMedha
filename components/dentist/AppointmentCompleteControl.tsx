@@ -11,56 +11,54 @@ import type { AppointmentStatus } from "@/types";
 interface AppointmentCompleteControlProps {
   appointmentId: string;
   currentStatus?: AppointmentStatus;
+  /**
+   * True when the appointment is a no-show the nightly job inferred recently
+   * enough to be corrected. Computed server-side from the appointment's history.
+   */
+  correctableNoShow?: boolean;
 }
 
 /**
  * AppointmentCompleteControl
  *
  * Patient Visit page action. Shows a single "Mark as Complete" button while the
- * appointment is still active (not completed / cancelled / no_show). All other
+ * appointment is still active (not completed / cancelled / no_show), and for a
+ * no-show the system inferred within its correction window. All other
  * operational actions (Check In, Mark In Progress, Reschedule, Cancel) live in
- * the appointments table now.
+ * the appointments table.
  *
- * Completion reuses the existing updateAppointmentStatus server action (which
- * runs the authoritative completion cascade). Because the lifecycle is strictly
- * ordered (scheduled → checked_in → in_progress → completed), we advance
- * through any intermediate transitions with the same action rather than
- * duplicating status logic.
+ * One click is ONE completion. It no longer walks the appointment through
+ * checked-in and in-progress on the way: those are an arrival and a call-in, and
+ * inventing them stamped a check-in and a queue row at the moment of the click.
+ * The server completes the visit directly and records only what happened — see
+ * lib/appointments/visit-completion.ts.
  */
-const COMPLETION_PATH: AppointmentStatus[] = [
-  "scheduled",
-  "checked_in",
-  "in_progress",
-  "completed",
-];
+const COMPLETABLE: AppointmentStatus[] = ["scheduled", "checked_in", "in_progress"];
 
 export function AppointmentCompleteControl({
   appointmentId,
   currentStatus = "scheduled",
+  correctableNoShow = false,
 }: AppointmentCompleteControlProps) {
   const queryClient = useQueryClient();
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  // Only active appointments can be completed. Terminal states hide the button.
-  const startIdx = COMPLETION_PATH.indexOf(currentStatus);
-  const canComplete = startIdx >= 0 && currentStatus !== "completed";
+  // Only active appointments (or a correctable inferred no-show) can be completed.
+  const canComplete = COMPLETABLE.includes(currentStatus) || (currentStatus === "no_show" && correctableNoShow);
 
   if (!canComplete) return null;
 
   function markComplete() {
     setError(null);
     startTransition(async () => {
-      // Advance through each remaining valid transition up to "completed".
-      for (let i = startIdx + 1; i < COMPLETION_PATH.length; i++) {
-        const res = await updateAppointmentStatus({
-          appointment_id: appointmentId,
-          new_status: COMPLETION_PATH[i],
-        });
-        if (res.error) {
-          setError(res.error);
-          return;
-        }
+      const res = await updateAppointmentStatus({
+        appointment_id: appointmentId,
+        new_status: "completed",
+      });
+      if (res.error) {
+        setError(res.error);
+        return;
       }
       queryClient.invalidateQueries({ queryKey: queryKeys.appointments.all });
     });

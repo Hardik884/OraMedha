@@ -32,6 +32,8 @@ import {
 } from "@/lib/staff/dentist-directory";
 import { writeAppointmentHistory } from "@/lib/appointments/history";
 import { completeAppointmentCascade } from "@/lib/appointments/complete";
+import { DIRECT_COMPLETION_FROM, isCorrectableNoShow, type HistoryRowLike } from "@/lib/appointments/visit-completion";
+import { recordCallIn } from "@/lib/queue/call-in";
 import { PATIENT_APPOINTMENT_SELECT } from "@/lib/appointments/patient-safe-columns";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
 import { APPOINTMENT_SELECT } from "@/lib/appointments/data-api-columns";
@@ -456,9 +458,25 @@ export async function updateAppointmentStatus(
     const currentStatus = currentAppt.status as AppointmentStatus;
     const newStatus = parsed.data.new_status as AppointmentStatus;
 
-    // Validate transition
+    // Validate transition. Two completions beyond the lifecycle map, both the
+    // dentist's and both recorded truthfully (see lib/appointments/visit-completion.ts):
+    //   - a visit completed with no recorded arrival goes straight to completed,
+    //     rather than inventing a check-in and a call-in on the way;
+    //   - a no-show the nightly job inferred may be corrected within its window.
     const validNext = VALID_APPOINTMENT_TRANSITIONS[currentStatus];
-    if (!validNext.includes(newStatus)) {
+    let allowed = validNext.includes(newStatus);
+    if (!allowed && newStatus === "completed" && profile.role === "dentist") {
+      if (DIRECT_COMPLETION_FROM.includes(currentStatus)) {
+        allowed = true;
+      } else if (currentStatus === "no_show") {
+        const { data: historyRows } = await db
+          .from("appointment_history")
+          .select("action, new_value, performed_by, timestamp")
+          .eq("appointment_id", parsed.data.appointment_id);
+        allowed = isCorrectableNoShow(currentStatus, (historyRows ?? []) as HistoryRowLike[], new Date().toISOString());
+      }
+    }
+    if (!allowed) {
       return {
         data: null,
         error: `Cannot transition from "${currentStatus}" to "${newStatus}".`,
@@ -522,16 +540,31 @@ export async function updateAppointmentStatus(
     // left as a stale waiting/in_progress queue row (which would block the
     // queue and skew "patients ahead").
     if (newStatus === "cancelled" || newStatus === "no_show") {
+      // Removed from the live queue, not erased: the check-in happened, and a
+      // patient who waited and then left is evidence the waiting figures need.
       const { error: queueDelErr } = await db
         .from("queue_entries")
-        .delete()
+        .update({ removed_at: new Date().toISOString() })
         .eq("appointment_id", parsed.data.appointment_id)
         .eq("clinic_id", profile.clinic_id)
+        .is("removed_at", null)
         .in("status", ["waiting", "in_progress"]);
       if (queueDelErr) {
         console.error("[updateAppointmentStatus] queue cleanup failed:", queueDelErr);
       }
       revalidatePath(`/${profile.role}/queue`);
+    }
+
+    // ── On in_progress: record the call-in on the patient's real queue entry ──
+    // Starting a visit from the appointment list is the same event as calling
+    // the patient in from the queue, and it used to leave the queue row
+    // "waiting" with no call-in time — so waiting figures counted a patient in
+    // the chair as still waiting. Only a row that exists is touched (no queue
+    // row is invented for a patient nobody checked in), and a call-in already
+    // recorded is never overwritten.
+    if (newStatus === "in_progress") {
+      const callIn = await recordCallIn(db, profile.clinic_id, parsed.data.appointment_id, new Date().toISOString());
+      if (callIn.error) console.error("[updateAppointmentStatus → in_progress] queue call-in failed:", callIn.error);
     }
 
     // ── On checked_in: create queue_entries row ────────────────────────────
@@ -565,6 +598,7 @@ export async function updateAppointmentStatus(
           .select("position")
           .eq("clinic_id", profile.clinic_id)
           .eq("queue_date", qDate)
+          .is("removed_at", null)
           .order("position", { ascending: false })
           .limit(1)
           .maybeSingle();
@@ -932,11 +966,13 @@ export async function cancelAppointment(
       // ── Remove any active queue entry for this appointment ──────────────
       // Cancelling a checked-in patient must drop them from today's queue so
       // the queue never contains cancelled patients and metrics stay correct.
+      // Removed from the live queue, not erased — see updateAppointmentStatus.
       const { error: queueDelErr } = await db
         .from("queue_entries")
-        .delete()
+        .update({ removed_at: new Date().toISOString() })
         .eq("appointment_id", appointmentId)
         .eq("clinic_id", profile.clinic_id)
+        .is("removed_at", null)
         .in("status", ["waiting", "in_progress"]);
       if (queueDelErr) {
         console.error("[cancelAppointment] queue cleanup failed:", queueDelErr);
