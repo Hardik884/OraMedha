@@ -8,7 +8,7 @@
  *   - actions/treatments.ts    → createTreatment / updateTreatment, when the
  *     dentist links a treatment to a tooth (an auxiliary sync; failures are
  *     logged but never block saving the treatment — the same non-fatal
- *     posture as lib/follow-ups/complete-linked.ts and
+ *     posture as
  *     lib/appointments/history.ts).
  *
  * Kept as a lib helper rather than duplicated in both action files, per

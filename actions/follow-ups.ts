@@ -3,8 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import { resolveSession as resolveCachedSession } from "@/lib/auth/session";
-import { getTodayInTimezone, zonedDateToUTC } from "@/lib/utils";
+import { getTodayInTimezone } from "@/lib/utils";
 import { followUpStatusChangeError, type FollowUpStatusValue } from "@/lib/follow-ups/status-rules";
+import { checkBookingSlot } from "@/lib/scheduling/booking-validation";
+import { createAdminClient } from "@/lib/supabase/admin";
 import {
   CreateFollowUpSchema,
   UpdateFollowUpSchema,
@@ -76,9 +78,14 @@ export async function todayForClinic(db: any, clinicId: string): Promise<string>
 // createFollowUp — dentist + receptionist
 // =============================================================================
 
+/** Shown when a follow-up is saved but its requested visit time cannot be booked. */
+export type CreatedFollowUp = FollowUp & { bookingNotice?: string };
+
+const FOLLOW_UP_SLOT_UNAVAILABLE = "Follow-up saved — that time isn't available.";
+
 export async function createFollowUp(
   input: unknown
-): Promise<ActionResult<FollowUp>> {
+): Promise<ActionResult<CreatedFollowUp>> {
   try {
     const parsed = CreateFollowUpSchema.safeParse(input);
     if (!parsed.success) {
@@ -180,24 +187,18 @@ export async function createFollowUp(
       return { data: null, error: "Failed to create follow-up." };
     }
 
-    const followUp = data as FollowUp;
+    const followUp: CreatedFollowUp = data as FollowUp;
 
     // ── Auto-create the patient's next appointment from the follow-up ───────
-    // Always auto-create an appointment when due_time is provided.
-    // Uses the current user's dentist ID (or the clinic's dentist for
-    // receptionists). Links the new appointment back to the follow-up record.
-    // Failure here is non-fatal — the follow-up still exists.
+    // When a visit time is given, the recall visit is booked through the same
+    // availability check as every other booking. A time the clinic cannot take
+    // (closed, blocked, outside hours, already booked) books nothing: the
+    // follow-up is kept, and the caller is told the time was not available.
+    // The follow-up keeps its ORIGINATING appointment; the recall visit points
+    // back at it through appointments.follow_up_id.
     const initialStatus = parsed.data.status ?? "pending";
     if (parsed.data.due_time && initialStatus === "pending") {
       try {
-        // Resolve clinic timezone.
-        const { data: settings } = await db
-          .from("clinic_settings")
-          .select("timezone")
-          .eq("clinic_id", profile.clinic_id)
-          .maybeSingle();
-        const tz = (settings as { timezone?: string } | null)?.timezone ?? "Asia/Kolkata";
-
         // Resolve dentist: use the caller's own profile if they are a dentist,
         // otherwise find the clinic's dentist.
         let dentistId: string | null = null;
@@ -215,48 +216,48 @@ export async function createFollowUp(
         }
 
         if (dentistId) {
-          const localDateTime = `${parsed.data.due_date}T${parsed.data.due_time}:00`;
-          const scheduledAtUtc = zonedDateToUTC(localDateTime, tz).toISOString();
+          const slotCheck = await checkBookingSlot(db, createAdminClient(), {
+            clinicId: profile.clinic_id,
+            dentistId,
+            localSlot: `${parsed.data.due_date}T${parsed.data.due_time}`,
+            durationMinutes: 30,
+            patientFacing: false,
+            now: new Date(),
+          });
 
-          const { data: appt } = await db
-            .from("appointments")
-            .insert({
-              clinic_id:        profile.clinic_id,
-              patient_id:       parsed.data.patient_id,
-              dentist_id:       dentistId,
-              scheduled_at:     scheduledAtUtc,
-              duration_minutes: 30,
-              source:           "other",
-              status:           "scheduled",
-              notes:            `Follow-up appointment${parsed.data.notes ? `: ${parsed.data.notes}` : ""}`,
-              created_by:       profile.id,
-              // Provenance. Without this the visit carries no trace of why it
-              // exists, and its detail page reads as a fresh start even when the
-              // patient owes money from the visit that prompted the recall.
-              follow_up_id:     followUp.id,
-            })
-            .select("id")
-            .single();
+          const { data: appt } = slotCheck.ok
+            ? await db
+                .from("appointments")
+                .insert({
+                  clinic_id:        profile.clinic_id,
+                  patient_id:       parsed.data.patient_id,
+                  dentist_id:       dentistId,
+                  scheduled_at:     slotCheck.scheduledAtUtc,
+                  duration_minutes: 30,
+                  source:           "other",
+                  status:           "scheduled",
+                  notes:            `Follow-up appointment${parsed.data.notes ? `: ${parsed.data.notes}` : ""}`,
+                  created_by:       profile.id,
+                  // Provenance. Without this the visit carries no trace of why it
+                  // exists, and its detail page reads as a fresh start even when the
+                  // patient owes money from the visit that prompted the recall.
+                  follow_up_id:     followUp.id,
+                })
+                .select("id")
+                .single()
+            : { data: null };
 
           const newApptId = (appt as { id: string } | null)?.id;
           if (newApptId) {
-            // Keep the follow-up linked to its ORIGINATING appointment when one
-            // was provided (e.g. created from an appointment detail page), so it
-            // continues to appear under that appointment. Only fall back to the
-            // auto-created appointment when the follow-up had no source appointment.
-            if (!parsed.data.appointment_id) {
-              await db
-                .from("follow_ups")
-                .update({ appointment_id: newApptId, updated_at: new Date().toISOString() })
-                .eq("id", followUp.id);
-              followUp.appointment_id = newApptId;
-            }
             revalidatePath(`/dentist/appointments`);
             revalidatePath(`/dentist/appointments/${newApptId}`);
+          } else {
+            followUp.bookingNotice = FOLLOW_UP_SLOT_UNAVAILABLE;
           }
         }
       } catch (apptErr) {
         console.error("[createFollowUp] auto-appointment failed:", apptErr);
+        followUp.bookingNotice = FOLLOW_UP_SLOT_UNAVAILABLE;
       }
     }
 
@@ -561,6 +562,17 @@ export async function getFollowUpsForAppointment(
       return { data: null, error: "Forbidden" };
     }
 
+    // A follow-up belongs under an appointment two ways: the visit that prompted
+    // it (follow_ups.appointment_id) and the recall visit booked for it
+    // (appointments.follow_up_id). Both are read; neither link is rewritten.
+    const { data: apptRow } = await db
+      .from("appointments")
+      .select("follow_up_id")
+      .eq("id", appointmentId)
+      .eq("clinic_id", profile.clinic_id)
+      .maybeSingle();
+    const recallFollowUpId = (apptRow as { follow_up_id: string | null } | null)?.follow_up_id ?? null;
+
     const { data, error } = await db
       .from("follow_ups")
       .select(
@@ -573,7 +585,7 @@ export async function getFollowUpsForAppointment(
         "appointment:appointments!follow_ups_appointment_id_fkey(id, scheduled_at, status), " +
         "treatment:treatments(id, treatment_type, status)"
       )
-      .eq("appointment_id", appointmentId)
+      .or(recallFollowUpId ? `appointment_id.eq.${appointmentId},id.eq.${recallFollowUpId}` : `appointment_id.eq.${appointmentId}`)
       .eq("clinic_id", profile.clinic_id)
       .is("deleted_at", null)
       .order("due_date", { ascending: true });
