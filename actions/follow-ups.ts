@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import { resolveSession as resolveCachedSession } from "@/lib/auth/session";
 import { getTodayInTimezone, zonedDateToUTC } from "@/lib/utils";
+import { followUpStatusChangeError, type FollowUpStatusValue } from "@/lib/follow-ups/status-rules";
 import {
   CreateFollowUpSchema,
   UpdateFollowUpSchema,
@@ -312,6 +313,16 @@ export async function updateFollowUp(
     if (!existing) return { data: null, error: "Follow-up not found." };
 
     const patientId: string = (existing as { patient_id: string }).patient_id;
+    const currentStatus = (existing as { status: FollowUpStatusValue }).status;
+
+    // ── Status changes follow the same rules as completeFollowUp/cancelFollowUp ──
+    // Editing a follow-up is not a way round them: only the dentist closes a
+    // follow-up, only a pending one can be closed, and a closed one is never
+    // reopened. The database enforces the same (migration 20260918100000).
+    if (parsed.data.status !== undefined && parsed.data.status !== currentStatus) {
+      const statusError = followUpStatusChangeError(profile.role, currentStatus, parsed.data.status);
+      if (statusError) return { data: null, error: statusError };
+    }
 
     // ── Validate appointment belongs to this patient (if being updated) ────
     if (parsed.data.appointment_id) {
