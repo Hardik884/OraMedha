@@ -145,6 +145,23 @@ interface QueueRow {
   called_at: string | null;
 }
 
+/**
+ * Payments kept as history because their patient was deleted (migration
+ * 20260918100500): the money was collected, so collections over time still
+ * count it. Amount and date only. Never used for a balance. A dentist-or-service
+ * projection: any other caller gets no rows.
+ */
+async function patientDeletedPayments(
+  supabase: DbClient,
+  clinicId: string,
+): Promise<Array<{ amount: number; payment_date: string }>> {
+  const rows = await fetchAllRows<{ payment_id: string; amount: number | string; payment_date: string }>(
+    () => supabase.rpc("patient_deleted_payments", { p_clinic_id: clinicId }).order("payment_id", { ascending: true }),
+    "analytics: payments of deleted patients",
+  );
+  return rows.map((p) => ({ amount: Number(p.amount ?? 0), payment_date: p.payment_date }));
+}
+
 // =============================================================================
 // getDashboardKPIs — today-only, used by dentist dashboard
 // =============================================================================
@@ -170,7 +187,7 @@ export async function getDashboardKPIs(
     timezone
   );
 
-  const [apptRes, queueRes, revenueRes, newPatientsRes] = await Promise.all([
+  const [apptRes, queueRes, revenueRes, newPatientsRes, deletedPatientPayments] = await Promise.all([
     supabase
       .from("appointments")
       .select("status, source")
@@ -200,6 +217,8 @@ export async function getDashboardKPIs(
       .is("deleted_at", null)
       .gte("created_at", todayStartIso)
       .lte("created_at", todayEndIso),
+
+    patientDeletedPayments(supabase, clinicId),
   ]);
 
   const appointments = (apptRes.data ?? []) as Pick<ApptRow, "status" | "source">[];
@@ -211,7 +230,10 @@ export async function getDashboardKPIs(
   const noShowsToday = appointments.filter((a) => a.status === "no_show").length;
   const walkInsToday = appointments.filter((a) => a.source === "walk_in").length;
   const waitingPatients = queueEntries.filter((q) => q.status === "waiting").length;
-  const revenueToday = payments.reduce((sum, p) => sum + (p.amount ?? 0), 0);
+  // Money received today still counts if its patient was deleted afterwards.
+  const revenueToday =
+    payments.reduce((sum, p) => sum + (p.amount ?? 0), 0) +
+    deletedPatientPayments.filter((p) => p.payment_date === todayDate).reduce((sum, p) => sum + p.amount, 0);
   const completionRateToday =
     totalAppointmentsToday > 0
       ? Math.round((seenPatientsToday / totalAppointmentsToday) * 100)
@@ -826,7 +848,7 @@ export async function getRevenueAnalytics(
   const { clinicId, dateFrom, dateTo } = filter;
   const tz = filter.timezone ?? "Asia/Kolkata";
 
-  const [paymentsRes, treatmentsRes, appointmentsRes, allPaymentsRes] = await Promise.all([
+  const [paymentsRes, treatmentsRes, appointmentsRes, allPaymentsRes, deletedPatientPayments] = await Promise.all([
     supabase
       .from("payments")
       .select("amount, method, payment_date, patient_id, appointment_id")
@@ -856,6 +878,10 @@ export async function getRevenueAnalytics(
         .select("amount, patient_id")
         .eq("clinic_id", clinicId).is("deleted_at", null),
       "analytics: revenue — all payments"),
+
+    // Collections over time still include money from patients deleted since;
+    // the outstanding balance above never does.
+    patientDeletedPayments(supabase, clinicId),
   ]);
 
   const payments = (paymentsRes.data ?? []) as PaymentRow[];
@@ -866,6 +892,10 @@ export async function getRevenueAnalytics(
   const overTimeMap: Record<string, number> = {};
   for (const p of payments) {
     overTimeMap[p.payment_date] = (overTimeMap[p.payment_date] ?? 0) + (p.amount ?? 0);
+  }
+  for (const p of deletedPatientPayments) {
+    if (p.payment_date < dateFrom || p.payment_date > dateTo) continue;
+    overTimeMap[p.payment_date] = (overTimeMap[p.payment_date] ?? 0) + p.amount;
   }
   const overTime = Object.entries(overTimeMap)
     .map(([date, amount]) => ({ date, amount }))
@@ -930,8 +960,12 @@ export async function getRevenueAnalytics(
       .gte("payment_date", prevMonthStart).lte("payment_date", prevMonthEnd),
   ]);
 
-  const curTotal = ((curRes.data ?? []) as { amount: number }[]).reduce((s, p) => s + p.amount, 0);
-  const prevTotal = ((prevRes.data ?? []) as { amount: number }[]).reduce((s, p) => s + p.amount, 0);
+  const deletedIn = (from: string, to: string | null) =>
+    deletedPatientPayments
+      .filter((p) => p.payment_date >= from && (to === null || p.payment_date <= to))
+      .reduce((s, p) => s + p.amount, 0);
+  const curTotal = ((curRes.data ?? []) as { amount: number }[]).reduce((s, p) => s + p.amount, 0) + deletedIn(currentMonthStart, null);
+  const prevTotal = ((prevRes.data ?? []) as { amount: number }[]).reduce((s, p) => s + p.amount, 0) + deletedIn(prevMonthStart, prevMonthEnd);
   const momGrowth = prevTotal > 0 ? Math.round(((curTotal - prevTotal) / prevTotal) * 100) : 0;
 
   return { overTime, byPaymentMethod, bySource, outstandingTotal, avgPerCompletedAppointment, momGrowth };

@@ -267,12 +267,15 @@ export async function softDeletePatient(
     const admin: DbClient = createAdminClient();
 
     // Cascade soft-delete related records first, then the patient itself.
+    // Appointments, treatments, payments and follow-ups record WHY they were
+    // deleted (migration 20260918100500): the money and work of a deleted
+    // patient still happened, and past revenue and production keep counting it.
     // Each step surfaces the real Supabase/DB error so the exact failing
     // table and constraint are visible in server logs and returned to the caller.
 
     const { error: apptErr } = await admin
       .from("appointments")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -284,7 +287,7 @@ export async function softDeletePatient(
 
     const { error: txErr } = await admin
       .from("treatments")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -296,7 +299,7 @@ export async function softDeletePatient(
 
     const { error: pyErr } = await admin
       .from("payments")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -308,7 +311,7 @@ export async function softDeletePatient(
 
     const { error: fuErr } = await admin
       .from("follow_ups")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);

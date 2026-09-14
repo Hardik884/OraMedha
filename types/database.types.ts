@@ -282,6 +282,7 @@ export type Database = {
           created_at: string
           created_by: string | null
           deleted_at: string | null
+          deletion_cause: string | null
           dentist_id: string
           duration_minutes: number
           follow_up_id: string | null
@@ -302,6 +303,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           dentist_id: string
           duration_minutes?: number
           follow_up_id?: string | null
@@ -322,6 +324,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           dentist_id?: string
           duration_minutes?: number
           follow_up_id?: string | null
@@ -1467,6 +1470,7 @@ export type Database = {
           created_at: string
           created_by: string | null
           deleted_at: string | null
+          deletion_cause: string | null
           due_date: string
           follow_up_type: string
           id: string
@@ -1483,6 +1487,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           due_date: string
           follow_up_type?: string
           id?: string
@@ -1499,6 +1504,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           due_date?: string
           follow_up_type?: string
           id?: string
@@ -2055,6 +2061,7 @@ export type Database = {
           created_at: string
           created_by: string | null
           deleted_at: string | null
+          deletion_cause: string | null
           id: string
           method: Database["public"]["Enums"]["payment_method"]
           notes: string | null
@@ -2070,6 +2077,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           id?: string
           method: Database["public"]["Enums"]["payment_method"]
           notes?: string | null
@@ -2085,6 +2093,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           id?: string
           method?: Database["public"]["Enums"]["payment_method"]
           notes?: string | null
@@ -3008,6 +3017,7 @@ export type Database = {
           created_at: string
           created_by: string | null
           deleted_at: string | null
+          deletion_cause: string | null
           dentition_type: Database["public"]["Enums"]["dentition_type"] | null
           id: string
           internal_notes: string | null
@@ -3036,6 +3046,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           dentition_type?: Database["public"]["Enums"]["dentition_type"] | null
           id?: string
           internal_notes?: string | null
@@ -3064,6 +3075,7 @@ export type Database = {
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
+          deletion_cause?: string | null
           dentition_type?: Database["public"]["Enums"]["dentition_type"] | null
           id?: string
           internal_notes?: string | null
@@ -4337,6 +4349,27 @@ export type Database = {
       }
       jsonb_values_are_codes: { Args: { value: Json }; Returns: boolean }
       metric_provenance_rank: { Args: { p: string }; Returns: number }
+      patient_deleted_payments: {
+        Args: { p_clinic_id: string; p_known_at?: string }
+        Returns: {
+          amount: number
+          payment_date: string
+          payment_id: string
+        }[]
+      }
+      patient_deleted_treatments: {
+        Args: { p_clinic_id: string; p_known_at?: string }
+        Returns: {
+          cost: number
+          opd_charged: boolean
+          opd_fee: number
+          performed_at: string
+          status: Database["public"]["Enums"]["treatment_status"]
+          treatment_id: string
+          xray_cost: number
+          xray_taken: boolean
+        }[]
+      }
       patient_states_as_of: {
         Args: {
           p_clinic_id: string

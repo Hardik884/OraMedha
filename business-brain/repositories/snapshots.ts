@@ -52,6 +52,12 @@ export interface PaymentSnapshot {
    * all rows fall into one bucket (the old clinic-level behaviour).
    */
   readonly patientId?: string;
+  /**
+   * True for a payment kept only as history because its patient was deleted.
+   * It still counts toward money collected on its date; it never counts toward
+   * anything owed or forward-looking. Carries no patientId.
+   */
+  readonly patientDeleted?: boolean;
 }
 
 /** A treatment record, reduced to what metrics need. */
@@ -78,6 +84,12 @@ export interface TreatmentSnapshot {
   readonly xrayCost?: number;
   /** DentGrow treatment_status: planned | in_progress | completed | cancelled. */
   readonly status: string;
+  /**
+   * True for a treatment kept only as history because its patient was deleted.
+   * Its delivered work still counts toward production; it never counts toward a
+   * balance, the pipeline or anything forward-looking. Carries no patientId.
+   */
+  readonly patientDeleted?: boolean;
   /** ISO-8601 time the treatment was performed, or null if not yet performed. */
   readonly performedAt: string | null;
   /**

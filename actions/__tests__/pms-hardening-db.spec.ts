@@ -386,6 +386,80 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
     });
   });
 
+  // ── F11: a deleted patient's history ────────────────────────────────────────
+  describe("patient deletion cause", () => {
+    let deletedPayment = "";
+    let manualPayment = "";
+    let deletedTreatment = "";
+
+    beforeAll(async () => {
+      const gone = await insertOne("patients", { clinic_id: CLINIC, name: "Deleted with history" });
+      const appt = await appointment({ patient_id: gone.id, status: "completed", scheduled_at: "2026-07-01T04:30:00.000Z" });
+      deletedTreatment = (await insertOne("treatments", {
+        clinic_id: CLINIC, patient_id: gone.id, appointment_id: appt.id, treatment_type: "Crown", cost: 3000,
+        status: "completed", performed_at: "2026-07-01T05:00:00.000Z",
+      })).id;
+      deletedPayment = (await insertOne("payments", { clinic_id: CLINIC, patient_id: gone.id, amount: 1500, method: "cash", payment_date: "2026-07-01" })).id;
+      manualPayment = (await insertOne("payments", { clinic_id: CLINIC, patient_id: gone.id, amount: 99, method: "cash", payment_date: "2026-07-01" })).id;
+      // A payment deleted on its own first (cause not recorded), then the patient.
+      await raw.from("payments").update({ deleted_at: new Date().toISOString() }).eq("id", manualPayment);
+      const now = new Date().toISOString();
+      for (const table of ["appointments", "treatments", "payments"]) {
+        const { error } = await raw.from(table).update({ deleted_at: now, deletion_cause: "patient_deleted" }).eq("patient_id", gone.id).is("deleted_at", null);
+        if (error) throw new Error(`cascade ${table}: ${error.message}`);
+      }
+      await raw.from("patients").update({ deleted_at: now }).eq("id", gone.id);
+    });
+
+    it("the history projection answers only the clinic's dentist and the service role", async () => {
+      const ids = async (client: any) => {
+        const { data, error } = await client.rpc("patient_deleted_payments", { p_clinic_id: CLINIC });
+        return error ? null : (data as Array<{ payment_id: string }>).map((r) => r.payment_id);
+      };
+      expect(await ids(service)).toContain(deletedPayment);
+      expect(await ids(as("dentist"))).toContain(deletedPayment);
+      for (const role of ["receptionist", "patient", "other_dentist"] as const) {
+        expect({ role, rows: (await ids(as(role)))?.length ?? 0 }).toEqual({ role, rows: 0 });
+      }
+      const anon = createClient<Database>(URL, ANON_KEY, options) as any;
+      expect(await ids(anon)).toBeNull();
+    });
+
+    it("returns only records deleted with their patient, and never a patient id", async () => {
+      const { data } = await as("dentist").rpc("patient_deleted_payments", { p_clinic_id: CLINIC });
+      const rows = data as Array<Record<string, unknown>>;
+      expect(rows.map((r) => r.payment_id)).not.toContain(manualPayment);
+      expect(Object.keys(rows[0]).sort()).toEqual(["amount", "payment_date", "payment_id"]);
+      const { data: tx } = await as("dentist").rpc("patient_deleted_treatments", { p_clinic_id: CLINIC });
+      expect((tx as Array<{ treatment_id: string }>).map((r) => r.treatment_id)).toContain(deletedTreatment);
+      expect(Object.keys((tx as Array<Record<string, unknown>>)[0])).not.toContain("patient_id");
+    });
+
+    it("answers as known at a moment: nothing before the record existed", async () => {
+      const { data } = await as("dentist").rpc("patient_deleted_payments", { p_clinic_id: CLINIC, p_known_at: "2020-01-01T00:00:00.000Z" });
+      expect(data).toEqual([]);
+    });
+
+    it("no signed-in session can set or change the cause, and the cause needs a deletion", async () => {
+      const fu = await followUp();
+      await as("dentist").from("follow_ups").update({ deletion_cause: "patient_deleted" }).eq("id", fu.id);
+      expect((await read("follow_ups", fu.id)).deletion_cause).toBeNull();
+      const { error } = await raw.from("follow_ups").update({ deletion_cause: "patient_deleted" }).eq("id", fu.id);
+      expect(error?.message ?? "").toMatch(/chk_follow_ups_deletion_cause/);
+    });
+
+    it("the metrics snapshot keeps the money and the work, and none of the debt", async () => {
+      const { SupabaseMetricsDataRepository } = await import("@/lib/business-brain/metrics-repository");
+      const repo = new SupabaseMetricsDataRepository(as("dentist"), { asOf: "2026-07-01T12:00:00.000Z" });
+      const s = await repo.getClinicSnapshot(CLINIC, "2026-07-01");
+      expect(s.payments.find((p) => p.id === deletedPayment)).toMatchObject({ amount: 1500, patientDeleted: true });
+      expect(s.payments.find((p) => p.id === manualPayment)).toBeUndefined();
+      const tx = s.treatments.find((t) => t.id === deletedTreatment);
+      expect(tx).toMatchObject({ cost: 3000, status: "completed", patientDeleted: true });
+      expect(tx).not.toHaveProperty("patientId");
+    });
+  });
+
   // ── F5: queue soft removal ──────────────────────────────────────────────────
   describe("queue soft removal", () => {
     async function queueEntry(appt: Record<string, any>, over: Record<string, unknown> = {}) {

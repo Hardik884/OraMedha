@@ -333,6 +333,16 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     // (audit: patientsSeenToday row-status gap).
     const appointmentStatusById = new Map(appointmentsToday.map((a) => [a.id, a.status]));
 
+    // History kept because its patient was deleted: the work was delivered and
+    // the money collected, so past production and collections still count it.
+    // Balances and the pipeline never do (see the calculators' patientDeleted).
+    const [deletedPatientTreatments, deletedPatientPayments] = await Promise.all([
+      this.fetchPatientDeletedTreatments(clinicId, asOf, knowledge),
+      this.fetchPatientDeletedPayments(clinicId, date, knowledge),
+    ]);
+    const liveTreatmentIds = new Set(treatments.map((t) => t.id));
+    const livePaymentIds = new Set(payments.map((p) => p.id));
+
     const patientsSeenToday = await reader.patientsSeen(
       appointmentsToday
         .filter((a) => (LIVE_APPOINTMENT_STATUSES as readonly string[]).includes(a.status))
@@ -359,11 +369,15 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       // Keep patientId on the snapshot so revenue.outstanding can clamp per
       // patient (a deposit on one patient's planned work must not erase another
       // patient's billable debt).
-      treatments: treatments.map((t) => ({
-        ...t,
-        isScheduled: patientsWithFutureAppointment.has(t.patientId),
-      })),
-      payments,
+      treatments: [
+        ...treatments.map((t) => ({
+          ...t,
+          isScheduled: patientsWithFutureAppointment.has(t.patientId),
+        })),
+        // A row still live at the snapshot's moment is already above.
+        ...deletedPatientTreatments.filter((t) => !liveTreatmentIds.has(t.id)),
+      ],
+      payments: [...payments, ...deletedPatientPayments.filter((p) => !livePaymentIds.has(p.id))],
       followUps,
       capacity: {
         openMinutesToday: openMinutesOnDate(date, scheduleInputs),
@@ -901,6 +915,63 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     );
 
     return new Set(data.map((a) => a.patient_id));
+  }
+
+  /**
+   * Completed treatments whose patient was deleted, as last recorded before the
+   * deletion and no later than the snapshot's moment (migration 20260918100500).
+   * Only delivered work: nothing planned or in progress enters a snapshot this
+   * way. No patient id travels with them.
+   */
+  private async fetchPatientDeletedTreatments(
+    clinicId: string,
+    asOf: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<TreatmentSnapshot[]> {
+    const rows = await readAll<RpcRow<"patient_deleted_treatments">>(
+      "patient_deleted_treatments",
+      (from, to) =>
+        this.db
+          .rpc("patient_deleted_treatments", { p_clinic_id: clinicId, p_known_at: knowledge.knownAt })
+          .order("treatment_id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
+    return rows
+      .filter((t) => t.status === "completed" && t.performed_at !== null && Date.parse(t.performed_at) <= Date.parse(asOf))
+      .map((t) => ({
+        id: t.treatment_id,
+        cost: Number(t.cost ?? 0),
+        status: t.status,
+        performedAt: t.performed_at,
+        opdCharged: t.opd_charged ?? false,
+        opdFee: Number(t.opd_fee ?? 0),
+        xrayTaken: t.xray_taken ?? false,
+        xrayCost: Number(t.xray_cost ?? 0),
+        // Not knowable for a deleted patient, and never read for completed work.
+        isScheduled: null,
+        patientDeleted: true,
+      }));
+  }
+
+  /** Payments whose patient was deleted, received on or before `date`, as known at the snapshot's moment. */
+  private async fetchPatientDeletedPayments(
+    clinicId: string,
+    date: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<PaymentSnapshot[]> {
+    const rows = await readAll<RpcRow<"patient_deleted_payments">>(
+      "patient_deleted_payments",
+      (from, to) =>
+        this.db
+          .rpc("patient_deleted_payments", { p_clinic_id: clinicId, p_known_at: knowledge.knownAt })
+          .order("payment_id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
+    return rows
+      .filter((p) => p.payment_date <= date)
+      .map((p) => ({ id: p.payment_id, amount: Number(p.amount ?? 0), paymentDate: p.payment_date, patientDeleted: true }));
   }
 
   /**

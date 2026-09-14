@@ -82,12 +82,15 @@ export function outstandingPayments(s: ClinicDataSnapshot): Metric {
   const paidByPatient = new Map<string, number>();
 
   for (const t of s.treatments) {
+    // A deleted patient owes nothing the clinic can still collect.
+    if (t.patientDeleted) continue;
     const charge = treatmentTotalCharge(t);
     if (charge === 0) continue;
     const key = t.patientId ?? "";
     chargedByPatient.set(key, (chargedByPatient.get(key) ?? 0) + charge);
   }
   for (const p of s.payments) {
+    if (p.patientDeleted) continue;
     const key = p.patientId ?? "";
     paidByPatient.set(key, (paidByPatient.get(key) ?? 0) + p.amount);
   }
@@ -106,7 +109,7 @@ export function outstandingPayments(s: ClinicDataSnapshot): Metric {
  */
 export function pendingTreatmentValue(s: ClinicDataSnapshot): Metric {
   const value = s.treatments
-    .filter((t) => t.status === "planned" || t.status === "in_progress")
+    .filter((t) => !t.patientDeleted && (t.status === "planned" || t.status === "in_progress"))
     .reduce((sum, t) => sum + t.cost, 0);
   return buildMetric(MetricKey.REVENUE_PENDING_TREATMENT_VALUE, value, s.clinicId, s.date, s.asOf);
 }

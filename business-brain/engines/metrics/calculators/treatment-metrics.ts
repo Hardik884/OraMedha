@@ -41,7 +41,7 @@ function toDatePart(iso: string, s: ClinicDataSnapshot): string {
  * knowable, so the metric is still produced.
  */
 export function acceptedTreatmentsPendingScheduling(s: ClinicDataSnapshot): Metric | null {
-  const planned = s.treatments.filter((t) => t.status === "planned");
+  const planned = s.treatments.filter((t) => t.status === "planned" && !t.patientDeleted);
   if (planned.some((t) => t.isScheduled === null)) {
     return null;
   }
