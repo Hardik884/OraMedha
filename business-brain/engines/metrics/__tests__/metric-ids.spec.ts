@@ -56,6 +56,7 @@ describe("metric manifest", () => {
         MetricKey.CAPACITY_CHAIR_UTILIZATION, // closed day: no open minutes to measure against
         MetricKey.CAPACITY_CHAIR_UTILIZATION_30D,
         MetricKey.PATIENTS_REACTIVATION_CANDIDATES,
+        MetricKey.QUEUE_AVERAGE_WAITING_TIME, // no measured wait: not "nobody waits"
         MetricKey.REVENUE_COLLECTION_RATE_30D,
         // The empty-clinic-day fixture supplies no patientsOnPaymentPlan set at
         // all, so this is correctly withheld — absent means no repository

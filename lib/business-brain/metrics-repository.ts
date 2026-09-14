@@ -133,10 +133,12 @@ interface PaymentRow {
 }
 interface QueueRow {
   id: string;
+  appointment_id: string;
   status: string;
   checked_in_at: string;
   called_at: string | null;
   completed_at: string | null;
+  removed_at: string | null;
 }
 interface QueueDurationRow {
   appointment_id: string;
@@ -329,6 +331,8 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     // `bookedMinutes` already exclude them elsewhere in this file; leaving it
     // unfiltered inflated `patients.returning_today` on days with cancellations
     // (audit: patientsSeenToday row-status gap).
+    const appointmentStatusById = new Map(appointmentsToday.map((a) => [a.id, a.status]));
+
     const patientsSeenToday = await reader.patientsSeen(
       appointmentsToday
         .filter((a) => (LIVE_APPOINTMENT_STATUSES as readonly string[]).includes(a.status))
@@ -344,6 +348,14 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       appointmentsToday,
       patientsRegisteredToday,
       patientsSeenToday,
+      // Each queue entry with its appointment's status as the snapshot read it,
+      // so an entry left "waiting" behind a visit already started or closed is
+      // not counted as a patient waiting. Entries whose appointment is not among
+      // the day's appointments carry no status: unknown, not waiting-by-default.
+      queueToday: queueToday.map(({ appointmentId, ...entry }) => {
+        const status = appointmentStatusById.get(appointmentId);
+        return status === undefined ? entry : { ...entry, appointmentStatus: status };
+      }),
       // Keep patientId on the snapshot so revenue.outstanding can clamp per
       // patient (a deposit on one patient's planned work must not erase another
       // patient's billable debt).
@@ -352,7 +364,6 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
         isScheduled: patientsWithFutureAppointment.has(t.patientId),
       })),
       payments,
-      queueToday,
       followUps,
       capacity: {
         openMinutesToday: openMinutesOnDate(date, scheduleInputs),
@@ -971,18 +982,27 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       : rows;
   }
 
-  private async fetchQueue(clinicId: string, date: string, knowledge: SnapshotKnowledge): Promise<QueueEntrySnapshot[]> {
-    const data = await readAll<QueueRow>(
+  private async fetchQueue(
+    clinicId: string,
+    date: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<Array<QueueEntrySnapshot & { appointmentId: string }>> {
+    const rows = await readAll<QueueRow>(
       "queue_entries",
       (from, to) =>
         this.db
           .from("queue_entries")
-          .select("id, status, checked_in_at, called_at, completed_at")
+          .select("id, appointment_id, status, checked_in_at, called_at, completed_at, removed_at")
           .eq("clinic_id", clinicId)
           .eq("queue_date", date)
           .order("id", { ascending: true })
           .range(from, to),
       MAX_SNAPSHOT_ROWS,
+    );
+    // An entry soft-removed (its appointment cancelled or missed after check-in)
+    // is no longer in the queue from that moment. Before it, it was.
+    const data = rows.filter((q) =>
+      q.removed_at === null ? true : knowledge.mode === "point_in_time" && Date.parse(q.removed_at) > Date.parse(knowledge.knownAt),
     );
 
     if (knowledge.mode === "point_in_time") {
@@ -997,11 +1017,12 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
           const completed = notAfter(q.completed_at, knowledge.knownAt);
           const stamped = q.called_at !== null || q.completed_at !== null;
           const status = completed !== null ? "completed" : called !== null ? "in_progress" : stamped ? "waiting" : q.status;
-          return { id: q.id, status, checkedInAt: q.checked_in_at, startedAt: called };
+          return { id: q.id, appointmentId: q.appointment_id, status, checkedInAt: q.checked_in_at, startedAt: called };
         });
     }
     return data.map((q) => ({
       id: q.id,
+      appointmentId: q.appointment_id,
       status: q.status,
       checkedInAt: q.checked_in_at,
       // `called_at` is when waiting ended; null means the patient is still waiting.

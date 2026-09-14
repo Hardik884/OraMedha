@@ -162,6 +162,9 @@ export function measurableSnapshot(): ClinicDataSnapshot {
     // value on the one snapshot this suite asserts yields every declared key. A
     // punctual visit gives 0% overrun — a real measurement, not a withheld one.
     trailingVisitDurations: [visitDuration()],
+    // A called-in patient, so the average wait is a measurement rather than
+    // withheld.
+    queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: `${DATE}T10:15:00.000Z` })],
   });
 }
 

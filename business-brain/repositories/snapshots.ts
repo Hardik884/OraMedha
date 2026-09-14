@@ -119,8 +119,15 @@ export interface QueueEntrySnapshot {
   readonly status: string;
   /** ISO-8601 time the patient checked in (started waiting). */
   readonly checkedInAt: string;
-  /** ISO-8601 time the patient was called in (waiting ended), or null if still waiting. */
+  /** ISO-8601 time the patient was called in (waiting ended), or null when no call-in was recorded. */
   readonly startedAt: string | null;
+  /**
+   * The status of the appointment this entry belongs to, when the snapshot knows
+   * it. An entry still marked waiting behind an appointment already in progress,
+   * completed, cancelled or missed is not a patient waiting — its call-in simply
+   * was not recorded. Absent means not known.
+   */
+  readonly appointmentStatus?: string;
 }
 
 /** A follow-up record relevant to the target date. */
