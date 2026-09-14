@@ -185,13 +185,26 @@ async function seed() {
 }
 
 /** Insert one completion as the service role and return its id. */
+/**
+ * A distinct briefing-card date for each seeded completion. Completions of the
+ * same card are one action (see `dedupeCompletions`), and rows here accumulate
+ * across runs, so each gets its own card unless a test names one.
+ */
+let cardDay = Math.floor(Math.random() * 30_000);
+function cardDate(): string {
+  const day = (cardDay += 1);
+  return new Date(Date.UTC(2000, 0, 1) + day * 86_400_000).toISOString().slice(0, 10);
+}
+
 async function completion(over: Record<string, unknown> = {}): Promise<string> {
+  const category = (over.category as string | undefined) ?? "retention";
+  const clinic = (over.clinic_id as string | undefined) ?? CLINIC;
   const { data, error } = await raw
     .from("action_completions")
     .insert({
       clinic_id: CLINIC,
       category: "retention",
-      constraint_id: `constraint.retention:${CLINIC}:${DATE}`,
+      constraint_id: `constraint.${category}:${clinic}:${cardDate()}`,
       completed_at: COMPLETED_AT,
       completed_by: DENTIST,
       source: "declared",
@@ -280,7 +293,7 @@ describe.skipIf(!LOCAL_UP)("action completion persistence", () => {
     const { error } = await raw.from("action_completions").insert({
       clinic_id: CLINIC,
       category: "retention",
-      constraint_id: "c",
+      constraint_id: `constraint.retention:${CLINIC}:${DATE}`,
       source: "guessed",
     });
     expect(error?.message ?? "").toMatch(/chk_action_completions_source|violates check/i);
@@ -290,7 +303,7 @@ describe.skipIf(!LOCAL_UP)("action completion persistence", () => {
     const { error: blank } = await raw.from("action_completions").insert({
       clinic_id: CLINIC,
       category: "retention",
-      constraint_id: "c",
+      constraint_id: `constraint.retention:${CLINIC}:${DATE}`,
       source: "declared",
       note: "   ",
     });
@@ -305,7 +318,7 @@ describe.skipIf(!LOCAL_UP)("action completion persistence", () => {
     const { error } = await raw.from("action_completions").insert({
       clinic_id: CLINIC,
       category: "retention",
-      constraint_id: "c",
+      constraint_id: `constraint.retention:${CLINIC}:${DATE}`,
       source: "declared",
       metric_key: MetricKey.FOLLOWUPS_OVERDUE,
       metric_value: null,
@@ -399,13 +412,14 @@ describe.skipIf(!LOCAL_UP)("row level security", () => {
   });
 
   it("refuses a completion written against another clinic", async () => {
-    // WITH CHECK pins clinic_id to the actor's own clinic, so a crafted request
-    // body cannot plant a row in someone else's tenant.
+    // A client has no INSERT at all (completions are written by the server after
+    // it validates the card), so a crafted request body cannot plant a row in
+    // someone else's tenant - or its own.
     const client = await clientFor(DENTIST_EMAIL);
     const { error } = await (client as any).from("action_completions").insert({
       clinic_id: OTHER_CLINIC,
       category: "retention",
-      constraint_id: "c",
+      constraint_id: `constraint.retention:${OTHER_CLINIC}:${DATE}`,
       source: "declared",
     });
     expect(error).not.toBeNull();
@@ -504,7 +518,6 @@ describe.skipIf(!LOCAL_UP)("verified completion", () => {
     await cleanupWorkTables();
     const id = await completion({
       category: "revenue_leakage",
-      constraint_id: `constraint.revenue_leakage:${CLINIC}:${DATE}`,
       metric_key: MetricKey.REVENUE_OUTSTANDING,
       metric_value: 40000,
     });
@@ -556,7 +569,6 @@ describe.skipIf(!LOCAL_UP)("verified completion", () => {
     await cleanupWorkTables();
     const id = await completion({
       category: "capacity",
-      constraint_id: `constraint.capacity:${CLINIC}:${DATE}`,
       metric_key: null,
       metric_value: null,
     });
@@ -616,7 +628,6 @@ describe.skipIf(!LOCAL_UP)("loadActionOutcomes", () => {
     const theirsId = await completion({
       clinic_id: OTHER_CLINIC,
       completed_by: OTHER_DENTIST,
-      constraint_id: `constraint.retention:${OTHER_CLINIC}:${DATE}`,
       target_patient_ids: [P_FOREIGN],
     });
 

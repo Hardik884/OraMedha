@@ -28,7 +28,7 @@
 
 import type { ClinicLedgerGraph } from "../../ledger";
 import { LedgerFactKind } from "../../ledger";
-import { daysBetween } from "../../utils";
+import { daysBetween, localDatePart } from "../../utils";
 
 export type DemandPool = "planned_treatment" | "overdue_recall";
 
@@ -65,7 +65,7 @@ const BOOKED = new Set(["scheduled", "checked_in", "in_progress"]);
  *
  * Sorted by patient id: a stable order that means nothing, which is the point.
  */
-export function waitingDemand(graph: ClinicLedgerGraph, date: string, now: string): DemandPopulation {
+export function waitingDemand(graph: ClinicLedgerGraph, date: string, now: string, timezone?: string): DemandPopulation {
   const nowMs = Date.parse(now);
   const contactable: WaitingPatient[] = [];
   let withoutUsableNumber = 0;
@@ -100,7 +100,8 @@ export function waitingDemand(graph: ClinicLedgerGraph, date: string, now: strin
       continue;
     }
 
-    const oldestPlan = planned.map((t) => t.recordedAt.slice(0, 10)).sort()[0];
+    // Ages on the clinic calendar: a plan recorded at 00:30 local belongs to that day.
+    const oldestPlan = planned.map((t) => localDatePart(t.recordedAt, timezone)).sort()[0];
     const earliestDue = overdue.map((f) => f.dueDate).sort()[0];
     contactable.push({
       patientId: patient.id,
@@ -148,7 +149,7 @@ export interface BalancePopulation {
  * across a patient's whole ledger, and naming a specific treatment as the unpaid
  * one would be a claim the payment records do not make.
  */
-export function owingPatients(graph: ClinicLedgerGraph, date: string): BalancePopulation {
+export function owingPatients(graph: ClinicLedgerGraph, date: string, timezone?: string): BalancePopulation {
   const owing: OwingPatient[] = [];
   let unanswerable = 0;
 
@@ -167,7 +168,7 @@ export function owingPatients(graph: ClinicLedgerGraph, date: string): BalancePo
     if (outstanding <= 0) continue;
 
     const latest = chargeable
-      .map((t) => (t.performedAt ?? t.recordedAt).slice(0, 10))
+      .map((t) => localDatePart(t.performedAt ?? t.recordedAt, timezone))
       .sort()
       .at(-1);
     owing.push({

@@ -37,17 +37,30 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/types/database.types";
 import {
+  addDays,
   CompletionSource,
+  EvidenceSource,
+  MetricKey,
   type ActionCompletionRecord,
+  type ClinicLearning,
+  type Finding,
   type Metric,
   type Outcome,
   type TargetVerification,
 } from "@/business-brain";
 import {
+  dedupeCompletions,
   deriveOutcomes,
+  OUTCOME_SPECS,
   OUTCOME_SPEC_BY_CATEGORY,
-  VerificationTarget,
 } from "@/business-brain/engines/outcome";
+import { deriveLearning, DEFAULT_LEARNING_CONFIG, inputsFromHistory } from "@/business-brain/engines/learning";
+import { SupabaseActionHistory } from "./action-history";
+import { readUpTo } from "./paged-read";
+import { livePatientsAt, readHistoryCaptures, readResultEvents, resultTiming } from "./result-events";
+
+/** The most result rows one verification read may return per id chunk. */
+const MAX_VERIFICATION_ROWS = 250_000;
 
 /**
  * How far back the Actions page looks for completed actions.
@@ -61,10 +74,6 @@ export const COMPLETION_LOOKBACK_DAYS = 30;
 /** Most completions assessed per load. A guard, not a page. */
 const COMPLETION_LIMIT = 50;
 
-/** Narrow `unknown` PostgREST payloads to the row shape a query selected. */
-function rows<T>(data: unknown): T[] {
-  return (data ?? []) as T[];
-}
 
 interface CompletionRow {
   id: string;
@@ -94,18 +103,21 @@ export async function readActionCompletions(
       Date.parse(now) - COMPLETION_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
     ).toISOString();
 
-    const { data, error } = await db
-      .from("action_completions")
-      .select(
-        "id, category, constraint_id, completed_at, source, target_patient_ids, metric_key, metric_value",
-      )
-      .eq("clinic_id", clinicId)
-      .gte("completed_at", since)
-      .order("completed_at", { ascending: false })
-      .limit(COMPLETION_LIMIT);
-    if (error || !data) return [];
+    const { rows: data } = await readUpTo<CompletionRow>(
+      "action_completions",
+      (from, to) =>
+        db
+          .from("action_completions")
+          .select("id, category, constraint_id, completed_at, source, target_patient_ids, metric_key, metric_value")
+          .eq("clinic_id", clinicId)
+          .gte("completed_at", since)
+          .order("completed_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to),
+      COMPLETION_LIMIT,
+    );
 
-    return rows<CompletionRow>(data).map((row) => ({
+    return data.map((row) => ({
       id: row.id,
       category: row.category,
       constraintId: row.constraint_id,
@@ -141,11 +153,13 @@ export async function verifyCompletions(
   db: SupabaseClient<Database>,
   clinicId: string,
   completions: readonly ActionCompletionRecord[],
+  now: string = new Date().toISOString(),
 ): Promise<ReadonlyMap<string, TargetVerification>> {
   const byCompletion = new Map<string, TargetVerification>();
   if (completions.length === 0) return byCompletion;
 
   try {
+    const captures = await readHistoryCaptures(db);
     for (const completion of completions) {
       const spec = OUTCOME_SPEC_BY_CATEGORY.get(completion.category);
 
@@ -162,40 +176,43 @@ export async function verifyCompletions(
         continue;
       }
 
+      const timing = resultTiming(captures, spec.verifies, completion.completedAt);
       if (completion.targetPatientIds.length === 0) {
-        byCompletion.set(completion.id, {
-          completionId: completion.id,
-          targeted: 0,
-          resolvable: 0,
-          confirmed: 0,
-          verifiable: true,
-        });
+        byCompletion.set(completion.id, { completionId: completion.id, targeted: 0, resolvable: 0, confirmed: 0, observed: 0, verifiable: true, timing });
         continue;
       }
 
-      // Which targets are still live patients in THIS clinic. Both filters
-      // matter: the clinic predicate is what stops a cross-clinic id from ever
-      // resolving, and the soft-delete filter is what keeps a deleted patient out
-      // of today's denominator.
-      const { data: live } = await db
-        .from("patients")
-        .select("id")
-        .eq("clinic_id", clinicId)
-        .is("deleted_at", null)
-        .in("id", completion.targetPatientIds);
-      const resolvable = rows<{ id: string }>(live).map((p) => p.id);
-
-      const confirmed =
+      // Which targets are live patients in THIS clinic now. The clinic predicate
+      // is what stops a cross-clinic id from ever resolving; the deletion state is
+      // what keeps a deleted patient out of today's denominator. A failed read
+      // throws, and the completion is left unverified — never "0 of 8".
+      const live = await livePatientsAt(db, clinicId, completion.targetPatientIds, now, timing);
+      const resolvable = completion.targetPatientIds.filter((id) => live.has(id));
+      const { events } =
         resolvable.length === 0
-          ? 0
-          : await countConfirmed(db, clinicId, spec.verifies, resolvable, completion.completedAt);
+          ? { events: [] }
+          : await readResultEvents(db, {
+              clinicId,
+              target: spec.verifies,
+              patientIds: resolvable,
+              since: completion.completedAt,
+              knownAt: now,
+              timing,
+              limit: MAX_VERIFICATION_ROWS,
+            });
 
+      // Distinct PATIENTS, never rows: a patient with two payments recorded is
+      // one confirmed target, and counting rows could report 9 of 8 confirmed.
+      const confirmed = new Set(events.map((e) => e.patientId));
+      const observed = new Set(events.filter((e) => e.source === EvidenceSource.OBJECTIVELY_OBSERVED).map((e) => e.patientId));
       byCompletion.set(completion.id, {
         completionId: completion.id,
         targeted: completion.targetPatientIds.length,
         resolvable: resolvable.length,
-        confirmed,
+        confirmed: confirmed.size,
+        observed: observed.size,
         verifiable: true,
+        timing,
       });
     }
   } catch (error) {
@@ -203,62 +220,6 @@ export async function verifyCompletions(
   }
 
   return byCompletion;
-}
-
-/**
- * Count targets showing the intended result since the completion moment.
- *
- * Distinct PATIENTS, never rows: a patient with two payments recorded is one
- * confirmed target, and counting rows could report 9 of 8 confirmed.
- *
- * The `since` bound is what makes this evidence rather than coincidence — a
- * payment recorded last month does not confirm work reported this morning.
- */
-async function countConfirmed(
-  db: SupabaseClient<Database>,
-  clinicId: string,
-  target: VerificationTarget,
-  patientIds: readonly string[],
-  since: string,
-): Promise<number> {
-  if (target === VerificationTarget.FOLLOW_UP_COMPLETED) {
-    const { data } = await db
-      .from("follow_ups")
-      .select("patient_id")
-      .eq("clinic_id", clinicId)
-      .in("patient_id", patientIds as string[])
-      .eq("status", "completed")
-      .is("deleted_at", null)
-      .gte("updated_at", since);
-    return distinctPatients(data);
-  }
-
-  if (target === VerificationTarget.PAYMENT_RECORDED) {
-    const { data } = await db
-      .from("payments")
-      .select("patient_id")
-      .eq("clinic_id", clinicId)
-      .in("patient_id", patientIds as string[])
-      .is("deleted_at", null)
-      .gte("created_at", since);
-    return distinctPatients(data);
-  }
-
-  // APPOINTMENT_BOOKED. Filtered to appointments that still represent a real
-  // visit: one cancelled since does not confirm that the patient was booked in.
-  const { data } = await db
-    .from("appointments")
-    .select("patient_id")
-    .eq("clinic_id", clinicId)
-    .in("patient_id", patientIds as string[])
-    .in("status", ["scheduled", "checked_in", "in_progress", "completed"])
-    .is("deleted_at", null)
-    .gte("created_at", since);
-  return distinctPatients(data);
-}
-
-function distinctPatients(data: unknown): number {
-  return new Set(rows<{ patient_id: string }>(data).map((r) => r.patient_id)).size;
 }
 
 /**
@@ -275,13 +236,84 @@ export async function loadActionOutcomes(
   now: string,
 ): Promise<readonly Outcome[]> {
   try {
-    const completions = await readActionCompletions(db, clinicId, now);
+    const completions = dedupeCompletions(await readActionCompletions(db, clinicId, now));
     if (completions.length === 0) return [];
 
-    const verifications = await verifyCompletions(db, clinicId, completions);
+    const verifications = await verifyCompletions(db, clinicId, completions, now);
     return deriveOutcomes({ completions, verifications, metrics, now }).outcomes;
   } catch (error) {
     console.error("[loadActionOutcomes]", error);
     return [];
+  }
+}
+
+/** Most rows per history kind in one learning read. A guard; a capped kind is reported. */
+const HISTORY_ROW_LIMIT = 1000;
+
+export interface ActionLearning {
+  /** The recent completions the page lists, exactly as `loadActionOutcomes` selects them. */
+  readonly outcomes: readonly Outcome[];
+  /** What this clinic's history shows, or null when it could not be read. */
+  readonly learning: ClinicLearning | null;
+}
+
+/**
+ * Read this clinic's action history once, assess every completion in it with
+ * windowed evidence and resolution, and derive what the history shows.
+ *
+ * Bounded: the learning window (180 days), a row limit per kind, and only the
+ * metric keys outcomes are judged by. Falls back to `loadActionOutcomes` — the
+ * behaviour the page had before learning existed — on any failure, so a history
+ * problem never costs the dentist the list of what they did.
+ */
+export async function loadActionLearning(
+  db: SupabaseClient<Database>,
+  clinicId: string,
+  run: { readonly date: string; readonly timezone: string; readonly metrics: readonly Metric[]; readonly findings: readonly Finding[] },
+  now: string,
+): Promise<ActionLearning> {
+  try {
+    const metricKeys = [
+      ...new Set([
+        ...OUTCOME_SPECS.flatMap((s) => (s.metricKey === null ? [] : [s.metricKey])),
+        MetricKey.APPOINTMENTS_TOTAL_TODAY,
+      ]),
+    ].sort();
+    const slice = await new SupabaseActionHistory(db, run.timezone).readActionHistory({
+      clinicId,
+      from: addDays(run.date, -(DEFAULT_LEARNING_CONFIG.windowDays - 1)),
+      to: run.date,
+      asOf: now,
+      limit: HISTORY_ROW_LIMIT,
+      metricKeys,
+    });
+    const inputs = inputsFromHistory(slice);
+    const assessed = deriveOutcomes({
+      completions: inputs.completions,
+      verifications: inputs.verifications,
+      metrics: run.metrics,
+      now,
+      history: inputs.history,
+      resolution: { date: run.date, today: run.findings, snapshots: slice.snapshots },
+    }).outcomes;
+
+    const learning = deriveLearning({
+      clinicId,
+      date: run.date,
+      timezone: run.timezone,
+      outcomes: assessed,
+      snapshots: slice.snapshots,
+      dismissals: slice.dismissals,
+      today: run.findings,
+      gaps: inputs.gaps,
+    });
+
+    // The page's list keeps its original bounds: the last 30 days, newest first, 50 at most.
+    const since = Date.parse(now) - COMPLETION_LOOKBACK_DAYS * 86_400_000;
+    const outcomes = assessed.filter((o) => Date.parse(o.completedAt) >= since).slice(0, COMPLETION_LIMIT);
+    return { outcomes, learning };
+  } catch (error) {
+    console.error("[loadActionLearning]", error);
+    return { outcomes: await loadActionOutcomes(db, clinicId, run.metrics, now), learning: null };
   }
 }

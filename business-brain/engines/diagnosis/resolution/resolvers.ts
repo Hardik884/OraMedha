@@ -156,7 +156,8 @@ const cancellationSlotClustering: DiscriminatorResolver = (ctx, input) => {
   const byHour = new Map<string, number>();
   const byType = new Map<string, number>();
   for (const r of rows) {
-    const hour = `${r.scheduledStart.slice(11, 13)}:00`;
+    // The clinic's hour, from the adapter. The ISO start's own digits are UTC.
+    const hour = r.localHour;
     byHour.set(hour, (byHour.get(hour) ?? 0) + 1);
     if (r.treatmentType !== null) byType.set(r.treatmentType, (byType.get(r.treatmentType) ?? 0) + 1);
   }
@@ -451,7 +452,10 @@ const appointmentArrivalTimes: DiscriminatorResolver = (ctx, input) => {
   const early = deltas.filter((d) => d < 0).length;
   const late = deltas.filter((d) => d > 0).length;
   const byHour = new Map<string, number>();
-  for (const r of arrived) byHour.set(`${(r.arrivedAt as string).slice(11, 13)}:00`, (byHour.get(`${(r.arrivedAt as string).slice(11, 13)}:00`) ?? 0) + 1);
+  for (const r of arrived) {
+    const hour = r.arrivalLocalHour as string;
+    byHour.set(hour, (byHour.get(hour) ?? 0) + 1);
+  }
   const top = largestBucket(byHour, arrived.length);
 
   const description =

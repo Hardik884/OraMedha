@@ -7,3 +7,5 @@
  */
 export * from "./outcome-catalog";
 export * from "./outcome-engine";
+export * from "./attribution";
+export * from "./resolution";

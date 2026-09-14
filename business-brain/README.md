@@ -150,8 +150,8 @@ business-brain/
 | `config/` | Lightweight static config: feature flags, per-engine toggles, thresholds, AI placeholder. |
 | `validation/` | Reusable input-validation helpers built on Zod. |
 | `utils/` | Cross-cutting helpers, currently the centralized logger. |
-| `services/` | *(reserved)* Orchestrates engines into pipelines. Empty in Phase 1. |
-| `repositories/` | *(reserved)* Wraps DentGrow data access for engines. Empty in Phase 1. |
+| `services/` | Orchestrates the engines into one run (`BusinessBrain`) and reports its health (`assessRunHealth`). |
+| `repositories/` | Port types only. The Supabase adapters live in `lib/business-brain/`. |
 
 ### The 11 Engines
 
@@ -206,12 +206,81 @@ envelope, new engines integrate without breaking existing ones.
 
 ---
 
-## Phase 1 Scope Confirmation
+## Production Invariants
 
-**Implemented:** folder structure, shared primitive types, engine contracts,
-configuration, centralized logger, validation utilities, documentation.
+These hold across every engine and adapter. Each is pinned by a test named here;
+a change that breaks one should break that test first.
 
-**Deliberately NOT implemented:** metrics, signals, diagnosis, constraints,
-strategy, workflows, actions, outcomes, value, learning, AI logic, dashboard
-features, background jobs, caching, event sourcing, and database queries. These
-belong to future phases.
+**Reads are whole, or they say so.** PostgREST returns at most `max_rows` (1000)
+rows however large a `.limit()` asks for, silently. Every multi-row read in
+`lib/business-brain/` pages with `.range()` over a total order through
+`paged-read.ts`: `readAll` returns everything or throws `BoundedReadError`;
+`readUpTo` returns a limit plus a `truncated` flag the engines report as a gap. A
+window too large to read whole is refused (`EntityWindowTooLargeError`), never
+sampled. `paged-read.spec.ts` forbids a bare `.limit(n > 1)` in these files;
+`bounded-reads.spec.ts` proves it on more than 1000 real rows.
+
+**A failed run is never a quiet clinic.** Empty outputs from a failed run read
+exactly like a clinic with nothing wrong. The briefing page, the compact card and
+the proposal decision all call `assessRunHealth` first and show "unavailable"
+instead; a finding snapshot is recorded only for a healthy run.
+
+**Dates are the clinic's, not the server's.** Business dates, hours and ages are
+clinic-local (`clinic_settings.timezone`), via `localDatePart` and the metric id's
+own date — never `iso.slice(0, 10)` of a UTC instant. `local-dates.spec.ts`
+covers midnight, DST, month and year ends.
+
+**A concentration must beat chance across every comparison made.** Root causes
+test rates with a one-sided Fisher exact test and minutes with a rank-sum test,
+each against a 5% family budget divided across the groups compared (Bonferroni),
+on top of the effect-size rules. `false-positives.spec.ts` runs 1000 seeded
+clinics with nothing to find per analysis and holds each at or under 6%.
+
+**The server writes evidence; the browser does not.** `action_completions` and
+`clinic_decisions` have no client INSERT. The server validates the card
+(`completion-card.ts`: this clinic, this category, the last week) and writes with
+the service role, idempotently per card; database checks pin the constraint id
+and a decision's target to the row's clinic and keep a decision's basis to codes
+and numbers. Duplicate completions of one card count once (`dedupeCompletions`).
+`rls-matrix.spec.ts` checks every Business Brain table against every role.
+
+**Memory is reproducible and fresh.** A build for a past day reads evidence as of
+the end of that day, so rebuilding later gives the same digest. Findings cite
+memory only from a build at most two days old.
+
+### History, provenance and what the past knew
+
+See **[HISTORY.md](./HISTORY.md)**. In short:
+
+- **Every change is captured.** Changes to appointments, treatments, follow-ups, payments and patient records are captured by trigger into append-only state versions, with a database-stamped `recorded_at`. Past moments are read as known then; before capture began they are unknown.
+- **Stored readings carry provenance.** Each is observed at the time, a point-in-time reconstruction, recomputed later, or unknown. A recomputation never replaces a reading measured at the time.
+- **The upper attribution rungs are guarded.** They need point-in-time readings and objectively observed results. Staff declarations are kept, labelled, and never counted as observed.
+- **`training/training-contract.ts` defines training-safe data.** There is no model.
+
+### What the database cannot tell us
+
+- **Anything before history capture began.** See HISTORY.md section 8.
+- **Whether a message was delivered or read.** Outreach is a completion a person declared, not an observed contact.
+- **When an action was actually done.** `completed_at` is when it was declared.
+- **Why a patient did not return.** Only that no later visit is recorded.
+- **Anything about a day with no snapshot.** A missing snapshot, or an empty one from before run health was tracked, is unknown, never "nothing was shown".
+
+### Known limits, not fixed here
+
+- Shared core queries the briefing's target counts and messages rely on
+  (`getOverdueFollowUps`, planned-without-visit, the `clinic_outstanding_balances`
+  RPC) are not paged. They are core-app code outside the Business Brain.
+- `getClinicConfig` falls back to defaults when `clinic_settings` cannot be read,
+  app-wide; the Business Brain's own repository throws instead.
+- The dashboard still computes cumulative totals from live rows each load.
+- No retention purge is scheduled yet for `finding_snapshots`,
+  `clinic_memory_builds`, `action_completions`, `metric_observations` or the
+  state-history tables. Each accepts one (`app.purge_context = 'retention'`), but
+  `run_retention_purge` does not include them: its table list is fixed at
+  migration time.
+- The retention purge of `metric_history` and `queue_entries` removes the current
+  view and queue rows. The observations in `metric_observations` outlive them.
+- The dentist RLS policies still permit hard DELETE on appointments, treatments,
+  follow-ups, payments and patients. A hard delete of any row with history now
+  fails, rather than erasing the history with it, but the policies themselves
+  should be dropped in favour of soft deletes.

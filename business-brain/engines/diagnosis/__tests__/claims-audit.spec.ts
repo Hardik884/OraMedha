@@ -67,6 +67,7 @@ function spreadLosses(typed: number): CancellationEvent[] {
     appointmentId: `a${i}`,
     date: "2026-05-12",
     scheduledStart: `2026-05-12T${String(3 + i).padStart(2, "0")}:00:00.000Z`,
+    localHour: `${String(3 + i).padStart(2, "0")}:00`,
     cancelledAt: null,
     noticeHours: null,
     outcome: "no_show" as const,

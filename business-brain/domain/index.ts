@@ -21,6 +21,7 @@ export * from "./opportunity";
 export * from "./finding";
 export * from "./trajectory";
 export * from "./root-cause";
+export * from "./memory";
 export * from "./action";
 export * from "./outcome";
 export * from "./learning";

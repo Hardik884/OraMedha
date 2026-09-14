@@ -9,6 +9,13 @@
  */
 
 export const FINDINGS_CONFIG = {
+  /**
+   * How many days older than the run a clinic memory build may be and still be
+   * cited. The build job runs hourly and builds each completed day; a build older
+   * than this means the job has not been running, and its "active" patterns have
+   * not been revalidated against anything recent.
+   */
+  memoryMaxBuildAgeDays: 2,
   /** Confidence at or above which evidence is called high. */
   highConfidence: 0.7,
   /** Below this, evidence is low — and a low-confidence finding loses one stakes level. */

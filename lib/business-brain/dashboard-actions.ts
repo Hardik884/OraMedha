@@ -19,6 +19,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { getClinicConfig } from "@/lib/clinic/config";
 import { isBusinessBrainEnabled } from "@/lib/feature-flags";
 import { runDashboardBrain } from "./dashboard-data";
+import { assessRunHealth } from "@/business-brain";
 import { buildBriefing } from "./briefing-view";
 import { readActiveDismissals, isSuppressed } from "./dismissals";
 
@@ -46,6 +47,13 @@ export async function loadBusinessBrainDashboardItems(): Promise<DashboardAction
 
   try {
     const run = await runDashboardBrain();
+    // An unhealthy run falls back to the legacy items, exactly like a thrown
+    // one — never an empty Business Brain card that reads as "nothing to do".
+    const health = assessRunHealth(run.result);
+    if (!health.healthy) {
+      console.error("[loadBusinessBrainDashboardItems] run unhealthy", { failedStages: health.failedStages, errorCode: health.errorCode });
+      return null;
+    }
     const supabase = await createServerClient();
 
     // Same suppression rule the full Actions page applies — a card the dentist

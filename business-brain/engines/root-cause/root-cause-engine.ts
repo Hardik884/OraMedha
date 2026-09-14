@@ -51,7 +51,34 @@ import { LedgerFactKind } from "../../ledger";
 import { addDays } from "../../utils";
 import { MetricKey } from "../metrics/metric-ids";
 import { DEFAULT_ROOT_CAUSE_CONFIG, type RootCauseConfig } from "./root-cause-config";
-import { median, quantile, round1, round2, wilson } from "./stats";
+import { fisherGreater, median, perComparisonAlpha, quantile, rankSumGreater, round1, round2 } from "./stats";
+
+/** The per-comparison threshold an analysis judges each group against, and how many comparisons share it. */
+interface Family {
+  readonly alpha: number;
+  readonly comparisons: number;
+}
+
+function familyFor(familyAlpha: number, comparisons: number): Family {
+  return { alpha: perComparisonAlpha(familyAlpha, comparisons), comparisons };
+}
+
+/** Comparisons an analysis will make: every sized group, in every analysable dimension. */
+function comparisonsIn(units: readonly Unit[], dimensions: readonly RootCauseDimension[], minGroup: number, minRest: number, minCoverage: number): number {
+  let count = 0;
+  for (const dimension of dimensions) {
+    const { recorded, coverage, groups } = partition(units, dimension);
+    if (coverage < minCoverage || groups.length < 2) continue;
+    for (const g of groups) if (g.members.length >= minGroup && recorded.length - g.members.length >= minRest) count += 1;
+  }
+  return count;
+}
+
+const formatP = (p: number) => (p < 0.001 ? "below 0.001" : p.toFixed(3));
+
+function testedLine(test: string, p: number, family: Family): string {
+  return `${test}: p = ${formatP(p)}, under the ${formatP(family.alpha)} threshold that shares a 5% chance of any false concentration across the ${family.comparisons} comparisons made.`;
+}
 
 export interface RootCauseSubject {
   readonly parentFindingId: string;
@@ -401,6 +428,7 @@ function proportionDimension(
   dimension: RootCauseDimension,
   eventNoun: string,
   unitNoun: "appointments",
+  family: Family,
 ): { result: RootCauseDimensionResult; candidates: Candidate[] } {
   const cfg = ctx.config.proportion;
   const { recorded, coverage, groups } = partition(units, dimension);
@@ -441,8 +469,11 @@ function proportionDimension(
     const restRate = er / rest.length;
     const gap = (rate - restRate) * 100;
     const ratio = restRate > 0 ? rate / restRate : null;
-    const separated = wilson(e, group.members.length, cfg.z).lower > wilson(er, rest.length, cfg.z).upper;
-    if (e < cfg.minGroupEvents || gap < cfg.minGapPoints || (ratio !== null && ratio < cfg.minRatio) || !separated) continue;
+    if (e < cfg.minGroupEvents || gap < cfg.minGapPoints || (ratio !== null && ratio < cfg.minRatio)) continue;
+    // More than chance, allowing for how many groups were compared: without this,
+    // noise alone produced a "concentration" for about one clinic in six.
+    const p = fisherGreater(e, group.members.length, er, rest.length);
+    if (p >= family.alpha) continue;
 
     const id = `${ctx.id}#${dimension}:${group.value.key}`;
     const g = stat(group.value.label, group.members);
@@ -462,7 +493,7 @@ function proportionDimension(
         evidence: [
           `${e} of ${group.members.length} ${group.value.label.toLowerCase()} appointments were ${eventNoun.replace(/ appointments$/, "")}; ${er} of ${rest.length} others were.`,
           `The group holds ${round1((e / Math.max(1, totalEvents)) * 100)}% of these events from ${round1((group.members.length / recorded.length) * 100)}% of the appointments.`,
-          `90% Wilson intervals do not overlap (group from ${round1(wilson(e, group.members.length, cfg.z).lower * 100)}%, others up to ${round1(wilson(er, rest.length, cfg.z).upper * 100)}%).`,
+          testedLine("One-sided Fisher exact test", p, family),
         ],
       },
       members: new Set(group.members.filter((u) => u.event).map((u) => u.id)),
@@ -477,7 +508,7 @@ function proportionDimension(
       ? `${candidates.length} group${candidates.length === 1 ? "" : "s"} passed every rule`
       : status === "insufficient_sample"
         ? `no group reached ${cfg.minGroupSize} ${unitNoun} with ${cfg.minComparisonSize} left to compare against`
-        : `no group differed by at least ${cfg.minGapPoints} points, ${cfg.minRatio}×, ${cfg.minGroupEvents} events and non-overlapping intervals`;
+        : `no group differed by at least ${cfg.minGapPoints} points, ${cfg.minRatio}× and ${cfg.minGroupEvents} events by more than chance across the comparisons made`;
   return { result: { dimension, status, coverage: round2(coverage), groups: stats, reason }, candidates };
 }
 
@@ -545,7 +576,8 @@ function attrition(ctx: Context): RootCauseAnalysis {
     RootCauseDimension.BOOKING_LEAD_TIME,
     RootCauseDimension.BOOKING_ORIGIN,
   ];
-  const results = dims.map((d) => proportionDimension(ctx, units, d, eventNoun, "appointments"));
+  const family = familyFor(ctx.config.familyAlpha, comparisonsIn(units, dims, cfg.minGroupSize, cfg.minComparisonSize, ctx.config.minCoverage));
+  const results = dims.map((d) => proportionDimension(ctx, units, d, eventNoun, "appointments", family));
   return summarise(ctx, population, finalise(results.flatMap((r) => r.candidates), ctx.config), results.map((r) => r.result), limitations);
 }
 
@@ -556,6 +588,7 @@ function measurementDimension(
   units: readonly Unit[],
   dimension: RootCauseDimension,
   sentence: (phrase: string, g: RootCauseGroupStat, r: RootCauseGroupStat) => string,
+  family: Family,
 ): { result: RootCauseDimensionResult; candidates: Candidate[] } {
   const cfg = ctx.config.measurement;
   const { recorded, coverage, groups } = partition(units, dimension);
@@ -594,6 +627,10 @@ function measurementDimension(
     // typical for everyone else — a few very long visits cannot carry the claim.
     const broad = quantile(values, 0.25) > median(restValues);
     if (gap < cfg.minGapMinutes || !broad) continue;
+    // More than chance across the comparisons made. The median rules alone let
+    // noise through for a quarter to a third of simulated clinics.
+    const p = rankSumGreater(values, restValues);
+    if (p >= family.alpha) continue;
 
     const g = stat(group.value.label, group.members);
     const r = stat("All other visits", rest);
@@ -612,6 +649,7 @@ function measurementDimension(
         evidence: [
           `Median ${g.median} min across ${g.n} visits (middle half ${g.lowerQuartile}–${g.upperQuartile}) against ${r.median} min across ${r.n} other visits.`,
           `At least three quarters of the group are above the others' median.`,
+          testedLine("One-sided rank-sum test", p, family),
         ],
       },
       members: new Set(group.members.map((u) => u.id)),
@@ -693,7 +731,11 @@ function overrun(ctx: Context): RootCauseAnalysis {
   const sentence = (phrase: string, g: RootCauseGroupStat, r: RootCauseGroupStat) =>
     `Overruns are concentrated in ${phrase}: a median of ${g.median} minutes over the booked time (${g.n} visits) versus ${r.median} minutes (${r.n} other visits).`;
   const dims = [RootCauseDimension.TREATMENT_TYPE, RootCauseDimension.BOOKED_DURATION, RootCauseDimension.DAY_OF_WEEK, RootCauseDimension.SESSION];
-  const results = dims.map((d) => measurementDimension(ctx, units, d, sentence));
+  const family = familyFor(
+    ctx.config.familyAlpha,
+    comparisonsIn(units, dims, ctx.config.measurement.minGroupSize, ctx.config.measurement.minComparisonSize, ctx.config.minCoverage),
+  );
+  const results = dims.map((d) => measurementDimension(ctx, units, d, sentence, family));
   return summarise(ctx, population, finalise(results.flatMap((r) => r.candidates), ctx.config), results.map((r) => r.result), limitations);
 }
 
@@ -776,7 +818,11 @@ function waiting(ctx: Context): RootCauseAnalysis {
   const sentence = (phrase: string, g: RootCauseGroupStat, r: RootCauseGroupStat) =>
     `Longer waits are associated with ${phrase}: a median wait of ${g.median} minutes (${g.n} visits) versus ${r.median} minutes (${r.n} other visits).`;
   const dims = [RootCauseDimension.DAY_DENSITY, RootCauseDimension.ARRIVAL_PUNCTUALITY, RootCauseDimension.DAY_OF_WEEK, RootCauseDimension.SESSION];
-  const results = dims.map((d) => measurementDimension(ctx, units, d, sentence));
+  const family = familyFor(
+    ctx.config.familyAlpha,
+    comparisonsIn(units, dims, ctx.config.measurement.minGroupSize, ctx.config.measurement.minComparisonSize, ctx.config.minCoverage),
+  );
+  const results = dims.map((d) => measurementDimension(ctx, units, d, sentence, family));
   return summarise(ctx, population, finalise(results.flatMap((r) => r.candidates), ctx.config), results.map((r) => r.result), limitations);
 }
 
@@ -846,6 +892,7 @@ function idleCapacity(ctx: Context): RootCauseAnalysis {
     occurrences: readonly Occurrence[],
     keyOf: (o: Occurrence) => { key: string; label: string; phrase: string },
     unit: "days" | "sessions",
+    family: Family,
   ): { result: RootCauseDimensionResult; candidates: Candidate[] } => {
     const groups = new Map<string, { value: { key: string; label: string; phrase: string }; members: Occurrence[] }>();
     for (const o of occurrences) {
@@ -884,6 +931,13 @@ function idleCapacity(ctx: Context): RootCauseAnalysis {
       const gap = restMedian - groupMedian;
       const consistent = group.members.filter((o) => o.utilization < restMedian).length / group.members.length >= cfg.consistency;
       if (gap < cfg.minGapPoints || !consistent) continue;
+      // Lower than chance allows, across every day and session compared: day-to-day
+      // swings alone passed the median rules for most simulated clinics.
+      const p = rankSumGreater(
+        group.members.map((o) => -o.utilization),
+        rest.map((o) => -o.utilization),
+      );
+      if (p >= family.alpha) continue;
       const g = stat(group.value.label, group.members);
       const r = stat(`All other ${unit}`, rest);
       candidates.push({
@@ -901,6 +955,7 @@ function idleCapacity(ctx: Context): RootCauseAnalysis {
           evidence: [
             `Per-${unit.slice(0, -1)} booked share for the group: ${group.members.map((o) => `${round1(o.utilization)}%`).join(", ")}.`,
             `${Math.round(cfg.consistency * 100)}% or more of the group's ${unit} sit below the others' median of ${round1(restMedian)}%.`,
+            testedLine("One-sided rank-sum test", p, family),
           ],
         },
         members: new Set(group.members.map((o) => o.id.split("#")[0])),
@@ -914,16 +969,25 @@ function idleCapacity(ctx: Context): RootCauseAnalysis {
         ? `${candidates.length} group${candidates.length === 1 ? "" : "s"} passed every rule`
         : status === "insufficient_sample"
           ? `no group had ${cfg.minOccurrences} ${unit} with ${cfg.minComparisonOccurrences} others to compare against`
-          : `no group's median booked share was ${cfg.minGapPoints} points lower with most of its ${unit} below the others`;
+          : `no group's median booked share was ${cfg.minGapPoints} points lower, with most of its ${unit} below the others, by more than chance`;
     return { result: { dimension, status, coverage: 1, groups: stats, reason }, candidates };
   };
 
+  const dayKey = (o: Occurrence) => ({ key: String((o.weekday + 6) % 7), label: DAY_NAMES[o.weekday], phrase: `${DAY_NAMES[o.weekday]}s` });
+  const sessionKey = (o: Occurrence) => {
+    const s = session([0, 720, 1020][o.session ?? 0], "sessions");
+    return { key: s.key, label: s.label, phrase: s.phrase };
+  };
+  const sizedGroups = (occurrences: readonly Occurrence[], keyOf: (o: Occurrence) => { key: string }) => {
+    const counts = new Map<string, number>();
+    for (const o of occurrences) counts.set(keyOf(o).key, (counts.get(keyOf(o).key) ?? 0) + 1);
+    if (counts.size < 2) return 0;
+    return [...counts.values()].filter((n) => n >= cfg.minOccurrences && occurrences.length - n >= cfg.minComparisonOccurrences).length;
+  };
+  const family = familyFor(ctx.config.familyAlpha, sizedGroups(days, dayKey) + sizedGroups(sessions, sessionKey));
   const results = [
-    analyse(RootCauseDimension.DAY_OF_WEEK, days, (o) => ({ key: String((o.weekday + 6) % 7), label: DAY_NAMES[o.weekday], phrase: `${DAY_NAMES[o.weekday]}s` }), "days"),
-    analyse(RootCauseDimension.SESSION, sessions, (o) => {
-      const s = session([0, 720, 1020][o.session ?? 0], "sessions");
-      return { key: s.key, label: s.label, phrase: s.phrase };
-    }, "sessions"),
+    analyse(RootCauseDimension.DAY_OF_WEEK, days, dayKey, "days", family),
+    analyse(RootCauseDimension.SESSION, sessions, sessionKey, "sessions", family),
   ];
   return summarise(ctx, population, finalise(results.flatMap((r) => r.candidates), ctx.config), results.map((r) => r.result), limitations);
 }

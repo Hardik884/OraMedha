@@ -37,8 +37,6 @@
 import {
   ConstraintCategory,
   type Constraint,
-  type Metric,
-  type Value,
   type Workflow,
   type WorkflowTask,
   type WorkflowOutcome,

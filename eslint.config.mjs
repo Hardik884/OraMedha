@@ -40,6 +40,16 @@ const PURE_ENGINE_FILES = [
   // clock, no model — and nothing that could quietly become a forecast.
   "business-brain/engines/trajectory/**/*.ts",
   "business-brain/engines/root-cause/**/*.ts",
+  "business-brain/engines/learning/**/*.ts",
+  "business-brain/engines/outcome/**/*.ts",
+  // Clinic memory is derived from stored evidence. It may never read a database,
+  // a clock or a model: a memory that queried for itself could not be rebuilt.
+  "business-brain/memory/**/*.ts",
+  // Point-in-time history, provenance and the training contract decide what the
+  // past knew. A module that could read a clock or a database could not.
+  "business-brain/history/**/*.ts",
+  "business-brain/provenance/**/*.ts",
+  "business-brain/training/**/*.ts",
 ];
 
 const FORBIDDEN_IMPORT_PATTERNS = [

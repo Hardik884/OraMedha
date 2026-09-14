@@ -460,7 +460,7 @@ describe("generateSignals — confidence suppression", () => {
     const staleTimestamp = "2026-07-20T10:00:00.000Z";
     const result = evaluateSignals(
       {
-        metrics: metrics({ [MetricKey.FOLLOWUPS_OVERDUE]: 40 }, { timestamp: staleTimestamp }),
+        metrics: metrics({ [MetricKey.FOLLOWUPS_OVERDUE]: 40 }, { date: "2026-07-20", timestamp: staleTimestamp }),
         clinicId: CLINIC_ID,
         date: DATE,
         now: NOW,
@@ -478,12 +478,25 @@ describe("generateSignals — confidence suppression", () => {
     const signals = generateSignals({
       metrics: metrics(
         { [MetricKey.FOLLOWUPS_OVERDUE]: 40, [MetricKey.FOLLOWUPS_DUE_TODAY]: 2 },
-        { timestamp: "2026-07-20T10:00:00.000Z" },
+        { date: "2026-07-20", timestamp: "2026-07-20T10:00:00.000Z" },
       ),
       clinicId: CLINIC_ID,
       date: DATE,
       now: NOW,
     });
     expect(signals[0].confidence).toBe(0.8);
+  });
+
+  it("does not treat a metric for today as stale because its UTC instant falls on the previous calendar day", () => {
+    // 01:00 in Asia/Kolkata on DATE is 19:30 UTC the day before. The metric
+    // describes DATE — its id says so — and must not be docked for the offset.
+    const previousUtcDay = `${new Date(Date.parse(`${DATE}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10)}T19:30:00.000Z`;
+    const signals = generateSignals({
+      metrics: metrics({ [MetricKey.FOLLOWUPS_OVERDUE]: 40, [MetricKey.FOLLOWUPS_DUE_TODAY]: 2 }, { timestamp: previousUtcDay }),
+      clinicId: CLINIC_ID,
+      date: DATE,
+      now: NOW,
+    });
+    expect(signals[0].confidence).toBe(1);
   });
 });

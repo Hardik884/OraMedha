@@ -14,6 +14,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database.types";
 import { createServerClient } from "@/lib/supabase/server";
 import { getClinicConfig } from "@/lib/clinic/config";
+import { resolveSession } from "@/lib/auth/session";
+import { isBusinessBrainEnabled } from "@/lib/feature-flags";
 import { getTodayInTimezone } from "@/lib/utils";
 import { addDays } from "@/business-brain";
 import { BusinessBrain, type BusinessBrainResult } from "@/business-brain";
@@ -21,6 +23,7 @@ import { SupabaseMetricsDataRepository } from "./metrics-repository";
 import { SupabaseMetricHistoryStore } from "./metric-history-store";
 import { SupabaseClinicLedger } from "./clinic-ledger";
 import { recordRecomputedHistory } from "./persist-metrics";
+import { readLatestClinicMemory } from "./clinic-memory";
 
 /**
  * Days of history loaded per run.
@@ -80,6 +83,14 @@ export interface DashboardRun {
  *             timezone — not the server's.
  */
 export async function runDashboardBrain(date?: string): Promise<DashboardRun> {
+  // Defence in depth. Every caller sits behind a dentist route, but this reads
+  // business performance a receptionist has no access to anywhere else, and RLS
+  // would hand a non-dentist session empty dentist-only tables that read as a
+  // quiet clinic. The guard belongs with the read, not only at the door.
+  const { profile } = await resolveSession();
+  if (!profile || profile.role !== "dentist" || !isBusinessBrainEnabled(profile.clinic_id)) {
+    throw new Error("The Business Brain is available to this clinic's dentist only.");
+  }
   const { clinicId, timezone } = await getClinicConfig();
   const businessDate = date ?? getTodayInTimezone(timezone);
 
@@ -100,7 +111,12 @@ export async function runDashboardBrain(date?: string): Promise<DashboardRun> {
     ledgerPort: new SupabaseClinicLedger(supabase, timezone),
   });
 
+  // This clinic's latest memory build: one row, built by the scheduled job. Cited
+  // in explanations when an active entry supports a finding; never ranked on.
+  const memory = await readLatestClinicMemory(supabase, clinicId);
+
   const result = await brain.runBusinessBrain(clinicId, businessDate, {
+    memory,
     historyDays: HISTORY_DAYS,
     maxRecomputedHistoryDays: MAX_RECOMPUTED_HISTORY_DAYS,
     // Only a run for today can describe time still ahead. A caller asking about a

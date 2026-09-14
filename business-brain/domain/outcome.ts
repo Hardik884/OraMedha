@@ -29,6 +29,7 @@
  * the arrow is not.
  */
 
+import type { CompletionTimeMeaning, EvidenceSource, EvidenceTiming } from "../provenance/evidence-quality";
 import type { Value } from "./value";
 
 /**
@@ -67,15 +68,22 @@ export type CompletionSource = (typeof CompletionSource)[keyof typeof Completion
 /**
  * How strongly the evidence connects the action to what followed.
  *
- * Only the first two rungs exist. The ladder is deliberately designed with room
- * above them — `likely_contributed` needs a baseline's normal-variation test and
- * entity concentration, `strong_evidence` needs repetition across periods — but
- * neither is implemented, and an Outcome may not report them.
+ * Four rungs. The first two describe ONE completion against the metric today; the
+ * upper two are reached only through the explicit, windowed evidence requirements
+ * in `engines/outcome/attribution.ts`, and only when the caller supplies the
+ * clinic's own measured history.
  *
- * The ladder only ever climbs. A worsening is NEVER attributed to an action:
- * the data cannot support the claim in either direction, and the harm of telling
- * a clinic their work made things worse far exceeds the benefit of occasionally
- * being right.
+ * None of them is a causal claim. There is no control group and no
+ * randomisation, so no amount of evidence here licenses "caused": the strongest
+ * wording anywhere is "repeatedly associated with".
+ *
+ * Nothing climbs because time passed. Evidence is read at a fixed horizon after
+ * the completion; waiting longer changes nothing, and a window that has not
+ * closed cannot reach either upper rung.
+ *
+ * A worsening is NEVER attributed to an action, in either direction of the
+ * ladder: the harm of telling a clinic its work made things worse far exceeds the
+ * benefit of occasionally being right.
  */
 export const OutcomeAttribution = {
   /**
@@ -91,6 +99,22 @@ export const OutcomeAttribution = {
    * Makes no causal claim. "Observed after" is the whole of the assertion.
    */
   OBSERVED_AFTER: "observed_after",
+  /**
+   * Every windowed requirement held for this completion: the headline metric
+   * moved beyond this clinic's normal variation within the fixed horizon, the
+   * targeted patients show the intended result, the movement is concentrated in
+   * them, and no competing explanation was found.
+   *
+   * Still an association. "Likely contributed" says the evidence is consistent
+   * with the action playing a part, not that it did.
+   */
+  LIKELY_CONTRIBUTED: "likely_contributed",
+  /**
+   * This completion met the likely-contributed standard AND so did earlier
+   * comparable completions at this clinic, consistently, across separate weeks.
+   * Repetition within one clinic, never a benchmark across clinics.
+   */
+  STRONG_EVIDENCE: "strong_evidence",
 } as const;
 
 export type OutcomeAttribution =
@@ -137,8 +161,16 @@ export interface TargetVerification {
   readonly targeted: number;
   /** Of those, how many still resolve to a live patient in this clinic. */
   readonly resolvable: number;
-  /** Of the resolvable targets, how many show the intended result. */
+  /** Of the resolvable targets, how many show the intended result, on any kind of record. */
   readonly confirmed: number;
+  /**
+   * Of those, how many show it on a record of the event itself (a payment row, a
+   * booking, a follow-up closed alongside an attended visit) rather than on a
+   * staff member's say-so. Absent means the kind was not determined.
+   */
+  readonly observed?: number;
+  /** How the results were read: as known at the moment, or from current rows. Absent means unknown. */
+  readonly timing?: EvidenceTiming;
   /**
    * False when this category's intended result is not something the schema can
    * confirm at all.
@@ -199,8 +231,152 @@ export interface Outcome {
   readonly metric?: OutcomeMetricMovement;
   /** Why the attribution landed where it did. Factual; never advisory. */
   readonly reasoning: string;
+  /**
+   * The windowed evidence behind the rung, when the caller supplied history.
+   * Absent otherwise — and then the rung is exactly what it always was.
+   */
+  readonly evidence?: AttributionEvidence;
+  /**
+   * What became of the finding the action answered, when recorded runs since the
+   * completion allow it to be said. Completing an action never implies this.
+   */
+  readonly resolution?: FindingResolution;
   /** Optional realised value. Never produced in this tranche. */
   readonly value?: Value;
   /** ISO-8601 timestamp of when the outcome was assessed. Injected. */
   readonly recordedAt: string;
+  /**
+   * What kind of evidence each half of the outcome rests on. Always present, so
+   * no consumer can mistake a staff declaration for an observed result by
+   * reading around it.
+   */
+  readonly evidenceQuality: OutcomeEvidenceQuality;
+}
+
+/** The evidence behind an outcome, by kind and by when it was known. */
+export interface OutcomeEvidenceQuality {
+  /** The action itself: a staff declaration, or derived from clinic data. */
+  readonly completion: EvidenceSource;
+  /** What `completedAt` records: when Done was pressed, never when the work was done. */
+  readonly completionTime: CompletionTimeMeaning;
+  /**
+   * The targets' results, when a population was checked: how many rest on a
+   * record of the event, how many on a staff record or an unstated one, and how
+   * they were read. Null when nothing could be checked.
+   */
+  readonly results: {
+    readonly objectivelyObserved: number;
+    readonly notObserved: number;
+    readonly timing: EvidenceTiming;
+  } | null;
+  /** Whether everything the upper rungs rest on was on record by the moment it stands for. */
+  readonly pointInTime: boolean;
+}
+
+// ── Windowed evidence ─────────────────────────────────────────────────────────
+
+/** One requirement of the attribution ladder, and whether it held. */
+export interface AttributionRequirement {
+  readonly key:
+    | "window_closed"
+    | "metric_measured_at_horizon"
+    | "baseline_established"
+    | "beyond_normal_variation"
+    | "targets_sufficient"
+    | "targets_confirmed"
+    | "concentrated_in_targets"
+    | "competing_explanations_checked"
+    | "no_competing_explanation"
+    | "data_complete"
+    | "evidence_point_in_time"
+    | "repeated_across_comparable_actions"
+    | "consistent_across_comparable_actions"
+    | "spread_across_weeks";
+  /** True held, false did not, null could not be determined (and so did not hold). */
+  readonly met: boolean | null;
+  readonly detail: string;
+}
+
+/** Something other than the action that could account for what followed. */
+export interface CompetingExplanation {
+  readonly kind: "pre_existing_trend" | "overlapping_action" | "simultaneous_shift";
+  readonly detail: string;
+}
+
+export interface AttributionEvidence {
+  /** Days after completion at which the evidence is read. Fixed per category. */
+  readonly horizonDays: number | null;
+  /** ISO-8601 end of the window, or null when the category has no horizon. */
+  readonly windowEndsAt: string | null;
+  /** "open" until the horizon has passed; nothing above observed_after before then. */
+  readonly window: "open" | "closed" | "not_applicable";
+  readonly metric: {
+    readonly key: string;
+    readonly atCompletion: number;
+    /** The stored reading at the horizon (within tolerance), or null when absent. */
+    readonly atHorizon: number | null;
+    readonly horizonDate: string | null;
+    /** Helpful-direction change at the horizon; negative when it worsened. */
+    readonly improvement: number | null;
+    /** Half-width of this clinic's normal band before the completion, or null. */
+    readonly normalVariation: number | null;
+    /** Stored days the band rests on. */
+    readonly baselineDays: number;
+  } | null;
+  readonly targets: {
+    readonly verifiable: boolean;
+    readonly resolvable: number;
+    /** Targets showing the intended result within the horizon. */
+    /** Targets whose result within the horizon is on a record of the event itself. */
+    readonly confirmedWithinWindow: number;
+    /** Targets whose result within the horizon rests only on a staff record, or an unstated one. Never counted. */
+    readonly declaredWithinWindow: number;
+    /** Median days from completion to the result, across confirmed targets. */
+    readonly medianDaysToResult: number | null;
+    /** Days from completion to each result within the horizon, ascending. No patient beside them. */
+    readonly daysToResult: readonly number[];
+  } | null;
+  readonly competing: readonly CompetingExplanation[];
+  readonly requirements: readonly AttributionRequirement[];
+  /** Earlier comparable completions at this clinic whose evidence was read. */
+  readonly comparable: {
+    readonly assessable: number;
+    readonly likelyContributed: number;
+    readonly distinctWeeks: number;
+  };
+  /**
+   * How far the evidence supports the rung. Reduced by competing explanations and
+   * gaps; data completeness, never a probability that the action worked.
+   */
+  readonly confidence: number;
+}
+
+// ── Resolution ────────────────────────────────────────────────────────────────
+
+export const ResolutionStatus = {
+  /** The finding is still flagged, with no sign of improvement. */
+  STILL_ACTIVE: "still_active",
+  /** Still flagged, but less severely or with its metric recovering. */
+  IMPROVING: "improving",
+  /** Absent on enough consecutive recorded days since the completion. */
+  RESOLVED: "resolved",
+  /** The action's intended result was observed, and the finding is still flagged. */
+  OUTCOME_OBSERVED_UNRESOLVED: "outcome_observed_unresolved",
+  /** Too few recorded days since the completion to say. */
+  INSUFFICIENT_EVIDENCE: "insufficient_evidence",
+} as const;
+
+export type ResolutionStatus = (typeof ResolutionStatus)[keyof typeof ResolutionStatus];
+
+export interface FindingResolution {
+  readonly status: ResolutionStatus;
+  /** The finding the action answered, `finding.<kind>:<constraintId>`. */
+  readonly parentFindingId: string;
+  /** Recorded days (snapshots and today) after the completion date. */
+  readonly observedDays: number;
+  /** Most recent recorded day on which the category was flagged, or null. */
+  readonly lastFlaggedOn: string | null;
+  /** Consecutive most-recent recorded days on which it was not flagged. */
+  readonly consecutiveClearDays: number;
+  readonly statement: string;
 }

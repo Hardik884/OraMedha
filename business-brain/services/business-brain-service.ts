@@ -60,7 +60,8 @@ import type { DiagnosisContextPort, EntityWindow } from "../engines/diagnosis";
 import { deriveOpportunities } from "../engines/opportunity";
 import { normalizeFindings, prioritizeFindings, type FindingSources } from "../engines/findings";
 import { deriveRootCauses, rootCauseSubjects, DEFAULT_ROOT_CAUSE_CONFIG } from "../engines/root-cause";
-import type { RootCauseAnalysis } from "../domain";
+import type { ClinicMemory, RootCauseAnalysis } from "../domain";
+import { ClinicMemoryReader } from "../memory";
 import { deriveTrajectories } from "../engines/trajectory";
 import type { MetricTrajectory } from "../domain";
 import type { PrioritizedFindings } from "../domain";
@@ -78,11 +79,12 @@ import {
  *
  * A month gives cancellation timing and pending-plan ageing something to be a
  * distribution over; a single day would make every resolver fall below its
- * minimum sample. The row cap is a guard, not a page: a clinic exceeding it has
- * a bigger problem than a truncated discriminator.
+ * minimum sample. The row cap is a guard: a window with more rows than it is
+ * refused by the adapter rather than answered from part of the window, which
+ * leaves the discriminator undetermined. Sized for about 66 visits a day.
  */
 const ENTITY_WINDOW_DAYS = 30;
-const ENTITY_ROW_LIMIT = 500;
+const ENTITY_ROW_LIMIT = 2000;
 
 /**
  * Opportunity reads. The forward window matches the engine's default and
@@ -134,6 +136,41 @@ export const BusinessBrainStageName = {
 } as const;
 export type BusinessBrainStageName =
   (typeof BusinessBrainStageName)[keyof typeof BusinessBrainStageName];
+
+/**
+ * Whether a run's output may be presented as a reading of the clinic.
+ *
+ * `runBusinessBrain` never throws: a failed stage is recorded and the run stops
+ * or degrades. That is right for auditability and wrong for presentation — a
+ * metrics stage that could not read the clinic yields no metrics, no signals and
+ * no findings, and a briefing drawn from that is a healthy clinic with nothing to
+ * do. Every presentation, and every record of what was shown, must ask this
+ * first.
+ *
+ * A run is healthy only when every stage executed and succeeded. Derived outputs
+ * (opportunities, root causes, trajectories, memory) degrade on their own terms
+ * and say so; they do not make a run unhealthy.
+ */
+export interface RunHealth {
+  readonly healthy: boolean;
+  /** Stages that did not execute or did not succeed, in pipeline order. */
+  readonly failedStages: readonly BusinessBrainStageName[];
+  /** The first recorded error code, when there is one. Never patient data. */
+  readonly errorCode: string | null;
+}
+
+export function assessRunHealth(result: Pick<BusinessBrainResult, "ok" | "error" | "execution">): RunHealth {
+  const required = Object.values(BusinessBrainStageName);
+  const failedStages = required.filter((name) => {
+    const stage = result.execution.stages.find((s) => s.stage === name);
+    return stage === undefined || !stage.executed || !stage.ok;
+  });
+  return {
+    healthy: result.ok && failedStages.length === 0,
+    failedStages,
+    errorCode: result.error?.code ?? null,
+  };
+}
 
 /** What happened in one stage. Recorded whether it succeeded or not. */
 export interface BusinessBrainStage {
@@ -438,6 +475,12 @@ export interface RunBusinessBrainOptions {
    * finding asks. A run with nothing to explain reads nothing.
    */
   readonly rootCauses?: { readonly now: string; readonly timezone: string };
+  /**
+   * This clinic's most recent memory build, read by the caller in one bounded
+   * read. Explanations may cite it; no ranking factor reads it. A build for
+   * another clinic is refused.
+   */
+  readonly memory?: ClinicMemory | null;
   readonly requestedBy?: string;
   readonly role?: string;
 }
@@ -529,11 +572,27 @@ export class BusinessBrain {
     // run already has, and consumed by nothing downstream.
     let baselines: readonly MetricBaseline[] = [];
     let achievements: readonly Achievement[] = [];
+    // Assigned once, below — but read by `finish`, which the failure paths call
+    // before that line runs, so it cannot be a const.
+    // eslint-disable-next-line prefer-const
     let comparison: BusinessBrainComparison | undefined;
     let trajectories: readonly MetricTrajectory[] = [];
     let opportunities: readonly Opportunity[] = [];
     let opportunityAssessments: readonly OpportunityAssessment[] = [];
     let rootCauses: readonly RootCauseAnalysis[] = [];
+    // Memory is supporting evidence: one that fails its tenant check is refused and
+    // logged, and the run continues without it rather than failing.
+    let memoryReader: ClinicMemoryReader | undefined;
+    if (options.memory !== undefined) {
+      try {
+        memoryReader = ClinicMemoryReader.for(clinicId, options.memory);
+      } catch (error) {
+        this.log.warn("Business Brain refused a clinic memory", {
+          clinicId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const finish = (
       fields: Pick<BusinessBrainResult, "metrics" | "signals" | "diagnoses" | "trace"> & {
         error?: EngineError;
@@ -555,6 +614,7 @@ export class BusinessBrain {
           achievements,
           trajectories,
           rootCauses,
+          ...(memoryReader === undefined ? {} : { memory: memoryReader }),
         },
         // The run's logical moment, so the same run always ranks the same way.
         now: startedAt,
@@ -956,9 +1016,14 @@ export class BusinessBrain {
         // treats an unsupplied day as unknown, never as a healthy one.
         if (!recomputable.has(day)) return null;
         try {
-          const measured = {
+          // The knowledge the day was measured with travels with it, so a caller
+          // storing it can say whether it was read as of that day or as of now.
+          const { metrics, knowledge, timezone } = await this.metricsEngine.measureDay(clinicId, day);
+          const measured: MetricsOnlyDay = {
             date: day,
-            metrics: await this.metricsEngine.calculateMetrics(clinicId, day),
+            metrics,
+            ...(knowledge === undefined ? {} : { knowledge }),
+            ...(timezone === undefined ? {} : { timezone }),
           };
           recomputed.push(measured);
           return measured;

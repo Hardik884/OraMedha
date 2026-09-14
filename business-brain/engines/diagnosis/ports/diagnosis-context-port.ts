@@ -82,6 +82,12 @@ export interface CancellationEvent {
   readonly treatmentType: string | null;
   /** Whether another appointment subsequently occupied the slot. */
   readonly slotRefilled: boolean;
+  /**
+   * The scheduled start's hour in the CLINIC's timezone, "HH:00". Supplied by the
+   * adapter, which knows the timezone: the ISO start is a UTC instant, and its
+   * hour digits are not the clinic's hour anywhere but UTC.
+   */
+  readonly localHour: string;
 }
 
 /**
@@ -143,6 +149,8 @@ export interface AppointmentArrivalRow {
   readonly scheduledStart: string;
   /** ISO-8601 arrival, or null when no arrival was recorded. */
   readonly arrivedAt: string | null;
+  /** The arrival's hour in the clinic's timezone, "HH:00", or null without an arrival. */
+  readonly arrivalLocalHour: string | null;
   /** Minutes early (negative) or late (positive); null without an arrival. */
   readonly arrivalDeltaMinutes: number | null;
   /** ISO-8601 moment the patient was seen, when recorded. */

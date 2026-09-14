@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ClinicDataSnapshot, MetricsDataRepository } from "../../repositories";
-import { BUSINESS_BRAIN_VERSION, BusinessBrain } from "../business-brain-service";
+import { assessRunHealth, BUSINESS_BRAIN_VERSION, BusinessBrain, BusinessBrainStageName } from "../business-brain-service";
 import type { Logger } from "../../utils";
 
 const CLINIC = "clinic_orch";
@@ -174,6 +174,69 @@ describe("BusinessBrain orchestration", () => {
       expect(result.error?.code).toBe("BUSINESS_BRAIN_INVALID_DATE");
       expect(repo.calls).toEqual([]);
     });
+  });
+
+  describe("run health", () => {
+    // A failed run carries empty outputs, and empty outputs read exactly like a
+    // clinic with nothing wrong. Every surface that renders or records a run asks
+    // this first.
+    it("calls a run healthy only when every stage executed and succeeded", async () => {
+      const result = await brainWith(new RecordingRepository()).runBusinessBrain(CLINIC, DATE, { startedAt: STARTED_AT });
+      expect(assessRunHealth(result)).toEqual({ healthy: true, failedStages: [], errorCode: null });
+    });
+
+    it("calls a run whose data could not be read unhealthy, naming every stage it lost", async () => {
+      const result = await brainWith(new RecordingRepository(new Error("connection refused"))).runBusinessBrain(CLINIC, DATE, { startedAt: STARTED_AT });
+      const health = assessRunHealth(result);
+      expect(health.healthy).toBe(false);
+      expect(health.errorCode).toBe("METRICS_DATA_UNAVAILABLE");
+      // Including the stages a failed run never records at all.
+      expect(health.failedStages).toEqual(Object.values(BusinessBrainStageName));
+    });
+
+    it("calls a run unhealthy when a stage is missing, or ran and failed, even if the run says ok", async () => {
+      const result = await brainWith(new RecordingRepository()).runBusinessBrain(CLINIC, DATE, { startedAt: STARTED_AT });
+      const [first, ...rest] = result.execution.stages;
+      expect(assessRunHealth({ ...result, execution: { ...result.execution, stages: rest } }).failedStages).toEqual([first.stage]);
+      const failed = result.execution.stages.map((s, i) => (i === 3 ? { ...s, ok: false } : s));
+      expect(assessRunHealth({ ...result, execution: { ...result.execution, stages: failed } })).toMatchObject({ healthy: false, failedStages: [failed[3].stage] });
+      expect(assessRunHealth({ ...result, ok: false }).healthy).toBe(false);
+    });
+
+    it("calls a malformed date unhealthy", async () => {
+      const result = await brainWith(new RecordingRepository()).runBusinessBrain(CLINIC, "2026-02-30", { startedAt: STARTED_AT });
+      expect(assessRunHealth(result)).toMatchObject({ healthy: false, errorCode: "BUSINESS_BRAIN_INVALID_DATE" });
+    });
+  });
+
+  it("gives the same answer however the database happened to order its rows", async () => {
+    // PostgREST promises no order without ORDER BY, and paging reorders ties.
+    // Nothing downstream may depend on it.
+    const reversed: MetricsDataRepository = {
+      async getClinicSnapshot(clinicId, date) {
+        const s = snapshotFor(clinicId, date);
+        return {
+          ...s,
+          appointmentsToday: [...s.appointmentsToday].reverse(),
+          patientsSeenToday: [...s.patientsSeenToday].reverse(),
+          treatments: [...s.treatments, { id: "t0", cost: 1500, status: "completed", performedAt: `${date}T04:30:00.000Z`, isScheduled: false }].reverse(),
+          queueToday: [...s.queueToday].reverse(),
+        };
+      },
+    };
+    const forward: MetricsDataRepository = {
+      async getClinicSnapshot(clinicId, date) {
+        const s = snapshotFor(clinicId, date);
+        return { ...s, treatments: [...s.treatments, { id: "t0", cost: 1500, status: "completed", performedAt: `${date}T04:30:00.000Z`, isScheduled: false }] };
+      },
+    };
+    const a = await brainWith(forward).runBusinessBrain(CLINIC, DATE, { startedAt: STARTED_AT, correlationId: "c" });
+    const b = await brainWith(reversed).runBusinessBrain(CLINIC, DATE, { startedAt: STARTED_AT, correlationId: "c" });
+    expect(b.metrics).toEqual(a.metrics);
+    expect(b.signals).toEqual(a.signals);
+    expect(b.diagnoses).toEqual(a.diagnoses);
+    expect(b.constraints).toEqual(a.constraints);
+    expect(b.actionPlans).toEqual(a.actionPlans);
   });
 
   describe("history", () => {

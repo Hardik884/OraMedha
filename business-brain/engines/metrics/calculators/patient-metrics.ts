@@ -4,13 +4,13 @@
 
 import type { Metric } from "../../../domain";
 import type { ClinicDataSnapshot } from "../../../repositories";
-import { addDays } from "../../../utils";
+import { addDays, localDatePart } from "../../../utils";
 import { METRIC_WINDOWS } from "../config/metric-windows";
 import { MetricKey, buildMetric } from "../metric-ids";
 
-/** Returns the "YYYY-MM-DD" calendar date portion of an ISO timestamp. */
-function toDatePart(iso: string): string {
-  return iso.slice(0, 10);
+/** The clinic-local business date of an ISO timestamp in this snapshot. */
+function toDatePart(iso: string, s: ClinicDataSnapshot): string {
+  return localDatePart(iso, s.timezone);
 }
 
 /** New patients today — records created on the target date. */
@@ -32,7 +32,7 @@ export function newPatientsToday(s: ClinicDataSnapshot): Metric {
 export function returningPatientsToday(s: ClinicDataSnapshot): Metric {
   const seen = new Set<string>();
   for (const p of s.patientsSeenToday) {
-    if (toDatePart(p.createdAt) < s.date) {
+    if (toDatePart(p.createdAt, s) < s.date) {
       seen.add(p.id);
     }
   }
@@ -72,7 +72,7 @@ export function reactivationCandidates(s: ClinicDataSnapshot): Metric | null {
   const value = roster.filter(
     (p) =>
       p.lastVisit !== null &&
-      p.lastVisit.slice(0, 10) < cutoff &&
+      toDatePart(p.lastVisit, s) < cutoff &&
       !p.hasUpcomingAppointment,
   ).length;
   return buildMetric(

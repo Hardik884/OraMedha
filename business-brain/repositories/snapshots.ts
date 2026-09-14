@@ -10,6 +10,8 @@
  * rows into these snapshots. This phase only defines the shape and consumes it.
  */
 
+import type { SnapshotKnowledge } from "../provenance/metric-provenance";
+
 /** An appointment scheduled on the target date. */
 export interface AppointmentSnapshot {
   readonly id: string;
@@ -239,6 +241,17 @@ export interface ClinicDataSnapshot {
    * calculations (e.g. current waiting time) and as each metric's timestamp.
    */
   readonly asOf: string;
+  /**
+   * The clinic's IANA timezone. Calculators place timestamps on business dates
+   * in it; absent means UTC, which every fixture and the previous behaviour use.
+   */
+  readonly timezone?: string;
+  /**
+   * How the records behind this snapshot were read: from state history as known
+   * at a moment, or as they stand now. Absent means not stated, which no stored
+   * observation may treat as point-in-time. See `provenance/metric-provenance.ts`.
+   */
+  readonly knowledge?: SnapshotKnowledge;
 
   /** Appointments scheduled on `date`. */
   readonly appointmentsToday: readonly AppointmentSnapshot[];

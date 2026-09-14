@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { decideLearningProposal } from "@/actions/business-brain";
 import { CheckCircle2, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { OutcomeView } from "@/lib/business-brain/outcomes-view";
+import type { OutcomeView, WhatHappenedView } from "@/lib/business-brain/outcomes-view";
 
 /**
  * What the clinic has already done, and what the records say followed.
@@ -89,6 +90,7 @@ export function ActionHistory({ outcomes }: { outcomes: readonly OutcomeView[] }
                   {outcome.movement && (
                     <p className="text-sm text-text-secondary mt-0.5">{outcome.movement}</p>
                   )}
+                  {outcome.whatHappened && <WhatHappened detail={outcome.whatHappened} />}
                 </div>
               </li>
             ))}
@@ -96,5 +98,87 @@ export function ActionHistory({ outcomes }: { outcomes: readonly OutcomeView[] }
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * The evidence behind one completed action, collapsed by default.
+ *
+ * A native <details> element: one row's detail is a footnote to a footnote and
+ * needs no state of its own. Attribution first, then the measurements, then what
+ * became of the problem, then — only when a learning cleared its threshold — what
+ * this clinic's own history shows.
+ */
+function WhatHappened({ detail }: { detail: WhatHappenedView }) {
+  return (
+    <details className="group mt-1.5">
+      <summary className="inline-flex items-center gap-1 text-xs text-text-secondary cursor-pointer select-none hover:text-text-primary list-none [&::-webkit-details-marker]:hidden">
+        What happened after?
+        <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" aria-hidden />
+      </summary>
+      <div className="mt-1.5 space-y-1 border-l border-surface-muted pl-3">
+        <p className="text-xs font-medium text-text-primary">{detail.attributionLabel}</p>
+        {detail.evidence.map((line) => (
+          <p key={line} className="text-xs text-text-secondary">
+            {line}
+          </p>
+        ))}
+        {detail.resolution && <p className="text-xs text-text-secondary">{detail.resolution}</p>}
+        {detail.learning && <p className="text-xs text-text-primary">{detail.learning}</p>}
+        {detail.proposal && <ProposalDecision proposal={detail.proposal} />}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * A suggestion from the clinic's own history, and the dentist's choice on it.
+ *
+ * Deciding writes one append-only row. It changes nothing about what the Business
+ * Brain recommends; the wording says so, so nobody reads "Accept" as a switch.
+ */
+function ProposalDecision({ proposal }: { proposal: NonNullable<WhatHappenedView["proposal"]> }) {
+  const [decision, setDecision] = useState(proposal.decision);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+
+  const decide = (choice: "accepted" | "rejected") =>
+    startTransition(async () => {
+      setError(null);
+      const res = await decideLearningProposal({ proposalId: proposal.id, decision: choice });
+      if (res.error) setError(res.error);
+      else setDecision(choice);
+    });
+
+  return (
+    <div className="pt-1">
+      <p className="text-xs text-text-secondary">{proposal.statement}</p>
+      {decision ? (
+        <p className="text-xs text-text-disabled mt-0.5">
+          {decision === "accepted" ? "You accepted this suggestion." : "You marked this suggestion as not for your clinic."} Nothing
+          changes automatically.
+        </p>
+      ) : (
+        <div className="flex items-center gap-3 mt-1">
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => decide("accepted")}
+            className="text-xs font-medium text-text-primary hover:underline disabled:opacity-50 cursor-pointer"
+          >
+            Accept
+          </button>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => decide("rejected")}
+            className="text-xs text-text-secondary hover:underline disabled:opacity-50 cursor-pointer"
+          >
+            Not for us
+          </button>
+        </div>
+      )}
+      {error && <p className="text-xs text-danger mt-0.5">{error}</p>}
+    </div>
   );
 }

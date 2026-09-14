@@ -9,3 +9,4 @@ export * from "./ledger-facts";
 export * from "./ledger-capabilities";
 export * from "./clinic-ledger-port";
 export * from "./ledger-graph";
+export * from "./action-history";

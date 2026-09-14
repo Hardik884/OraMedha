@@ -754,6 +754,26 @@ pattern. `old_value`/`new_value` carry **only the fields that changed**
 less-protected copy of the clinical record, duplicating `internal_notes` on
 every save into a table with different readers.
 
+### 5.15 Entity State History and Observation Provenance
+
+`appointment_status_history`, `treatment_status_history`,
+`follow_up_status_history`, `payment_state_history` and `patient_state_history`
+(`20260917100000`) are append-only state versions written **only by triggers**,
+in the same transaction as every change, whatever path made it. `recorded_at` is
+the database clock and is the gate for "what was known at T"; `effective_at`
+carries its basis (`recorded`, `performed_at`, `payment_date`, `unknown`).
+Nothing before capture began is invented: those moments are UNKNOWN.
+
+No role holds a write grant on them, the service role included. A hard DELETE of
+a tracked row now fails rather than erasing its history. `metric_history` keeps
+typed provenance and every write is versioned in `metric_observations`
+(`20260917100100`); finding snapshots record their run and cannot be regenerated
+later.
+
+**Do not read `updated_at` or `created_at` as the moment something happened in
+Business Brain code** — use the point-in-time readers. See
+`business-brain/HISTORY.md`.
+
 ---
 
 ## 6. Dashboard Requirements

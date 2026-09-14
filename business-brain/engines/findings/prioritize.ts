@@ -136,7 +136,7 @@ export function rankFindings(findings: readonly Finding[], input: PrioritizeInpu
       role,
       index + 1,
       f,
-      `${prefix}: ${facts(finding, f, now)}.${trajectoryNote(finding)}${rootCauseNote(finding)}`,
+      `${prefix}: ${facts(finding, f, now)}.${trajectoryNote(finding)}${rootCauseNote(finding)}${memoryNote(finding)}`,
       below === undefined ? null : `Above “${below.title}” because ${compare(finding, below).statement}.`,
       null,
       null,
@@ -147,7 +147,7 @@ export function rankFindings(findings: readonly Finding[], input: PrioritizeInpu
     .sort((x, y) => compare(x.lead, y.lead).order || compare(x.finding, y.finding).order)
     .map(({ finding, lead, reason }) => {
       const f = factors.get(finding.id) as RankFactors;
-      const explanation = `Supports “${lead.title}”: ${reason}. ${capitalise(facts(finding, f, now))}.${trajectoryNote(finding)}${rootCauseNote(finding)}`;
+      const explanation = `Supports “${lead.title}”: ${reason}. ${capitalise(facts(finding, f, now))}.${trajectoryNote(finding)}${rootCauseNote(finding)}${memoryNote(finding)}`;
       return ranked(finding, finding.polarity === "positive" ? "win" : "supporting", null, f, explanation, null, lead.id, reason);
     });
 
@@ -161,7 +161,7 @@ export function rankFindings(findings: readonly Finding[], input: PrioritizeInpu
         "supporting",
         null,
         f,
-        `Unchanged since ${since}, so not raised again until it changes: ${facts(finding, f, now)}.${trajectoryNote(finding)}${rootCauseNote(finding)}`,
+        `Unchanged since ${since}, so not raised again until it changes: ${facts(finding, f, now)}.${trajectoryNote(finding)}${rootCauseNote(finding)}${memoryNote(finding)}`,
         null,
         null,
         null,
@@ -250,6 +250,27 @@ function trajectoryNote(finding: Finding): string {
  */
 function rootCauseNote(finding: Finding): string {
   return finding.evidence.rootCauses.map((r) => ` ${r.statement}`).join("");
+}
+
+/**
+ * What this clinic's memory adds, rendered from the numbers on the finding. Never
+ * a ranking input: the order is decided before this is written.
+ */
+function memoryNote(finding: Finding): string {
+  const m = finding.evidence.memory;
+  if (m === undefined) return "";
+  const parts: string[] = [];
+  if (m.normalRange !== null && m.normalRange.direction !== null) {
+    parts.push(
+      ` At ${fmt1(m.normalRange.current)}, ${lower(m.normalRange.label)} is ${m.normalRange.direction} this clinic's usual range of ${fmt1(m.normalRange.lower)}–${fmt1(m.normalRange.upper)}.`,
+    );
+  }
+  if (m.recurrence !== null) {
+    const months = Math.round(m.recurrence.windowDays / 30.4);
+    const resolution = m.recurrence.typicalResolutionDays === null ? "" : `, each typically clearing after about ${fmt1(m.recurrence.typicalResolutionDays)} days`;
+    parts.push(` At this clinic it has been flagged in ${m.recurrence.episodes} separate episodes over the last ${months} months${resolution}.`);
+  }
+  return parts.join("");
 }
 
 function noActionReason(finding: Finding, f: RankFactors, now: number): string | null {

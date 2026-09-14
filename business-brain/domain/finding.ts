@@ -117,6 +117,38 @@ export interface FindingEvidence {
    * analysis that found nothing, or had too little to look at, is kept too.
    */
   readonly rootCauses: readonly RootCauseAnalysis[];
+  /**
+   * What this clinic's memory says about the finding, when a memory was supplied
+   * and an ACTIVE entry supports it. Supporting evidence only: no ranking factor
+   * reads it, and it never changes stakes, urgency, trend or confidence.
+   */
+  readonly memory?: FindingMemoryContext;
+}
+
+/** Memory context on one finding. Identifiers and numbers; the sentence is rendered at read time. */
+export interface FindingMemoryContext {
+  /** The finding's category has recurred in separate episodes. */
+  readonly recurrence: {
+    readonly memoryId: string;
+    readonly episodes: number;
+    readonly windowDays: number;
+    readonly typicalResolutionDays: number | null;
+    readonly confidence: number;
+    readonly builtFor: string;
+  } | null;
+  /** The lead metric today, against this clinic's own active normal range. */
+  readonly normalRange: {
+    readonly memoryId: string;
+    readonly metricKey: string;
+    readonly label: string;
+    readonly current: number;
+    readonly median: number;
+    readonly lower: number;
+    readonly upper: number;
+    readonly direction: "above" | "below" | null;
+    readonly confidence: number;
+    readonly builtFor: string;
+  } | null;
 }
 
 export interface Finding {

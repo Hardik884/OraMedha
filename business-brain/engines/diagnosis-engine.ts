@@ -18,6 +18,7 @@
  * This file is the contract. The implementation lives in `./diagnosis`.
  */
 
+import type { SnapshotKnowledge } from "../provenance/metric-provenance";
 import { BaseEngine } from "../core";
 import type { Diagnosis, Metric, Signal } from "../domain";
 import type { DecisionTrace } from "../types";
@@ -41,6 +42,13 @@ export interface SignalRun {
 export interface MetricsOnlyDay {
   readonly date: string;
   readonly metrics: readonly Metric[];
+  /**
+   * How the records behind a MEASURED day were read. Present only on days the run
+   * measured itself; a day read from the store carries its provenance there.
+   */
+  readonly knowledge?: SnapshotKnowledge;
+  /** The clinic timezone the day was measured in, alongside `knowledge`. */
+  readonly timezone?: string;
 }
 
 /**

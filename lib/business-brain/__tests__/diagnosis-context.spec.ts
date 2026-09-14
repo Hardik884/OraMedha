@@ -29,7 +29,7 @@ import {
 } from "@/business-brain";
 import type { Diagnosis } from "@/business-brain";
 import { computeOutstandingBalance } from "@/lib/billing/balance";
-import { SupabaseDiagnosisContext } from "../diagnosis-context";
+import { EntityWindowTooLargeError, SupabaseDiagnosisContext } from "../diagnosis-context";
 
 const URL = process.env.SUPABASE_TEST_URL ?? "http://127.0.0.1:55321";
 const KEY =
@@ -428,6 +428,20 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
     });
   });
 
+  describe("clinic-local hours", () => {
+    it("buckets cancellations and arrivals by the clinic's hour, not the server's", async () => {
+      // 05:00 UTC is 10:30 in Kolkata. Bucketed in UTC, a morning clinic's losses
+      // would be reported against the small hours of the night.
+      const utc = await ctx.listCancellationEvents(WINDOW);
+      const local = await new SupabaseDiagnosisContext(db, "Asia/Kolkata").listCancellationEvents(WINDOW);
+      expect(utc?.find((e) => e.appointmentId === A_EARLY_CANCEL)?.localHour).toBe("05:00");
+      expect(local?.find((e) => e.appointmentId === A_EARLY_CANCEL)?.localHour).toBe("10:00");
+      // Checked in at 09:12 UTC: 14:42 in Kolkata.
+      const arrivals = await new SupabaseDiagnosisContext(db, "Asia/Kolkata").listAppointmentArrivals(WINDOW);
+      expect(arrivals?.find((a) => a.appointmentId === A_ARRIVED)?.arrivalLocalHour).toBe("14:00");
+    });
+  });
+
   describe("no-show history", () => {
     it("counts prior attendance strictly BEFORE each missed appointment", async () => {
       // Both misses belong to the same patient. If history were counted from the
@@ -521,18 +535,14 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
       expect(canonical).toBe(1500);
     });
 
-    it("keeps the newest candidates under the row-limit cap, not the oldest", async () => {
-      // Under limit:1, the DB fetch (ordered by created_at) returns exactly the
-      // single most-recently-created billable treatment across the whole
-      // clinic fixture — T_LIMIT_NEW (6 April), the newest of all seeded
-      // completed/in_progress treatments. The bug's ascending order would have
-      // kept the OLDEST instead (T_ATTENDED-adjacent fixtures from March/early
-      // April), silently dropping the genuinely recent, most-likely-still-owed
-      // work.
-      const capped = await ctx.listOutstandingBalances({ ...WINDOW, limit: 1 });
-      expect(capped).toHaveLength(1);
-      expect(capped?.[0]?.invoiceId).toBe(T_LIMIT_NEW);
-      expect(capped?.[0]?.invoiceId).not.toBe(T_LIMIT_OLD);
+    it("refuses a window larger than its limit rather than answering from part of it", async () => {
+      // Hardening: this used to keep the newest N and drop the rest, which made an
+      // ageing distribution read from recent balances only look complete. A
+      // window the limit cannot hold is now refused, and the service records the
+      // discriminator as unanswered.
+      await expect(ctx.listOutstandingBalances({ ...WINDOW, limit: 1 })).rejects.toBeInstanceOf(EntityWindowTooLargeError);
+      const whole = await ctx.listOutstandingBalances(WINDOW);
+      expect(whole.map((r) => r.invoiceId)).toEqual(expect.arrayContaining([T_LIMIT_NEW, T_LIMIT_OLD]));
     });
   });
 

@@ -114,7 +114,6 @@ describe("discriminator manifest", () => {
       }
       lines.push("");
     }
-    // eslint-disable-next-line no-console
     console.log(lines.join("\n"));
     expect(ALL_DISCRIMINATORS.length).toBe(28);
   });

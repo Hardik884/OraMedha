@@ -100,7 +100,7 @@ export function deriveOpportunities(input: OpportunityEngineInput): OpportunityR
   const assessments: OpportunityAssessment[] = [];
   const opportunities: Opportunity[] = [];
 
-  const demand = input.openWork === null ? null : waitingDemand(input.openWork, input.date, input.now);
+  const demand = input.openWork === null ? null : waitingDemand(input.openWork, input.date, input.now, input.capacity?.timezone);
 
   const forward = detectForwardCapacity(input, config, demand);
   assessments.push(forward.assessment);
@@ -416,7 +416,7 @@ function detectUnpaidWork(
     return notEmitted(type, "insufficient_data", "A balance cannot be judged from part of a ledger, and the charge or payment read was cut.");
   }
 
-  const population = owingPatients(input.openWork, input.date);
+  const population = owingPatients(input.openWork, input.date, input.capacity?.timezone);
   const actionable = population.owing.filter((p) => !p.onPaymentPlan);
   const onPlan = population.owing.filter((p) => p.onPaymentPlan);
   const actionableAmount = actionable.reduce((sum, p) => sum + p.outstanding, 0);

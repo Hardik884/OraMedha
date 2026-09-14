@@ -13,4 +13,4 @@ export {
   type RootCauseSubject,
 } from "./root-cause-engine";
 export { DEFAULT_ROOT_CAUSE_CONFIG, type RootCauseConfig } from "./root-cause-config";
-export { quantile, wilson } from "./stats";
+export { quantile } from "./stats";

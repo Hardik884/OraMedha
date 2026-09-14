@@ -183,6 +183,98 @@ export type Database = {
           },
         ]
       }
+      appointment_status_history: {
+        Row: {
+          appointment_id: string
+          change: string
+          changed_by: string | null
+          clinic_id: string
+          duration_minutes: number
+          effective_at: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id: string
+          is_deleted: boolean
+          new_status: Database["public"]["Enums"]["appointment_status"]
+          old_status: Database["public"]["Enums"]["appointment_status"] | null
+          patient_id: string
+          provenance: string
+          recorded_at: string
+          scheduled_at: string
+          seq: number
+          source: Database["public"]["Enums"]["appointment_source"]
+        }
+        Insert: {
+          appointment_id: string
+          change: string
+          changed_by?: string | null
+          clinic_id: string
+          duration_minutes: number
+          effective_at?: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id?: string
+          is_deleted: boolean
+          new_status: Database["public"]["Enums"]["appointment_status"]
+          old_status?: Database["public"]["Enums"]["appointment_status"] | null
+          patient_id: string
+          provenance: string
+          recorded_at?: string
+          scheduled_at: string
+          seq?: never
+          source: Database["public"]["Enums"]["appointment_source"]
+        }
+        Update: {
+          appointment_id?: string
+          change?: string
+          changed_by?: string | null
+          clinic_id?: string
+          duration_minutes?: number
+          effective_at?: string | null
+          effective_at_basis?: string
+          entity_created_at?: string
+          id?: string
+          is_deleted?: boolean
+          new_status?: Database["public"]["Enums"]["appointment_status"]
+          old_status?: Database["public"]["Enums"]["appointment_status"] | null
+          patient_id?: string
+          provenance?: string
+          recorded_at?: string
+          scheduled_at?: string
+          seq?: never
+          source?: Database["public"]["Enums"]["appointment_source"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "appointment_status_history_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "active_appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointment_status_history_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointment_status_history_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: false
+            referencedRelation: "appointments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointment_status_history_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       appointments: {
         Row: {
           chief_complaints: string | null
@@ -340,6 +432,107 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "availability_rules_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clinic_decisions: {
+        Row: {
+          basis: Json
+          clinic_id: string
+          decided_at: string
+          decided_by: string
+          decision: string
+          id: string
+          proposal_kind: string | null
+          subject: string
+          target_id: string
+          target_type: string
+        }
+        Insert: {
+          basis?: Json
+          clinic_id: string
+          decided_at?: string
+          decided_by: string
+          decision: string
+          id?: string
+          proposal_kind?: string | null
+          subject: string
+          target_id: string
+          target_type: string
+        }
+        Update: {
+          basis?: Json
+          clinic_id?: string
+          decided_at?: string
+          decided_by?: string
+          decision?: string
+          id?: string
+          proposal_kind?: string | null
+          subject?: string
+          target_id?: string
+          target_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clinic_decisions_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clinic_decisions_decided_by_fkey"
+            columns: ["decided_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clinic_memory_builds: {
+        Row: {
+          built_at: string
+          built_for: string
+          clinic_id: string
+          derivation_version: string
+          digest: string
+          id: string
+          knowledge_as_of: string | null
+          memory: Json
+          window_from: string
+          window_to: string
+        }
+        Insert: {
+          built_at?: string
+          built_for: string
+          clinic_id: string
+          derivation_version: string
+          digest: string
+          id?: string
+          knowledge_as_of?: string | null
+          memory: Json
+          window_from: string
+          window_to: string
+        }
+        Update: {
+          built_at?: string
+          built_for?: string
+          clinic_id?: string
+          derivation_version?: string
+          digest?: string
+          id?: string
+          knowledge_as_of?: string | null
+          memory?: Json
+          window_from?: string
+          window_to?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clinic_memory_builds_clinic_id_fkey"
             columns: ["clinic_id"]
             isOneToOne: false
             referencedRelation: "clinics"
@@ -1121,6 +1314,151 @@ export type Database = {
           },
         ]
       }
+      entity_history_capture: {
+        Row: {
+          baseline_rows: number
+          captured_since: string
+          entity: string
+        }
+        Insert: {
+          baseline_rows: number
+          captured_since: string
+          entity: string
+        }
+        Update: {
+          baseline_rows?: number
+          captured_since?: string
+          entity?: string
+        }
+        Relationships: []
+      }
+      finding_snapshots: {
+        Row: {
+          brain_version: string | null
+          business_date: string
+          clinic_id: string
+          findings: Json
+          id: string
+          recorded_at: string
+          run_health: string
+          run_started_at: string | null
+        }
+        Insert: {
+          brain_version?: string | null
+          business_date: string
+          clinic_id: string
+          findings?: Json
+          id?: string
+          recorded_at?: string
+          run_health?: string
+          run_started_at?: string | null
+        }
+        Update: {
+          brain_version?: string | null
+          business_date?: string
+          clinic_id?: string
+          findings?: Json
+          id?: string
+          recorded_at?: string
+          run_health?: string
+          run_started_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "finding_snapshots_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      follow_up_status_history: {
+        Row: {
+          change: string
+          changed_by: string | null
+          clinic_id: string
+          due_date: string
+          effective_at: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          follow_up_id: string
+          id: string
+          is_deleted: boolean
+          new_status: Database["public"]["Enums"]["follow_up_status"]
+          old_status: Database["public"]["Enums"]["follow_up_status"] | null
+          patient_id: string
+          provenance: string
+          recorded_at: string
+          seq: number
+        }
+        Insert: {
+          change: string
+          changed_by?: string | null
+          clinic_id: string
+          due_date: string
+          effective_at?: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          follow_up_id: string
+          id?: string
+          is_deleted: boolean
+          new_status: Database["public"]["Enums"]["follow_up_status"]
+          old_status?: Database["public"]["Enums"]["follow_up_status"] | null
+          patient_id: string
+          provenance: string
+          recorded_at?: string
+          seq?: never
+        }
+        Update: {
+          change?: string
+          changed_by?: string | null
+          clinic_id?: string
+          due_date?: string
+          effective_at?: string | null
+          effective_at_basis?: string
+          entity_created_at?: string
+          follow_up_id?: string
+          id?: string
+          is_deleted?: boolean
+          new_status?: Database["public"]["Enums"]["follow_up_status"]
+          old_status?: Database["public"]["Enums"]["follow_up_status"] | null
+          patient_id?: string
+          provenance?: string
+          recorded_at?: string
+          seq?: never
+        }
+        Relationships: [
+          {
+            foreignKeyName: "follow_up_status_history_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_up_status_history_follow_up_id_fkey"
+            columns: ["follow_up_id"]
+            isOneToOne: false
+            referencedRelation: "active_follow_ups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_up_status_history_follow_up_id_fkey"
+            columns: ["follow_up_id"]
+            isOneToOne: false
+            referencedRelation: "follow_ups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "follow_up_status_history_follow_up_id_fkey"
+            columns: ["follow_up_id"]
+            isOneToOne: false
+            referencedRelation: "overdue_follow_ups"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       follow_ups: {
         Row: {
           appointment_id: string | null
@@ -1261,30 +1599,95 @@ export type Database = {
         Row: {
           clinic_id: string
           created_at: string
+          knowledge_as_of: string | null
           measured_at: string
           metric_date: string
           metric_key: string
+          produced_at: string | null
+          provenance: string
+          unversioned_inputs: string[]
           value: number
         }
         Insert: {
           clinic_id: string
           created_at?: string
+          knowledge_as_of?: string | null
           measured_at: string
           metric_date: string
           metric_key: string
+          produced_at?: string | null
+          provenance?: string
+          unversioned_inputs?: string[]
           value: number
         }
         Update: {
           clinic_id?: string
           created_at?: string
+          knowledge_as_of?: string | null
           measured_at?: string
           metric_date?: string
           metric_key?: string
+          produced_at?: string | null
+          provenance?: string
+          unversioned_inputs?: string[]
           value?: number
         }
         Relationships: [
           {
             foreignKeyName: "metric_history_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      metric_observations: {
+        Row: {
+          applied_to_current: boolean
+          clinic_id: string
+          id: string
+          knowledge_as_of: string | null
+          metric_date: string
+          metric_key: string
+          produced_at: string | null
+          provenance: string
+          recorded_at: string
+          seq: number
+          unversioned_inputs: string[]
+          value: number
+        }
+        Insert: {
+          applied_to_current: boolean
+          clinic_id: string
+          id?: string
+          knowledge_as_of?: string | null
+          metric_date: string
+          metric_key: string
+          produced_at?: string | null
+          provenance: string
+          recorded_at?: string
+          seq?: never
+          unversioned_inputs?: string[]
+          value: number
+        }
+        Update: {
+          applied_to_current?: boolean
+          clinic_id?: string
+          id?: string
+          knowledge_as_of?: string | null
+          metric_date?: string
+          metric_key?: string
+          produced_at?: string | null
+          provenance?: string
+          recorded_at?: string
+          seq?: never
+          unversioned_inputs?: string[]
+          value?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "metric_observations_clinic_id_fkey"
             columns: ["clinic_id"]
             isOneToOne: false
             referencedRelation: "clinics"
@@ -1323,6 +1726,76 @@ export type Database = {
             foreignKeyName: "patient_portal_links_patient_id_fkey"
             columns: ["patient_id"]
             isOneToOne: true
+            referencedRelation: "patients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      patient_state_history: {
+        Row: {
+          change: string
+          changed_by: string | null
+          clinic_id: string
+          effective_at: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id: string
+          is_deleted: boolean
+          patient_id: string
+          payment_plan_until: string | null
+          provenance: string
+          recorded_at: string
+          seq: number
+        }
+        Insert: {
+          change: string
+          changed_by?: string | null
+          clinic_id: string
+          effective_at?: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id?: string
+          is_deleted: boolean
+          patient_id: string
+          payment_plan_until?: string | null
+          provenance: string
+          recorded_at?: string
+          seq?: never
+        }
+        Update: {
+          change?: string
+          changed_by?: string | null
+          clinic_id?: string
+          effective_at?: string | null
+          effective_at_basis?: string
+          entity_created_at?: string
+          id?: string
+          is_deleted?: boolean
+          patient_id?: string
+          payment_plan_until?: string | null
+          provenance?: string
+          recorded_at?: string
+          seq?: never
+        }
+        Relationships: [
+          {
+            foreignKeyName: "patient_state_history_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "patient_state_history_patient_id_fkey"
+            columns: ["patient_id"]
+            isOneToOne: false
+            referencedRelation: "active_patients"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "patient_state_history_patient_id_fkey"
+            columns: ["patient_id"]
+            isOneToOne: false
             referencedRelation: "patients"
             referencedColumns: ["id"]
           },
@@ -1494,6 +1967,82 @@ export type Database = {
             columns: ["created_by"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      payment_state_history: {
+        Row: {
+          amount: number
+          change: string
+          changed_by: string | null
+          clinic_id: string
+          effective_at: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id: string
+          is_deleted: boolean
+          patient_id: string
+          payment_date: string
+          payment_id: string
+          provenance: string
+          recorded_at: string
+          seq: number
+        }
+        Insert: {
+          amount: number
+          change: string
+          changed_by?: string | null
+          clinic_id: string
+          effective_at?: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id?: string
+          is_deleted: boolean
+          patient_id: string
+          payment_date: string
+          payment_id: string
+          provenance: string
+          recorded_at?: string
+          seq?: never
+        }
+        Update: {
+          amount?: number
+          change?: string
+          changed_by?: string | null
+          clinic_id?: string
+          effective_at?: string | null
+          effective_at_basis?: string
+          entity_created_at?: string
+          id?: string
+          is_deleted?: boolean
+          patient_id?: string
+          payment_date?: string
+          payment_id?: string
+          provenance?: string
+          recorded_at?: string
+          seq?: never
+        }
+        Relationships: [
+          {
+            foreignKeyName: "payment_state_history_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payment_state_history_payment_id_fkey"
+            columns: ["payment_id"]
+            isOneToOne: false
+            referencedRelation: "active_payments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payment_state_history_payment_id_fkey"
+            columns: ["payment_id"]
+            isOneToOne: false
+            referencedRelation: "payments"
             referencedColumns: ["id"]
           },
         ]
@@ -2321,6 +2870,121 @@ export type Database = {
           },
           {
             foreignKeyName: "treatment_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      treatment_status_history: {
+        Row: {
+          change: string
+          changed_by: string | null
+          clinic_id: string
+          cost: number
+          effective_at: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id: string
+          is_deleted: boolean
+          new_status: Database["public"]["Enums"]["treatment_status"]
+          old_status: Database["public"]["Enums"]["treatment_status"] | null
+          opd_charged: boolean
+          opd_fee: number
+          patient_id: string
+          performed_at: string | null
+          provenance: string
+          recorded_at: string
+          seq: number
+          treatment_id: string
+          xray_cost: number | null
+          xray_taken: boolean
+        }
+        Insert: {
+          change: string
+          changed_by?: string | null
+          clinic_id: string
+          cost: number
+          effective_at?: string | null
+          effective_at_basis: string
+          entity_created_at: string
+          id?: string
+          is_deleted: boolean
+          new_status: Database["public"]["Enums"]["treatment_status"]
+          old_status?: Database["public"]["Enums"]["treatment_status"] | null
+          opd_charged: boolean
+          opd_fee: number
+          patient_id: string
+          performed_at?: string | null
+          provenance: string
+          recorded_at?: string
+          seq?: never
+          treatment_id: string
+          xray_cost?: number | null
+          xray_taken: boolean
+        }
+        Update: {
+          change?: string
+          changed_by?: string | null
+          clinic_id?: string
+          cost?: number
+          effective_at?: string | null
+          effective_at_basis?: string
+          entity_created_at?: string
+          id?: string
+          is_deleted?: boolean
+          new_status?: Database["public"]["Enums"]["treatment_status"]
+          old_status?: Database["public"]["Enums"]["treatment_status"] | null
+          opd_charged?: boolean
+          opd_fee?: number
+          patient_id?: string
+          performed_at?: string | null
+          provenance?: string
+          recorded_at?: string
+          seq?: never
+          treatment_id?: string
+          xray_cost?: number | null
+          xray_taken?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "treatment_status_history_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_status_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "active_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_status_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "patient_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_status_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "receptionist_treatments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_status_history_treatment_id_fkey"
+            columns: ["treatment_id"]
+            isOneToOne: false
+            referencedRelation: "treatment_clinical_notes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "treatment_status_history_treatment_id_fkey"
             columns: ["treatment_id"]
             isOneToOne: false
             referencedRelation: "treatments"
@@ -3580,6 +4244,44 @@ export type Database = {
       }
     }
     Functions: {
+      action_result_events: {
+        Args: {
+          p_clinic_id: string
+          p_known_at: string
+          p_patient_ids: string[]
+          p_since: string
+          p_target: string
+        }
+        Returns: {
+          evidence: string
+          patient_id: string
+          recorded_at: string
+          seq: number
+        }[]
+      }
+      appointment_states_as_of: {
+        Args: {
+          p_clinic_id: string
+          p_known_at: string
+          p_patient_ids?: string[]
+          p_scheduled_from?: string
+          p_scheduled_to?: string
+          p_statuses?: Database["public"]["Enums"]["appointment_status"][]
+        }
+        Returns: {
+          appointment_id: string
+          duration_minutes: number
+          entity_created_at: string
+          is_deleted: boolean
+          patient_id: string
+          provenance: string
+          recorded_at: string
+          scheduled_at: string
+          seq: number
+          source: Database["public"]["Enums"]["appointment_source"]
+          status: Database["public"]["Enums"]["appointment_status"]
+        }[]
+      }
       auth_appointment_frozen: {
         Args: { p_appointment_id: string }
         Returns: Json
@@ -3610,6 +4312,57 @@ export type Database = {
       create_patient_appointment: {
         Args: { p_notes?: string; p_patient_id: string; p_scheduled_at: string }
         Returns: string
+      }
+      follow_up_states_as_of: {
+        Args: {
+          p_clinic_id: string
+          p_due_to?: string
+          p_known_at: string
+          p_statuses?: Database["public"]["Enums"]["follow_up_status"][]
+        }
+        Returns: {
+          due_date: string
+          entity_created_at: string
+          follow_up_id: string
+          is_deleted: boolean
+          patient_id: string
+          provenance: string
+          recorded_at: string
+          seq: number
+          status: Database["public"]["Enums"]["follow_up_status"]
+        }[]
+      }
+      jsonb_values_are_codes: { Args: { value: Json }; Returns: boolean }
+      metric_provenance_rank: { Args: { p: string }; Returns: number }
+      patient_states_as_of: {
+        Args: {
+          p_clinic_id: string
+          p_known_at: string
+          p_patient_ids?: string[]
+        }
+        Returns: {
+          entity_created_at: string
+          is_deleted: boolean
+          patient_id: string
+          payment_plan_until: string
+          provenance: string
+          recorded_at: string
+          seq: number
+        }[]
+      }
+      payment_states_as_of: {
+        Args: { p_clinic_id: string; p_known_at: string; p_payment_to?: string }
+        Returns: {
+          amount: number
+          entity_created_at: string
+          is_deleted: boolean
+          patient_id: string
+          payment_date: string
+          payment_id: string
+          provenance: string
+          recorded_at: string
+          seq: number
+        }[]
       }
       purge_expired_security_state: { Args: never; Returns: undefined }
       purge_phi_access_log_rows: { Args: { p_ids: string[] }; Returns: number }
@@ -3643,6 +4396,25 @@ export type Database = {
           failures: number
           locked: boolean
           retry_after_seconds: number
+        }[]
+      }
+      treatment_states_as_of: {
+        Args: { p_clinic_id: string; p_known_at: string }
+        Returns: {
+          cost: number
+          entity_created_at: string
+          is_deleted: boolean
+          opd_charged: boolean
+          opd_fee: number
+          patient_id: string
+          performed_at: string
+          provenance: string
+          recorded_at: string
+          seq: number
+          status: Database["public"]["Enums"]["treatment_status"]
+          treatment_id: string
+          xray_cost: number
+          xray_taken: boolean
         }[]
       }
     }

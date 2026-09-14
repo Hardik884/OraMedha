@@ -25,12 +25,6 @@ export interface RootCauseConfig {
     readonly minGapPoints: number;
     /** Group rate ÷ comparison rate, when the comparison rate is above zero. */
     readonly minRatio: number;
-    /**
-     * z for the Wilson intervals that must NOT overlap: 1.645, a 90% interval.
-     * Even at the cautious end of each group's plausible range the group must
-     * still be worse — the check that stops a small group's noisy rate winning.
-     */
-    readonly z: number;
   };
   /** Minute measurements (overrun, waiting). */
   readonly measurement: {
@@ -50,6 +44,12 @@ export interface RootCauseConfig {
     /** Share of the group's occurrences that must sit below the comparison median. */
     readonly consistency: number;
   };
+  /**
+   * The chance, shared across every group an analysis compares, of reporting a
+   * concentration that is only noise. Each comparison is judged against this
+   * divided by the number of comparisons (Bonferroni).
+   */
+  readonly familyAlpha: number;
   /** A dimension recorded for less than this share of the population is not analysed. */
   readonly minCoverage: number;
   /** Two associations sharing at least this share of units are flagged as overlapping. */
@@ -75,7 +75,6 @@ export const DEFAULT_ROOT_CAUSE_CONFIG: RootCauseConfig = {
     minGroupEvents: 4,
     minGapPoints: 10,
     minRatio: 1.5,
-    z: 1.645,
   },
   measurement: {
     minPopulation: 16,
@@ -89,6 +88,7 @@ export const DEFAULT_ROOT_CAUSE_CONFIG: RootCauseConfig = {
     minGapPoints: 20,
     consistency: 0.75,
   },
+  familyAlpha: 0.05,
   minCoverage: 0.8,
   overlapShare: 0.5,
   confidenceFloor: 0.05,

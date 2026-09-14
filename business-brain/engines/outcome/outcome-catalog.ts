@@ -66,6 +66,16 @@ export interface OutcomeSpec {
   readonly metricKey: string | null;
   /** Which direction of movement helps, for the metric above. */
   readonly direction: BaselineDirection | null;
+  /**
+   * Days after completion at which the windowed evidence is read, or null when
+   * the category has nothing to read. Fixed, so an outcome is judged on the same
+   * footing however long ago it happened — waiting longer never strengthens it.
+   * Sized to how long the intended result plausibly takes to be recorded: a
+   * follow-up or a payment within a fortnight, a booked visit within three weeks.
+   */
+  readonly horizonDays: number | null;
+  /** Whether the headline metric is money. Concentration in targets cannot be read for money. */
+  readonly currency: boolean;
 }
 
 /**
@@ -83,6 +93,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: VerificationTarget.FOLLOW_UP_COMPLETED,
     metricKey: MetricKey.FOLLOWUPS_OVERDUE,
     direction: BaselineDirection.LOWER_IS_BETTER,
+    horizonDays: 14,
+    currency: false,
   },
   {
     category: "revenue_leakage",
@@ -90,6 +102,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: VerificationTarget.PAYMENT_RECORDED,
     metricKey: MetricKey.REVENUE_OUTSTANDING,
     direction: BaselineDirection.LOWER_IS_BETTER,
+    horizonDays: 14,
+    currency: true,
   },
   {
     category: "treatment_acceptance",
@@ -97,6 +111,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: VerificationTarget.APPOINTMENT_BOOKED,
     metricKey: MetricKey.TREATMENT_ACCEPTED_PENDING_SCHEDULING,
     direction: BaselineDirection.LOWER_IS_BETTER,
+    horizonDays: 21,
+    currency: false,
   },
   {
     // A metric but no verifiable population: the lapsed count responds at once,
@@ -107,6 +123,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: MetricKey.PATIENTS_REACTIVATION_CANDIDATES,
     direction: BaselineDirection.LOWER_IS_BETTER,
+    horizonDays: 21,
+    currency: false,
   },
   // ── Neither verifiable nor metric-trackable, and stated so ────────────────
   //
@@ -121,6 +139,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: null,
     direction: null,
+    horizonDays: null,
+    currency: false,
   },
   {
     // Bookings that fill next week are indistinguishable from any other
@@ -130,6 +150,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: null,
     direction: null,
+    horizonDays: null,
+    currency: false,
   },
   {
     // Appointments already lost cannot be recovered, and the rates that measure
@@ -139,6 +161,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: null,
     direction: null,
+    horizonDays: null,
+    currency: false,
   },
   {
     // A wait that already happened has no subsequent result to confirm.
@@ -147,6 +171,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: null,
     direction: null,
+    horizonDays: null,
+    currency: false,
   },
   {
     // The fix is a booking default in settings; its effect appears over a month
@@ -156,6 +182,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: null,
     direction: null,
+    horizonDays: null,
+    currency: false,
   },
   {
     // An enquiry that never became an appointment leaves no row at all, so there
@@ -165,6 +193,8 @@ export const OUTCOME_SPECS: readonly OutcomeSpec[] = [
     verifies: null,
     metricKey: null,
     direction: null,
+    horizonDays: null,
+    currency: false,
   },
 ];
 

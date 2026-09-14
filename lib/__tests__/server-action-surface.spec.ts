@@ -113,6 +113,7 @@ const ALLOWED: ReadonlySet<string> = new Set([
   "dismissProblem",
   "summarizeDashboardActions",
   "completeAction",
+  "decideLearningProposal",
 
   // actions/clinic-settings.ts
   "getClinicSettings",

@@ -1306,6 +1306,20 @@ export const DismissProblemSchema = z.object({
  * only as a label tying the completion back to the run that recommended it, and
  * is never used to look anything up.
  */
+/**
+ * A dentist's decision on a Business Brain learning proposal. Only the proposal's
+ * id and the decision travel from the browser: what the proposal says, which
+ * learning it rests on and the evidence behind it are all re-derived server-side.
+ */
+export const DecideLearningProposalSchema = z.object({
+  proposalId: z
+    .string()
+    .min(1)
+    .max(300)
+    .regex(/^proposal\.[a-z_]+:[A-Za-z0-9_.:-]+$/, "Unknown proposal."),
+  decision: z.enum(["accepted", "rejected"]),
+});
+
 export const CompleteActionSchema = z.object({
   category: z.string().min(1).max(64),
   constraintId: z.string().min(1).max(200),

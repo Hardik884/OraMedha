@@ -57,6 +57,7 @@ function outcome(over: Partial<Outcome> = {}): Outcome {
     },
     reasoning: "irrelevant to the view",
     recordedAt: NOW,
+    evidenceQuality: { completion: "staff_declared", completionTime: "declaration_time", results: null, pointInTime: false },
     ...over,
   };
 }

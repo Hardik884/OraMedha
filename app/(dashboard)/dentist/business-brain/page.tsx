@@ -4,6 +4,7 @@ import { AlertTriangle } from "lucide-react";
 import { resolveSession } from "@/lib/auth/session";
 import { isBusinessBrainEnabled, isWhatsAppEnabled } from "@/lib/feature-flags";
 import { runDashboardBrain } from "@/lib/business-brain/dashboard-data";
+import { assessRunHealth } from "@/business-brain";
 import {
   compareClinicHealth,
   computeClinicHealth,
@@ -13,7 +14,11 @@ import { buildWins } from "@/lib/business-brain/wins-view";
 import { buildBriefing } from "@/lib/business-brain/briefing-view";
 import { readActiveDismissals, isSuppressed } from "@/lib/business-brain/dismissals";
 import { readReminderOutcomes } from "@/lib/business-brain/reminder-outcomes";
-import { loadActionOutcomes } from "@/lib/business-brain/action-outcomes";
+import { after } from "next/server";
+import { loadActionLearning } from "@/lib/business-brain/action-outcomes";
+import { readClinicDecisions } from "@/lib/business-brain/clinic-memory";
+import { resolveDecisions } from "@/business-brain/memory";
+import { recordFindingSnapshot, snapshotFindings } from "@/lib/business-brain/finding-snapshots";
 import { buildOutcomeViews } from "@/lib/business-brain/outcomes-view";
 import { ActionHistory } from "@/components/business-brain/ActionHistory";
 import { ReminderOutcomes } from "@/components/business-brain/ReminderOutcomes";
@@ -57,21 +62,25 @@ export default async function BusinessBrainPage() {
   let run: Awaited<ReturnType<typeof runDashboardBrain>>;
   try {
     run = await runDashboardBrain();
-  } catch {
-    return (
-      <PageShell subtitle="Your daily clinic check-up">
-        <div className="bg-surface border border-border rounded-xl">
-          <EmptyState
-            icon={<AlertTriangle className="h-5 w-5" />}
-            title="Couldn't check your clinic today"
-            description="Something went wrong reading your records. Everything else in OraMedha still works — try refreshing in a minute."
-          />
-        </div>
-      </PageShell>
-    );
+  } catch (error) {
+    console.error("[business-brain] run failed", error instanceof Error ? error.message : String(error));
+    return <UnavailableBriefing />;
   }
 
-  const { result, date } = run;
+  const { result, date, timezone } = run;
+
+  // A run that could not read the clinic must never render as a clinic with
+  // nothing wrong. Same honest failure state as a thrown run, and nothing is
+  // recorded as having been shown.
+  const runHealth = assessRunHealth(result);
+  if (!runHealth.healthy) {
+    console.error("[business-brain] run unhealthy; briefing withheld", {
+      failedStages: runHealth.failedStages,
+      errorCode: runHealth.errorCode,
+    });
+    return <UnavailableBriefing />;
+  }
+
   const whatsappEnabled = isWhatsAppEnabled(profile.clinic_id);
 
   // The distinct-patient reminder populations. `total` (patients with the
@@ -134,12 +143,21 @@ export default async function BusinessBrainPage() {
   const supabase = await createServerClient();
   const now = new Date().toISOString();
 
-  // What the clinic has already done, and what its own records say followed.
-  // Read before the wins so a win can show the action that sits alongside it.
-  const outcomes = await loadActionOutcomes(
+  const findings = [
+    ...(result.findings.top ? [result.findings.top] : []),
+    ...result.findings.next,
+    ...result.findings.supporting,
+    ...result.findings.wins,
+    ...result.findings.noActionRequired,
+  ].map((r) => r.finding);
+
+  // What the clinic has already done, what its own records say followed, and what
+  // its history of doing so shows. Read before the wins so a win can show the
+  // action that sits alongside it.
+  const { outcomes, learning } = await loadActionLearning(
     supabase as never,
     profile.clinic_id,
-    result.metrics,
+    { date, timezone, metrics: result.metrics, findings },
     now,
   );
 
@@ -147,7 +165,12 @@ export default async function BusinessBrainPage() {
   // the Achievement Engine; empty for a clinic running inside its usual range,
   // which renders nothing rather than a placeholder.
   const wins = buildWins(result.achievements, outcomes, now);
-  const outcomeViews = buildOutcomeViews(outcomes, now);
+  // The clinic's recorded decisions on suggestions, so a decided one shows as decided.
+  // A failed read shows them undecided; the server action re-checks either way.
+  const decisions = await readClinicDecisions(supabase as never, profile.clinic_id)
+    .then((facts) => resolveDecisions(facts, [], learning))
+    .catch(() => []);
+  const outcomeViews = buildOutcomeViews(outcomes, now, learning, decisions);
 
   // Which cards to acknowledge as done. Server-resolved so it survives a refresh,
   // and scoped to today so yesterday's completion does not silently mark today's
@@ -171,6 +194,12 @@ export default async function BusinessBrainPage() {
       .filter((c) => isSuppressed(dismissals.get(c.category), c.severity))
       .map((c) => c.category),
   );
+
+  // What this briefing shows, recorded once per clinic-day after the response is
+  // sent, so the learning loop can later tell "recommended and left" from "never
+  // recommended". The render itself writes nothing.
+  const shown = snapshotFindings(result.findings, suppressedCategories);
+  after(() => recordFindingSnapshot(profile.clinic_id, date, shown, { startedAt: result.execution.startedAt, version: result.execution.version }));
 
   const { problems, actions } = buildBriefing(
     result,
@@ -203,6 +232,21 @@ export default async function BusinessBrainPage() {
       {/* Last, and deliberately: the page's job is what to do today. This is a
           look back, useful but never the headline. */}
       <ReminderOutcomes outcomes={reminderOutcomes} />
+    </PageShell>
+  );
+}
+
+/** The one failure state: nothing about the clinic is claimed when it could not be read. */
+function UnavailableBriefing() {
+  return (
+    <PageShell subtitle="Your daily clinic check-up">
+      <div className="bg-surface border border-border rounded-xl">
+        <EmptyState
+          icon={<AlertTriangle className="h-5 w-5" />}
+          title="Couldn't check your clinic today"
+          description="Something went wrong reading your records. Everything else in OraMedha still works — try refreshing in a minute."
+        />
+      </div>
     </PageShell>
   );
 }

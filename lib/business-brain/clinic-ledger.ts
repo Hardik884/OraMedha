@@ -47,6 +47,8 @@
 
 import "server-only";
 
+import { readAll, readUpTo, type PageQuery } from "./paged-read";
+
 import {
   LedgerFactKind,
   type ActionCompletionFact,
@@ -98,11 +100,6 @@ export const MAX_LEDGER_PATIENTS = 200;
 /** Ids per `in (...)` filter, so a large parent set never builds an oversized URL. */
 const ID_CHUNK = 100;
 
-/** Narrow `unknown` PostgREST payloads to the row shape a query selected. */
-function rows<T>(data: unknown): T[] {
-  return (data ?? []) as T[];
-}
-
 function distinct(ids: readonly (string | null | undefined)[]): string[] {
   const seen = new Set<string>();
   for (const id of ids) if (typeof id === "string" && id.length > 0) seen.add(id);
@@ -131,12 +128,20 @@ function localDateOf(iso: string, timezone: string): string {
 
 type QueryResult = PromiseLike<{ data: unknown; error: { message: string } | null }>;
 
-/** Throw on a PostgREST error; a failed read must never look like an empty one. */
-async function read<T>(label: string, query: QueryResult): Promise<T[]> {
-  const { data, error } = await query;
-  if (error) throw new Error(`clinic ledger (${label}): ${error.message}`);
-  return rows<T>(data);
+/**
+ * Up to `fetchLimit` rows of an ordered query, paged under the PostgREST row cap.
+ *
+ * Callers ask for `limit + 1` and pass the result to `capped`, which marks the
+ * kind truncated when more than `limit` came back. Before paging, the server's
+ * 1000-row cap stopped every read at 1000 first, so a window of 1200
+ * appointments came back as 1000 and was reported complete.
+ */
+async function readWindow<T>(label: string, page: PageQuery, fetchLimit: number): Promise<T[]> {
+  return (await readUpTo<T>(`clinic ledger (${label})`, page, fetchLimit)).rows;
 }
+
+/** Most rows a whole-clinic open-work read may return before the read is refused. */
+const MAX_OPEN_WORK_ROWS = 250_000;
 
 /** Cap a merged result at `limit`, reporting whether anything was cut. */
 function capped<T>(all: readonly T[], limit: number): { rows: T[]; truncated: boolean } {
@@ -557,9 +562,10 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
       treatmentEventRows,
       completionRows,
     ] = await Promise.all([
-      read<AppointmentRow>(
+      readWindow<AppointmentRow>(
         "appointments",
-        this.db
+        (from, to) =>
+          this.db
           .from("appointments")
           .select(APPOINTMENT_COLUMNS)
           .eq("clinic_id", clinicId)
@@ -568,11 +574,14 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .lte("created_at", asOf)
           .order("scheduled_at", { ascending: true })
           .order("id", { ascending: true })
-          .limit(fetchLimit),
+          
+            .range(from, to),
+        fetchLimit,
       ),
-      read<TreatmentRow>(
+      readWindow<TreatmentRow>(
         "treatments",
-        this.db
+        (from, to) =>
+          this.db
           .from("treatments")
           .select(TREATMENT_COLUMNS)
           .eq("clinic_id", clinicId)
@@ -581,11 +590,14 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`)
           .order("created_at", { ascending: true })
           .order("id", { ascending: true })
-          .limit(fetchLimit),
+          
+            .range(from, to),
+        fetchLimit,
       ),
-      read<QueueRow>(
+      readWindow<QueueRow>(
         "queue_entries",
-        this.db
+        (from, to) =>
+          this.db
           .from("queue_entries")
           .select(QUEUE_COLUMNS)
           .eq("clinic_id", clinicId)
@@ -593,11 +605,14 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .lte("checked_in_at", asOf)
           .order("checked_in_at", { ascending: true })
           .order("id", { ascending: true })
-          .limit(fetchLimit),
+          
+            .range(from, to),
+        fetchLimit,
       ),
-      read<FollowUpRow>(
+      readWindow<FollowUpRow>(
         "follow_ups",
-        this.db
+        (from, to) =>
+          this.db
           .from("follow_ups")
           .select(FOLLOW_UP_COLUMNS)
           .eq("clinic_id", clinicId)
@@ -606,11 +621,14 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .lte("created_at", asOf)
           .order("due_date", { ascending: true })
           .order("id", { ascending: true })
-          .limit(fetchLimit),
+          
+            .range(from, to),
+        fetchLimit,
       ),
-      read<PaymentRow>(
+      readWindow<PaymentRow>(
         "payments",
-        this.db
+        (from, to) =>
+          this.db
           .from("payments")
           .select(PAYMENT_COLUMNS)
           .eq("clinic_id", clinicId)
@@ -619,12 +637,15 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .lte("payment_date", asOfDate)
           .order("payment_date", { ascending: true })
           .order("id", { ascending: true })
-          .limit(fetchLimit),
+          
+            .range(from, to),
+        fetchLimit,
       ),
       this.unlessWithheld(LedgerFactKind.REMINDER_SEND, () =>
-        read<ReminderRow>(
+        readWindow<ReminderRow>(
           "reminder_logs",
-          this.db
+          (from, to) =>
+            this.db
             .from("reminder_logs")
             .select(REMINDER_COLUMNS)
             .eq("clinic_id", clinicId)
@@ -632,13 +653,16 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
             .lte("sent_at", asOf)
             .order("sent_at", { ascending: true })
             .order("id", { ascending: true })
-            .limit(fetchLimit),
+            
+              .range(from, to),
+          fetchLimit,
         ),
       ),
       this.unlessWithheld(LedgerFactKind.TREATMENT_EVENT, () =>
-        read<TreatmentEventRow>(
+        readWindow<TreatmentEventRow>(
           "treatment_history",
-          this.db
+          (from, to) =>
+            this.db
             .from("treatment_history")
             .select(TREATMENT_EVENT_COLUMNS)
             .eq("clinic_id", clinicId)
@@ -646,13 +670,16 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
             .lte("timestamp", asOf)
             .order("timestamp", { ascending: true })
             .order("id", { ascending: true })
-            .limit(fetchLimit),
+            
+              .range(from, to),
+          fetchLimit,
         ),
       ),
       this.unlessWithheld(LedgerFactKind.ACTION_COMPLETION, () =>
-        read<CompletionRow>(
+        readWindow<CompletionRow>(
           "action_completions",
-          this.db
+          (from, to) =>
+            this.db
             .from("action_completions")
             .select(COMPLETION_COLUMNS)
             .eq("clinic_id", clinicId)
@@ -660,7 +687,9 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
             .lte("completed_at", asOf)
             .order("completed_at", { ascending: true })
             .order("id", { ascending: true })
-            .limit(fetchLimit),
+            
+              .range(from, to),
+          fetchLimit,
         ),
       ),
     ]);
@@ -712,9 +741,10 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
     const end = getUtcBoundariesForLocalDate(scope.to, this.timezone).end;
 
     const windowAppointments = capped(
-      await read<AppointmentRow>(
+      await readWindow<AppointmentRow>(
         "appointments",
-        this.db
+        (from, to) =>
+          this.db
           .from("appointments")
           .select(APPOINTMENT_COLUMNS)
           .eq("clinic_id", clinicId)
@@ -724,7 +754,9 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .lte("created_at", asOf)
           .order("scheduled_at", { ascending: true })
           .order("id", { ascending: true })
-          .limit(fetchLimit),
+          
+            .range(from, to),
+        fetchLimit,
       ),
       limit,
     );
@@ -747,7 +779,7 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
     const patientIds = [...livePatients];
 
     const [queueRows, eventRows, treatmentRows] = await Promise.all([
-      this.readByIds<QueueRow>("queue_entries", appointmentIds, (ids) =>
+      this.readByIds<QueueRow>("queue_entries", appointmentIds, (ids, from, to) =>
         this.db
           .from("queue_entries")
           .select(QUEUE_COLUMNS)
@@ -755,10 +787,12 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .in("appointment_id", ids)
           .lte("checked_in_at", asOf)
           .order("checked_in_at", { ascending: true })
-          .limit(fetchLimit),
+          .order("id", { ascending: true })
+          .range(from, to),
+        fetchLimit,
       ),
       this.readAppointmentEvents(appointmentIds, asOf, fetchLimit),
-      this.readByIds<TreatmentRow>("treatments", appointmentIds, (ids) =>
+      this.readByIds<TreatmentRow>("treatments", appointmentIds, (ids, from, to) =>
         this.db
           .from("treatments")
           .select(TREATMENT_COLUMNS)
@@ -767,7 +801,9 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .in("appointment_id", ids)
           .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`)
           .order("created_at", { ascending: true })
-          .limit(fetchLimit),
+          .order("id", { ascending: true })
+          .range(from, to),
+        fetchLimit,
       ),
     ]);
 
@@ -776,7 +812,7 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
     const originFollowUpIds = distinct(appointmentRows.map((a) => a.follow_up_id));
 
     const followUpQuery = (column: "id" | "appointment_id" | "treatment_id", ids: readonly string[]) =>
-      this.readByIds<FollowUpRow>(`follow_ups by ${column}`, ids, (chunk) =>
+      this.readByIds<FollowUpRow>(`follow_ups by ${column}`, ids, (chunk, from, to) =>
         this.db
           .from("follow_ups")
           .select(FOLLOW_UP_COLUMNS)
@@ -784,10 +820,12 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .is("deleted_at", null)
           .in(column, chunk)
           .lte("created_at", asOf)
-          .limit(fetchLimit),
+          .order("id", { ascending: true })
+          .range(from, to),
+        fetchLimit,
       );
     const paymentQuery = (column: "appointment_id" | "treatment_id", ids: readonly string[]) =>
-      this.readByIds<PaymentRow>(`payments by ${column}`, ids, (chunk) =>
+      this.readByIds<PaymentRow>(`payments by ${column}`, ids, (chunk, from, to) =>
         this.db
           .from("payments")
           .select(PAYMENT_COLUMNS)
@@ -795,7 +833,9 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
           .is("deleted_at", null)
           .in(column, chunk)
           .lte("payment_date", localDateOf(asOf, this.timezone))
-          .limit(fetchLimit),
+          .order("id", { ascending: true })
+          .range(from, to),
+        fetchLimit,
       );
 
     const [
@@ -814,7 +854,7 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
       paymentQuery("appointment_id", appointmentIds),
       paymentQuery("treatment_id", treatmentIds),
       this.unlessWithheld(LedgerFactKind.TREATMENT_EVENT, () =>
-        this.readByIds<TreatmentEventRow>("treatment_history", treatmentIds, (ids) =>
+        this.readByIds<TreatmentEventRow>("treatment_history", treatmentIds, (ids, from, to) =>
           this.db
             .from("treatment_history")
             .select(TREATMENT_EVENT_COLUMNS)
@@ -822,11 +862,13 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
             .in("treatment_id", ids)
             .lte("timestamp", asOf)
             .order("timestamp", { ascending: true })
-            .limit(fetchLimit),
+            .order("id", { ascending: true })
+            .range(from, to),
+          fetchLimit,
         ),
       ),
       this.unlessWithheld(LedgerFactKind.REMINDER_SEND, () =>
-        this.readByIds<ReminderRow>("reminder_logs", patientIds, (ids) =>
+        this.readByIds<ReminderRow>("reminder_logs", patientIds, (ids, from, to) =>
           this.db
             .from("reminder_logs")
             .select(REMINDER_COLUMNS)
@@ -836,13 +878,16 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
             .lte("sent_at", end)
             .lte("sent_at", asOf)
             .order("sent_at", { ascending: true })
-            .limit(fetchLimit),
+            .order("id", { ascending: true })
+            .range(from, to),
+          fetchLimit,
         ),
       ),
       this.unlessWithheld(LedgerFactKind.ACTION_COMPLETION, () =>
-        read<CompletionRow>(
+        readWindow<CompletionRow>(
           "action_completions",
-          this.db
+          (from, to) =>
+            this.db
             .from("action_completions")
             .select(COMPLETION_COLUMNS)
             .eq("clinic_id", clinicId)
@@ -850,7 +895,9 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
             .lte("completed_at", end)
             .lte("completed_at", asOf)
             .order("completed_at", { ascending: true })
-            .limit(fetchLimit),
+            .order("id", { ascending: true })
+              .range(from, to),
+          fetchLimit,
         ),
       ),
     ]);
@@ -897,23 +944,25 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
   ): Promise<PatientRow[]> {
     if (ids.length === 0) return [];
     const [patients, withdrawals] = await Promise.all([
-      this.readByIds<PatientQueryRow>("patients", ids, (chunk) => {
+      this.readByIds<PatientQueryRow>("patients", ids, (chunk, from, to) => {
         const query = this.db
           .from("patients")
           .select(PATIENT_COLUMNS)
           .eq("clinic_id", clinicId)
           .is("deleted_at", null)
           .in("id", chunk);
-        return asOf === null ? query : query.lte("created_at", asOf);
+        return (asOf === null ? query : query.lte("created_at", asOf)).order("id", { ascending: true }).range(from, to);
       }),
-      this.readByIds<{ patient_id: string }>("patient_data_consent_state", ids, (chunk) =>
+      this.readByIds<{ patient_id: string }>("patient_data_consent_state", ids, (chunk, from, to) =>
         this.db
           .from("patient_data_consent_state")
           .select("patient_id")
           .eq("clinic_id", clinicId)
           .eq("category", "communications")
           .eq("decision", "withdrawn")
-          .in("patient_id", chunk),
+          .in("patient_id", chunk)
+          .order("patient_id", { ascending: true })
+          .range(from, to),
       ),
     ]);
     const withdrawn = new Set(withdrawals.map((w) => w.patient_id));
@@ -997,44 +1046,61 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
     const asOfDate = localDateOf(asOf, this.timezone);
 
     const [planned, overdue, charges, payments] = await Promise.all([
-      read<{ patient_id: string }>(
-        "open work: planned treatments",
-        this.db
-          .from("treatments")
-          .select("patient_id")
-          .eq("clinic_id", clinicId)
-          .is("deleted_at", null)
-          .eq("status", "planned")
-          .lte("created_at", asOf),
+      // Whole or refused: a balance judged from part of a ledger is a wrong balance.
+      readAll<{ patient_id: string }>(
+        "clinic ledger (open work: planned treatments)",
+        (from, to) =>
+          this.db
+            .from("treatments")
+            .select("patient_id")
+            .eq("clinic_id", clinicId)
+            .is("deleted_at", null)
+            .eq("status", "planned")
+            .lte("created_at", asOf)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_OPEN_WORK_ROWS,
       ),
-      read<{ patient_id: string }>(
-        "open work: overdue follow-ups",
-        this.db
-          .from("follow_ups")
-          .select("patient_id")
-          .eq("clinic_id", clinicId)
-          .is("deleted_at", null)
-          .eq("status", "pending")
-          .lt("due_date", asOfDate)
-          .lte("created_at", asOf),
+      readAll<{ patient_id: string }>(
+        "clinic ledger (open work: overdue follow-ups)",
+        (from, to) =>
+          this.db
+            .from("follow_ups")
+            .select("patient_id")
+            .eq("clinic_id", clinicId)
+            .is("deleted_at", null)
+            .eq("status", "pending")
+            .lt("due_date", asOfDate)
+            .lte("created_at", asOf)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_OPEN_WORK_ROWS,
       ),
-      read<Omit<TreatmentRow, "id" | "appointment_id" | "treatment_type" | "created_at" | "consultant_id" | "performed_at">>(
-        "open work: charges",
-        this.db
-          .from("treatments")
-          .select("patient_id, status, cost, opd_charged, opd_fee, xray_taken, xray_cost")
-          .eq("clinic_id", clinicId)
-          .is("deleted_at", null)
-          .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`),
+      readAll<Omit<TreatmentRow, "id" | "appointment_id" | "treatment_type" | "created_at" | "consultant_id" | "performed_at">>(
+        "clinic ledger (open work: charges)",
+        (from, to) =>
+          this.db
+            .from("treatments")
+            .select("patient_id, status, cost, opd_charged, opd_fee, xray_taken, xray_cost")
+            .eq("clinic_id", clinicId)
+            .is("deleted_at", null)
+            .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_OPEN_WORK_ROWS,
       ),
-      read<{ patient_id: string; amount: number | string }>(
-        "open work: payments",
-        this.db
-          .from("payments")
-          .select("patient_id, amount")
-          .eq("clinic_id", clinicId)
-          .is("deleted_at", null)
-          .lte("payment_date", asOfDate),
+      readAll<{ patient_id: string; amount: number | string }>(
+        "clinic ledger (open work: payments)",
+        (from, to) =>
+          this.db
+            .from("payments")
+            .select("patient_id, amount")
+            .eq("clinic_id", clinicId)
+            .is("deleted_at", null)
+            .lte("payment_date", asOfDate)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_OPEN_WORK_ROWS,
       ),
     ]);
 
@@ -1082,25 +1148,40 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
     asOf: string,
     fetchLimit: number,
   ): Promise<AppointmentEventRow[]> {
-    return this.readByIds<AppointmentEventRow>("appointment_history", appointmentIds, (ids) =>
-      this.db
-        .from("appointment_history")
-        .select(APPOINTMENT_EVENT_COLUMNS)
-        .in("appointment_id", ids)
-        .lte("timestamp", asOf)
-        .order("timestamp", { ascending: true })
-        .limit(fetchLimit),
+    return this.readByIds<AppointmentEventRow>(
+      "appointment_history",
+      appointmentIds,
+      (ids, from, to) =>
+        this.db
+          .from("appointment_history")
+          .select(APPOINTMENT_EVENT_COLUMNS)
+          .in("appointment_id", ids)
+          .lte("timestamp", asOf)
+          .order("timestamp", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+      fetchLimit,
     );
   }
 
-  /** Run a query per id chunk and concatenate. Returns [] for no ids without a round-trip. */
+  /**
+   * Run an ordered query per id chunk, paged, and concatenate. Returns [] for no
+   * ids without a round-trip. Each chunk returns at most `perChunkLimit` rows; a
+   * caller that caps the total passes its own fetch limit, so a cut chunk still
+   * surfaces as more than the caller's limit.
+   */
   private async readByIds<T>(
     label: string,
     ids: readonly string[],
-    query: (chunk: string[]) => QueryResult,
+    query: (chunk: string[], from: number, to: number) => QueryResult,
+    perChunkLimit: number = MAX_OPEN_WORK_ROWS,
   ): Promise<T[]> {
     if (ids.length === 0) return [];
-    const parts = await Promise.all(chunks(ids, ID_CHUNK).map((chunk) => read<T>(label, query(chunk))));
+    const parts = await Promise.all(
+      chunks(ids, ID_CHUNK).map(
+        async (chunk) => (await readUpTo<T>(`clinic ledger (${label})`, (from, to) => query(chunk, from, to), perChunkLimit)).rows,
+      ),
+    );
     return parts.flat();
   }
 

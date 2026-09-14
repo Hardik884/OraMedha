@@ -34,6 +34,8 @@ import {
   type Workflow,
   TrajectoryState,
 } from "../../domain";
+import type { ClinicMemoryReader } from "../../memory/memory-reader";
+import { addDays } from "../../utils";
 import { FINDINGS_CONFIG } from "./findings-config";
 
 export class FindingIntegrityError extends Error {
@@ -59,6 +61,8 @@ export interface FindingSources {
   readonly trajectories?: readonly MetricTrajectory[];
   /** Root-cause analyses, each naming the finding it belongs to. */
   readonly rootCauses?: readonly RootCauseAnalysis[];
+  /** This clinic's memory, read through its reader. Supporting evidence only. */
+  readonly memory?: ClinicMemoryReader;
 }
 
 // ── trajectories ────────────────────────────────────────────────────────────
@@ -415,7 +419,9 @@ function fromAchievement(sources: FindingSources, achievement: Achievement): Fin
  * sequence, never a claim that the action produced it.
  */
 function fromOutcome(sources: FindingSources, outcome: Outcome): Finding | null {
-  if (outcome.attribution !== "observed_after" || outcome.metric === undefined || !outcome.metric.improved) {
+  // Any rung from observed_after up states a measured sequence; insufficient
+  // evidence states none, and a worsening is never a win at any rung.
+  if (outcome.attribution === "insufficient_evidence" || outcome.metric === undefined || !outcome.metric.improved) {
     return null;
   }
   assertClinic(sources, outcome.id, clinicOf(outcome.constraintId));
@@ -535,7 +541,60 @@ export function normalizeFindings(sources: FindingSources): readonly Finding[] {
     ...sources.achievements.map((a) => fromAchievement(sources, a)),
     ...(sources.outcomes ?? []).map((o) => fromOutcome(sources, o)).filter((f): f is Finding => f !== null),
   ];
-  return attachRootCauses(sources, findings).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return attachMemory(sources, attachRootCauses(sources, findings)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * Memory travels on the negative finding it describes, and only from an ACTIVE
+ * entry at the reader's confidence floor. A weakening, stale or rejected memory
+ * says nothing here, and a missing memory is simply absent — never "usual".
+ */
+function attachMemory(sources: FindingSources, findings: Finding[]): Finding[] {
+  const memory = sources.memory;
+  if (memory === undefined) return findings;
+  if (memory.clinicId !== sources.clinicId) {
+    throw new FindingIntegrityError(`Memory for clinic ${memory.clinicId} cannot inform findings for ${sources.clinicId}.`);
+  }
+  // A stale BUILD is silent: its entries were last revalidated days ago, so none
+  // of them may support today's findings however "active" they were then.
+  const builtFor = memory.builtFor;
+  if (builtFor === null || builtFor < addDays(sources.date, -FINDINGS_CONFIG.memoryMaxBuildAgeDays) || builtFor > sources.date) {
+    return findings;
+  }
+  return findings.map((f) => {
+    if (f.polarity !== "negative" || f.category === null) return f;
+    const problem = memory.recurringProblems(f.category).entries.find((e) => e.status === "active");
+    const lead = f.evidence.trajectories[0];
+    const unusual = lead === undefined ? null : memory.unusual(lead.metricKey, lead.current);
+    const recurrence =
+      problem === undefined
+        ? null
+        : {
+            memoryId: problem.id,
+            episodes: Number(problem.facts.episodes),
+            windowDays: Number(problem.facts.windowDays),
+            typicalResolutionDays: problem.facts.typicalResolutionDays === null ? null : Number(problem.facts.typicalResolutionDays),
+            confidence: problem.confidence,
+            builtFor: memory.builtFor as string,
+          };
+    const normalRange =
+      unusual === null || unusual.range === null || lead === undefined || lead.current === null
+        ? null
+        : {
+            memoryId: unusual.range.id,
+            metricKey: lead.metricKey,
+            label: lead.label,
+            current: lead.current,
+            median: Number(unusual.range.facts.median),
+            lower: Number(unusual.range.facts.lower),
+            upper: Number(unusual.range.facts.upper),
+            direction: unusual.direction,
+            confidence: unusual.range.confidence,
+            builtFor: memory.builtFor as string,
+          };
+    if (recurrence === null && normalRange === null) return f;
+    return { ...f, evidence: { ...f.evidence, memory: { recurrence, normalRange } } };
+  });
 }
 
 /**

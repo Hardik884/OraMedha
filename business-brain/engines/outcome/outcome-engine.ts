@@ -52,6 +52,7 @@
  * as every other engine in this module requires.
  */
 
+import { completionEvidence, EvidenceTiming } from "../../provenance/evidence-quality";
 import {
   CompletionSource,
   OutcomeAttribution,
@@ -63,7 +64,9 @@ import {
   type TargetVerification,
 } from "../../domain";
 import { BaselineDirection } from "../baseline";
+import { assessWindowedEvidence, localDate, type OutcomeHistoryInput, type WindowedAssessment } from "./attribution";
 import { OUTCOME_SPEC_BY_CATEGORY } from "./outcome-catalog";
+import { resolveOutcome, type ResolutionInput } from "./resolution";
 
 export interface OutcomeEngineInput {
   /** Completions to assess, in any order. */
@@ -78,11 +81,40 @@ export interface OutcomeEngineInput {
   readonly metrics: readonly Metric[];
   /** Logical assessment time, injected. */
   readonly now: string;
+  /**
+   * The clinic's own stored history, for the windowed rungs above
+   * `observed_after`. Absent, and every outcome is exactly what it was before
+   * those rungs existed.
+   */
+  readonly history?: OutcomeHistoryInput;
+  /** Recorded findings since each completion, for what became of the finding. */
+  readonly resolution?: ResolutionInput;
 }
 
 export interface OutcomeResult {
   /** One outcome per completion, newest completion first. */
   readonly outcomes: readonly Outcome[];
+}
+
+/**
+ * One completion per briefing card.
+ *
+ * A card's constraint id names its category, clinic and run date, so two
+ * completions carrying the same id are the same action recorded twice — a
+ * double-press, or a retry after a slow response. Kept as two, they read as two
+ * overlapping actions: each becomes the other's competing explanation, capping
+ * both, and learning counts one piece of work twice. The earliest is kept; order
+ * of input never matters.
+ */
+export function dedupeCompletions(completions: readonly ActionCompletionRecord[]): ActionCompletionRecord[] {
+  const earliest = new Map<string, ActionCompletionRecord>();
+  for (const c of completions) {
+    const current = earliest.get(c.constraintId);
+    const cMs = Date.parse(c.completedAt);
+    const currentMs = current === undefined ? Number.POSITIVE_INFINITY : Date.parse(current.completedAt);
+    if (current === undefined || cMs < currentMs || (cMs === currentMs && c.id < current.id)) earliest.set(c.constraintId, c);
+  }
+  return [...earliest.values()];
 }
 
 /** Metric ids are `<key>:<clinicId>:<date>`; the key never contains a colon. */
@@ -143,6 +175,8 @@ function describeTargets(verification: TargetVerification | undefined): string {
  */
 export function deriveOutcomes(input: OutcomeEngineInput): OutcomeResult {
   const outcomes: Outcome[] = [];
+  const windowed: ReadonlyMap<string, WindowedAssessment> =
+    input.history === undefined ? new Map() : assessWindowedEvidence(input.completions, input.history, input.now);
 
   for (const completion of input.completions) {
     const spec = OUTCOME_SPEC_BY_CATEGORY.get(completion.category);
@@ -177,16 +211,23 @@ export function deriveOutcomes(input: OutcomeEngineInput): OutcomeResult {
 
     // ── The rung ─────────────────────────────────────────────────────────────
     //
-    // Exactly one thing decides it: whether a movement could be measured. The
-    // entity facts do NOT raise it — promoting concentration in the targets to a
-    // stronger claim is `likely_contributed`, which is not implemented and must
-    // not be reached by accident.
-    const attribution =
-      movement === undefined
-        ? OutcomeAttribution.INSUFFICIENT_EVIDENCE
-        : OutcomeAttribution.OBSERVED_AFTER;
+    // Without history, exactly one thing decides it: whether a movement could be
+    // measured. The entity facts do NOT raise it — concentration in the targets
+    // alone is not the `likely_contributed` standard, which also needs the metric
+    // windows, the baseline variation and no overlapping action.
+    //
+    // With history supplied, the windowed requirements may raise it — and only
+    // they may. Every one must hold; see `attribution.ts`.
+    const assessment = windowed.get(completion.id);
+    const attribution = assessment?.strong
+      ? OutcomeAttribution.STRONG_EVIDENCE
+      : assessment?.likely
+        ? OutcomeAttribution.LIKELY_CONTRIBUTED
+        : movement === undefined
+          ? OutcomeAttribution.INSUFFICIENT_EVIDENCE
+          : OutcomeAttribution.OBSERVED_AFTER;
 
-    outcomes.push({
+    const outcome: Outcome = {
       id: `outcome.${completion.id}`,
       completionId: completion.id,
       category: completion.category,
@@ -197,9 +238,23 @@ export function deriveOutcomes(input: OutcomeEngineInput): OutcomeResult {
       attribution,
       targets: verification,
       metric: movement,
-      reasoning: reasonFor(completion, verification, movement),
+      reasoning: reasonFor(completion, verification, movement, assessment),
       recordedAt: input.now,
-    });
+      evidenceQuality: qualityOf(completion, verification, assessment, input.history?.confirmations.get(completion.id)?.timing),
+      ...(assessment === undefined ? {} : { evidence: assessment.evidence }),
+    };
+    outcomes.push(
+      input.resolution === undefined
+        ? outcome
+        : {
+            ...outcome,
+            resolution: resolveOutcome(
+              outcome,
+              assessment?.localDate ?? localDate(completion.completedAt, input.history?.timezone ?? "UTC"),
+              input.resolution,
+            ),
+          },
+    );
   }
 
   // Newest completion first, then by id so two runs over identical data produce
@@ -216,6 +271,38 @@ export function deriveOutcomes(input: OutcomeEngineInput): OutcomeResult {
 }
 
 /**
+ * What each half of an outcome rests on. The completion is what it was recorded
+ * as; the results are counted by kind; point-in-time holds only when the windowed
+ * evidence said so.
+ */
+function qualityOf(
+  completion: ActionCompletionRecord,
+  verification: TargetVerification | undefined,
+  assessment: WindowedAssessment | undefined,
+  confirmationTiming: EvidenceTiming | undefined,
+): Outcome["evidenceQuality"] {
+  const own = completionEvidence(completion.source);
+  const windowTargets = assessment?.evidence.targets ?? null;
+  const timing = confirmationTiming ?? verification?.timing ?? EvidenceTiming.UNKNOWN;
+  const results =
+    windowTargets !== null && windowTargets.verifiable
+      ? { objectivelyObserved: windowTargets.confirmedWithinWindow, notObserved: windowTargets.declaredWithinWindow, timing }
+      : verification !== undefined && verification.verifiable
+        ? {
+            objectivelyObserved: verification.observed ?? 0,
+            notObserved: verification.confirmed - (verification.observed ?? 0),
+            timing,
+          }
+        : null;
+  return {
+    completion: own.source,
+    completionTime: own.time,
+    results,
+    pointInTime: assessment?.evidence.requirements.find((r) => r.key === "evidence_point_in_time")?.met === true,
+  };
+}
+
+/**
  * Why the assessment landed where it did.
  *
  * Factual throughout. States what was recorded, what was checked, and what
@@ -226,6 +313,7 @@ function reasonFor(
   completion: ActionCompletionRecord,
   verification: TargetVerification | undefined,
   movement: OutcomeMetricMovement | undefined,
+  assessment?: WindowedAssessment,
 ): string {
   const how =
     completion.source === CompletionSource.DECLARED
@@ -240,5 +328,17 @@ function reasonFor(
       // special-cased makes the guard weaker for everyone who adds to it later.
       : `The headline measurement read ${movement.before} at the time of completion and reads ${movement.after} now. These are two readings in sequence, with no link asserted between them.`;
 
-  return `${how} ${describeTargets(verification)} ${metricPart}`;
+  const base = `${how} ${describeTargets(verification)} ${metricPart}`;
+  // Only a raised rung changes the sentence. Everything short of it is carried on
+  // `evidence`, so an outcome that stays where it was reads exactly as it did.
+  return assessment?.likely ? `${base} ${evidencePart(assessment)}` : base;
+}
+
+/** The windowed evidence behind a raised rung, in one or two sentences. Association wording only. */
+function evidencePart(assessment: WindowedAssessment): string {
+  const e = assessment.evidence;
+  if (assessment.strong) {
+    return `Every requirement held within ${e.horizonDays} days, and ${e.comparable.likelyContributed} earlier comparable actions at this clinic met the same standard across ${e.comparable.distinctWeeks} separate weeks. This is a repeated association at this clinic, not proof of effect.`;
+  }
+  return `Every requirement held within ${e.horizonDays} days: the measurement moved beyond its normal variation, most targeted patients showed the intended result, and no competing explanation was found. This is an association, not proof of effect.`;
 }

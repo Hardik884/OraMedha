@@ -30,8 +30,8 @@
  * movement helped; otherwise the completion is reported on its own.
  */
 
-import type { Outcome } from "@/business-brain";
-import { OutcomeAttribution } from "@/business-brain";
+import type { ClinicLearning, Outcome, ResolvedDecision } from "@/business-brain";
+import { LearningKind, OutcomeAttribution } from "@/business-brain";
 
 /** One completed action, ready to render. */
 export interface OutcomeView {
@@ -57,6 +57,81 @@ export interface OutcomeView {
   readonly movement: string | null;
   /** Whether the clinic's data confirmed anything at all about the targets. */
   readonly isVerified: boolean;
+  /**
+   * The collapsed "What happened after?" detail, or null when the outcome was
+   * assessed without history (nothing more can be said than the lines above).
+   */
+  readonly whatHappened: WhatHappenedView | null;
+}
+
+/** The detail behind one completed action. Every line is a measurement or a stated gap. */
+export interface WhatHappenedView {
+  /** The attribution rung, in words. */
+  readonly attributionLabel: string;
+  readonly evidence: readonly string[];
+  /** What became of the problem, or null when resolution was not assessed. */
+  readonly resolution: string | null;
+  /** What this clinic's history shows for this action, when a learning cleared its threshold. */
+  readonly learning: string | null;
+  /**
+   * The suggestion that learning produced, and the clinic's recorded decision on
+   * it. Null when the learning proposes nothing. Deciding records a choice; it
+   * changes no rule.
+   */
+  readonly proposal: { readonly id: string; readonly statement: string; readonly decision: "accepted" | "rejected" | null } | null;
+}
+
+const ATTRIBUTION_LABEL: Readonly<Record<string, string>> = {
+  [OutcomeAttribution.INSUFFICIENT_EVIDENCE]: "Not enough evidence to say what followed",
+  [OutcomeAttribution.OBSERVED_AFTER]: "Observed after — a sequence, not a link",
+  [OutcomeAttribution.LIKELY_CONTRIBUTED]: "Likely contributed — every evidence check held",
+  [OutcomeAttribution.STRONG_EVIDENCE]: "Strong evidence — repeated at this clinic",
+};
+
+const LEARNING_SHOWN: ReadonlySet<string> = new Set([LearningKind.REPEATED_IMPROVEMENT, LearningKind.NO_MEASURABLE_CHANGE]);
+
+function whatHappened(
+  outcome: Outcome,
+  learning: ClinicLearning | null,
+  decisions: readonly ResolvedDecision[],
+): WhatHappenedView | null {
+  const e = outcome.evidence;
+  if (e === undefined) return null;
+  const lines: string[] = [];
+  if (e.window === "open") {
+    lines.push(`The evidence is read ${e.horizonDays} days after the action; that window is still open.`);
+  } else if (e.window === "not_applicable") {
+    lines.push("Nothing about this kind of action can be measured over the following weeks.");
+  } else {
+    const noun = e.metric === null ? undefined : METRIC_NOUN[e.metric.key];
+    if (e.metric !== null && e.metric.atHorizon !== null && noun !== undefined) {
+      const variation =
+        e.metric.normalVariation === null ? "" : ` (it normally varies by about ${formatMetric(e.metric.key, e.metric.normalVariation)})`;
+      lines.push(
+        `${noun} read ${formatMetric(e.metric.key, e.metric.atCompletion)} at the time and ${formatMetric(e.metric.key, e.metric.atHorizon)} after ${e.horizonDays} days${variation}.`,
+      );
+    }
+    if (e.targets !== null && e.targets.verifiable && e.targets.resolvable > 0) {
+      lines.push(`${e.targets.confirmedWithinWindow} of ${e.targets.resolvable} patients showed the intended result within ${e.horizonDays} days.`);
+    }
+    for (const c of e.competing) lines.push(c.detail);
+  }
+  const related = (learning?.learnings ?? []).find((l) => l.subject === outcome.category && LEARNING_SHOWN.has(l.kind));
+  const proposal = related === undefined ? undefined : learning?.proposals.find((p) => p.learningId === related.id);
+  return {
+    attributionLabel: ATTRIBUTION_LABEL[outcome.attribution] ?? outcome.attribution,
+    evidence: lines,
+    resolution: outcome.resolution?.statement ?? null,
+    learning: related?.statement ?? null,
+    proposal:
+      proposal === undefined
+        ? null
+        : {
+            id: proposal.id,
+            statement: proposal.statement,
+            decision: decisions.find((d) => d.target.type === "proposal" && d.target.id === proposal.id)?.decision ?? null,
+          },
+  };
 }
 
 /** What each category's action was, in the clinic's words rather than the key. */
@@ -131,7 +206,7 @@ function verifiedLine(outcome: Outcome): string | null {
  */
 function movementLine(outcome: Outcome): string | null {
   const metric = outcome.metric;
-  if (outcome.attribution !== OutcomeAttribution.OBSERVED_AFTER) return null;
+  if (outcome.attribution === OutcomeAttribution.INSUFFICIENT_EVIDENCE) return null;
   if (metric === undefined) return null;
   // The asymmetry. A worsening is never rendered; see the file header.
   if (!metric.improved) return null;
@@ -146,6 +221,8 @@ function movementLine(outcome: Outcome): string | null {
 export function buildOutcomeViews(
   outcomes: readonly Outcome[],
   now: string,
+  learning: ClinicLearning | null = null,
+  decisions: readonly ResolvedDecision[] = [],
 ): readonly OutcomeView[] {
   return outcomes.map((outcome) => {
     const verified = verifiedLine(outcome);
@@ -157,6 +234,7 @@ export function buildOutcomeViews(
       verified,
       movement: movementLine(outcome),
       isVerified: verified !== null,
+      whatHappened: whatHappened(outcome, learning, decisions),
     };
   });
 }
@@ -172,9 +250,11 @@ export function buildOutcomeViews(
  * It does not claim the action produced the win, and the wording carries no
  * connective that could be read that way. Two facts sit next to each other:
  * something was done, and these specific patients have since been seen to. That
- * is the honest limit of what OraMedha can say today — the attribution ladder
- * that could say more (`likely_contributed`) is not built, and inventing its
- * conclusion here would be the exact failure the ladder exists to prevent.
+ * is the honest limit of what a single win can carry. The stronger rungs
+ * (`likely_contributed`, `strong_evidence`) are decided only by the windowed
+ * requirements in `engines/outcome/attribution.ts`, never by this context line,
+ * and inventing their conclusion here would be the exact failure the ladder
+ * exists to prevent.
  */
 export function outcomeContextFor(
   metricKey: string,

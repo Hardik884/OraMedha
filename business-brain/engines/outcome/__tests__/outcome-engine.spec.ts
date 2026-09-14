@@ -8,8 +8,8 @@
  *   - a completion the engine can say nothing about must still produce an
  *     outcome, or "we could not measure this" becomes indistinguishable from
  *     "this never happened";
- *   - entity facts must NOT raise the attribution rung, however compelling they
- *     look, because the rung above is not implemented;
+ *   - entity facts alone must NOT raise the attribution rung, however compelling
+ *     they look: the rungs above need the windowed history requirements;
  *   - and nothing, anywhere, may claim one thing caused another.
  */
 
@@ -23,7 +23,8 @@ import {
   type TargetVerification,
 } from "../../../domain";
 import { buildMetric, MetricKey } from "../../metrics/metric-ids";
-import { deriveOutcomes } from "../outcome-engine";
+import { dedupeCompletions, deriveOutcomes } from "../outcome-engine";
+import { inputsFromHistory } from "../../learning/from-history";
 import { OUTCOME_SPECS, OUTCOME_SPEC_BY_CATEGORY } from "../outcome-catalog";
 
 const CLINIC = "clinic_out";
@@ -173,9 +174,9 @@ describe("entity-level verification", () => {
 
   it("does NOT raise the rung, however convincing the concentration", () => {
     // The most important assertion in this file. 8 of 8 targeted patients
-    // confirmed is exactly the evidence `likely_contributed` will rest on — and
-    // that rung is not built, so reaching it here would be the engine asserting
-    // something nobody implemented or reviewed.
+    // confirmed is part of the evidence `likely_contributed` rests on — but only
+    // part: without the windowed history requirements, reaching it here would be
+    // the engine asserting something the evidence standard does not support.
     const { outcomes } = run(
       [completion()],
       [verification({ confirmed: 8, resolvable: 8 })],
@@ -373,5 +374,55 @@ describe("the outcome catalogue", () => {
     ]) {
       expect(OUTCOME_SPEC_BY_CATEGORY.get(category), category).toBeDefined();
     }
+  });
+});
+
+describe("duplicate completions of one card", () => {
+  // Two receptionists pressing Done on the same card, or one double-click before
+  // the idempotency check, is one action. Counting it twice would double the
+  // evidence behind a learning.
+  const late = completion({ id: "b", completedAt: "2026-09-12T09:00:00.000Z" });
+  const earlyB = completion({ id: "d", completedAt: "2026-09-12T08:00:00.000Z" });
+  const earlyA = completion({ id: "c", completedAt: "2026-09-12T08:00:00.000+00:00" });
+  const otherCard = completion({ id: "e", constraintId: `constraint.retention:${CLINIC}:2026-09-11` });
+
+  it("keeps the earliest completion per card, breaking ties by id, whatever the order", () => {
+    const orders = [
+      [late, earlyB, earlyA, otherCard],
+      [otherCard, earlyA, earlyB, late],
+      [earlyB, otherCard, late, earlyA],
+    ];
+    for (const order of orders) {
+      expect(dedupeCompletions(order).map((c) => c.id).sort()).toEqual(["c", "e"]);
+    }
+  });
+
+  it("counts a card pressed twice once in the history the Learning Engine reads", () => {
+    const fact = (c: ActionCompletionRecord) => ({
+      clinicId: CLINIC,
+      id: c.id,
+      category: c.category,
+      constraintId: c.constraintId,
+      completedAt: c.completedAt,
+      source: "declared" as const,
+      targetPatientIds: c.targetPatientIds,
+      metricKey: null,
+      metricValue: null,
+    });
+    const inputs = inputsFromHistory({
+      clinicId: CLINIC,
+      scope: { clinicId: CLINIC, from: "2026-09-01", to: DATE, asOf: NOW, limit: 100, metricKeys: [] },
+      timezone: "UTC",
+      completions: [late, earlyA, otherCard].map(fact),
+      confirmations: [late, earlyA, otherCard].map((c) => ({ completionId: c.id, targeted: 8, resolvable: 8, verifiable: true, delaysDays: [1] })),
+      snapshots: [],
+      dismissals: [],
+      metricDays: [],
+      truncated: [],
+      withheld: [],
+    });
+    expect(inputs.completions.map((c) => c.id).sort()).toEqual(["c", "e"]);
+    expect([...inputs.verifications.keys()].sort()).toEqual(["c", "e"]);
+    expect([...inputs.history.confirmations.keys()].sort()).toEqual(["c", "e"]);
   });
 });
