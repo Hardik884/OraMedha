@@ -344,6 +344,14 @@ Each patient record must store the following fields:
 
 **Behaviours:**
 - Status transitions must follow the lifecycle order. Invalid transitions (e.g., `completed` → `scheduled`) must be rejected.
+  **Enforced by the database too** (`20260918100200`): for signed-in callers a
+  trigger allows only the lifecycle, the dentist's direct completion from
+  `scheduled`/`checked_in` (a visit seen with no recorded arrival — no check-in
+  or call-in is invented), a receptionist completing a patient the live queue
+  has in the chair, the check-in rollback while nothing is queued, the patient's
+  own cancellation of a `scheduled` visit, and correction of a no-show the
+  nightly job INFERRED (no actor) within 7 days. `lib/appointments/visit-completion.ts`
+  is the application's copy of the last two rules.
 - Cancellation and `no_show` are terminal states.
 - On `completed`, trigger update of `patients.total_visits` and `patients.last_visit`.
 - Rescheduling updates `scheduled_at` on the existing record; the original value and actor are recorded in `appointment_history`.
@@ -371,6 +379,15 @@ The queue is a real-time view of patients who have checked in for the current da
 - Only one patient can be `in_progress` at a time per clinic.
 - Advancing the queue moves the current `in_progress` patient to `completed` and promotes the next `waiting` patient to `in_progress`.
 - Queue position is recalculated after any removal or skip.
+- **Removal is `removed_at`, never a DELETE** (`20260918100100`). Cancelling,
+  no-showing or deleting the patient takes the entry off the live queue and keeps
+  the row: the check-in happened, and it is waiting-time evidence. Every live
+  queue read filters `removed_at is null`; no session role holds DELETE
+  (`20260918100300`).
+- Starting a visit from the appointment list records the call-in on the
+  patient's existing queue entry (`lib/queue/call-in.ts`) — never creating one,
+  never overwriting a recorded `called_at`.
+- A completed visit with no `called_at` has an UNMEASURED wait, not a zero one.
 - **Supabase Realtime** must broadcast queue changes to all subscribed clients so patients and staff see live updates without polling.
 - Queue resets daily (entries are scoped to today's date).
 
@@ -462,6 +479,14 @@ Tracks required follow-up visits and recall reminders linked to a patient.
 - A follow-up with `due_date < today` and `status = pending` is considered **overdue**.
 - Overdue follow-ups are surfaced in AI Insights and Follow-Up Analytics.
 - Dentist can create, update, and complete/cancel follow-ups from the patient profile.
+- Only a `pending` follow-up changes status, only the dentist closes one, and
+  `completed`/`cancelled` are final — in `updateFollowUp` and in a trigger
+  (`20260918100000`). The one receptionist path is the completion cascade of the
+  follow-up's completed recall visit (`appointments.follow_up_id`).
+- Auto-booking a follow-up's visit time goes through the shared availability
+  check; an unavailable time keeps the follow-up, books nothing, and says
+  "Follow-up saved — that time isn't available." The follow-up keeps its
+  originating `appointment_id`; the recall visit links back via `follow_up_id`.
 - Follow-ups are visible in the patient portal under the patient's profile.
 
 ---
@@ -607,6 +632,16 @@ Weekly recurring rules that define when appointment slots are available.
 - Algorithm: for each active rule matching the requested date's `day_of_week`, generate all slot start times between `start_time` and `end_time` at `slot_duration_minutes` intervals, then subtract slots already occupied by existing appointments with status not in (`cancelled`, `no_show`).
 - Double-booking prevention: a slot is occupied if any appointment exists at the same `dentist_id` + `scheduled_at`.
 - `getAvailableSlots(date, clinicId)` is a typed server-side function used by the patient portal, receptionist UI, and Patient AI Assistant tool.
+- **Every booking path validates through `lib/scheduling/booking-validation.ts`**
+  — staff and portal booking, the assistant, rescheduling and follow-up
+  auto-booking — against the one schedule in `lib/scheduling/schedule-source.ts`
+  (rules, else clinic hours; holidays and consultancy blocks for today onwards;
+  fit; conflicts read server-side, because a portal session sees only its own
+  appointments; past-date rules; clinic timezone). The Business Brain's capacity
+  reads the same schedule. `lib/__tests__/booking-paths.spec.ts` fails if an
+  action rebuilds its own rules.
+- A portal patient may reschedule only their own upcoming `scheduled`
+  appointment; nobody may move a patient who is in today's live queue.
 
 > ⚠️ **`slot_duration_minutes` is a STEP SIZE, not a unit of capacity.** The slots
 > `getAvailableSlots` returns are candidate *start times*, and they OVERLAP — a
@@ -651,7 +686,7 @@ The following tables support soft deletion via a `deleted_at timestamptz` column
 - Soft deletion of a patient cascades logically. The cascade covers
   appointments, treatments, payments, follow-ups, **the dental chart
   (`patient_teeth`), treatment documents and consents**; it removes reminder
-  records and active queue entries outright and unlinks the portal account.
+  records and active queue entries off the live queue (`removed_at`) and unlinks the portal account.
   `actions/__tests__/patient-cascade-completeness.spec.ts` reads the migrations,
   finds every table with a foreign key to `patients`, and fails unless the
   cascade handles it or that spec records in writing why not — because the way a
@@ -754,6 +789,21 @@ pattern. `old_value`/`new_value` carry **only the fields that changed**
 less-protected copy of the clinical record, duplicating `internal_notes` on
 every save into a table with different readers.
 
+### 5.14a What a Deleted Patient's Records Still Count For
+
+The cascade stamps `deletion_cause = 'patient_deleted'` on appointments,
+treatments, payments and follow-ups (`20260918100500`; clients cannot set it).
+Past collections and production keep counting those payments and completed
+treatments — through `patient_deleted_payments` / `patient_deleted_treatments`,
+dentist-or-service projections that read the last pre-deletion version from
+state history and carry no patient identifier. Balances, the pipeline and every
+forward-looking figure exclude them. A row deleted with no recorded cause (all
+rows deleted before that migration) stays excluded: the cause is unknown.
+
+Payments are not editable from any session (`20260918100400`), and no session
+role can hard-DELETE a patient, appointment, treatment, payment or follow-up
+(`20260918100300`).
+
 ### 5.15 Entity State History and Observation Provenance
 
 `appointment_status_history`, `treatment_status_history`,
@@ -773,6 +823,16 @@ later.
 **Do not read `updated_at` or `created_at` as the moment something happened in
 Business Brain code** — use the point-in-time readers. See
 `business-brain/HISTORY.md`.
+
+What a record is EVIDENCE of is stated once, in
+`business-brain/ledger/record-evidence.ts`: inferred vs recorded no-shows;
+patient/clinic/unknown cancellation side (`appointment_history.performed_by_role`,
+stamped by trigger since `20260918100700`); clicked-through queue visits that
+record no arrival; visits left checked in or in progress after their day
+(outcome unknown); completed treatments with no `performed_at`, dated by their
+recorded completion and labelled so; folded treatment-type spellings, with
+consultation (OPD) records excluded from type attribution. Reminder rows record
+their subject (`20260918100600`), filled automatically.
 
 ---
 
