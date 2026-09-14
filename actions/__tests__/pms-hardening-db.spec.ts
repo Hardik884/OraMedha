@@ -332,6 +332,60 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
     });
   });
 
+  // ── F9: booking validation against real sessions ────────────────────────────
+  describe("booking validation on the real stack", () => {
+    const NOW = new Date("2026-09-14T04:35:00.000Z"); // Monday 10:05 IST
+
+    beforeAll(async () => {
+      const hours = { open: "09:00", close: "13:00", is_open: true };
+      const { error } = await raw.from("clinic_settings").upsert({
+        clinic_id: CLINIC,
+        clinic_name: `Hardening ${RUN}`,
+        timezone: "Asia/Kolkata",
+        average_appointment_duration: 30,
+        clinic_hours: { monday: hours, tuesday: hours, wednesday: hours, thursday: hours, friday: hours, saturday: { open: null, close: null, is_open: false }, sunday: { open: null, close: null, is_open: false } },
+      });
+      if (error) throw new Error(`seed clinic_settings: ${error.message}`);
+      await insertOne("unavailable_dates", { clinic_id: CLINIC, date: "2026-09-16" });
+      const other = await insertOne("patients", { clinic_id: CLINIC, name: "Someone else" });
+      // Tuesday 10:00 IST, booked by another patient.
+      await insertOne("appointments", {
+        clinic_id: CLINIC, patient_id: other.id, dentist_id: USERS.dentist.id, scheduled_at: "2026-09-15T04:30:00.000Z",
+        duration_minutes: 30, source: "phone_call", status: "scheduled",
+      });
+    });
+
+    const req = (localSlot: string) => ({
+      clinicId: CLINIC, dentistId: USERS.dentist.id, localSlot, durationMinutes: 30, patientFacing: true, now: NOW,
+    });
+
+    it("a portal patient's booking is checked against every patient's visits, not only their own", async () => {
+      const { checkBookingSlot } = await import("@/lib/scheduling/booking-validation");
+      const patient = as("patient");
+      // The patient's own session cannot see the other booking...
+      const { data: seen } = await patient.from("appointments").select("id").eq("scheduled_at", "2026-09-15T04:30:00.000Z");
+      expect(seen).toHaveLength(0);
+      // ...but validation reads occupancy server-side and refuses it.
+      expect(await checkBookingSlot(patient, service, req("2026-09-15T10:00"))).toMatchObject({ ok: false, reason: "taken" });
+      expect(await checkBookingSlot(patient, service, req("2026-09-15T09:45"))).toMatchObject({ ok: false, reason: "unavailable" });
+      expect(await checkBookingSlot(patient, service, req("2026-09-15T11:00"))).toMatchObject({ ok: true });
+    });
+
+    it("reads the clinic's holidays and hours through the patient's own session", async () => {
+      const { checkBookingSlot } = await import("@/lib/scheduling/booking-validation");
+      const patient = as("patient");
+      expect(await checkBookingSlot(patient, service, req("2026-09-16T10:00"))).toMatchObject({ ok: false, reason: "closed" });
+      expect(await checkBookingSlot(patient, service, req("2026-09-19T10:00"))).toMatchObject({ ok: false, reason: "closed" });
+      expect(await checkBookingSlot(patient, service, req("2026-09-17T13:30"))).toMatchObject({ ok: false, reason: "unavailable" });
+    });
+
+    it("another clinic's schedule is not this clinic's", async () => {
+      const { checkBookingSlot } = await import("@/lib/scheduling/booking-validation");
+      // The other clinic has no settings or rules at all: closed, never borrowed.
+      expect(await checkBookingSlot(as("other_dentist"), service, { ...req("2026-09-15T11:00"), clinicId: OTHER_CLINIC, dentistId: USERS.other_dentist.id })).toMatchObject({ ok: false, reason: "closed" });
+    });
+  });
+
   // ── F5: queue soft removal ──────────────────────────────────────────────────
   describe("queue soft removal", () => {
     async function queueEntry(appt: Record<string, any>, over: Record<string, unknown> = {}) {
