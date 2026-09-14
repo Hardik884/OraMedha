@@ -167,6 +167,171 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
     });
   });
 
+  // ── F13a: appointment status transitions ────────────────────────────────────
+  describe("appointment status transitions", () => {
+    async function tryStatus(role: Role, id: string, status: string) {
+      await as(role).from("appointments").update({ status }).eq("id", id);
+      return (await read("appointments", id)).status as string;
+    }
+
+    async function noShowMark(appointmentId: string, performedBy: string | null, daysAgo: number) {
+      const { error } = await raw.from("appointment_history").insert({
+        appointment_id: appointmentId,
+        action: "status_changed",
+        old_value: { status: "scheduled" },
+        new_value: { status: "no_show" },
+        performed_by: performedBy,
+        timestamp: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
+      });
+      if (error) throw new Error(`seed history: ${error.message}`);
+    }
+
+    it("staff walk the lifecycle", async () => {
+      const appt = await appointment();
+      expect(await tryStatus("receptionist", appt.id, "checked_in")).toBe("checked_in");
+      expect(await tryStatus("receptionist", appt.id, "in_progress")).toBe("in_progress");
+      expect(await tryStatus("receptionist", appt.id, "completed")).toBe("completed");
+    });
+
+    it("completed and cancelled are final for everyone signed in", async () => {
+      for (const from of ["completed", "cancelled"]) {
+        const appt = await appointment({ status: from });
+        for (const role of ["dentist", "receptionist", "patient"] as const) {
+          for (const to of ["scheduled", "checked_in", "in_progress", from === "completed" ? "cancelled" : "completed"]) {
+            expect({ from, role, to, after: await tryStatus(role, appt.id, to) }).toEqual({ from, role, to, after: from });
+          }
+        }
+      }
+    });
+
+    it("a receptionist cannot skip straight to completed, the dentist can", async () => {
+      const a = await appointment();
+      expect(await tryStatus("receptionist", a.id, "completed")).toBe("scheduled");
+      expect(await tryStatus("receptionist", a.id, "in_progress")).toBe("scheduled");
+      expect(await tryStatus("dentist", a.id, "completed")).toBe("completed");
+
+      const b = await appointment({ status: "checked_in" });
+      expect(await tryStatus("receptionist", b.id, "completed")).toBe("checked_in");
+      expect(await tryStatus("dentist", b.id, "completed")).toBe("completed");
+    });
+
+    it("a receptionist completes a checked-in visit only when the live queue has the patient in the chair", async () => {
+      const appt = await appointment({ status: "checked_in" });
+      await insertOne("queue_entries", {
+        clinic_id: CLINIC, appointment_id: appt.id, patient_id: PATIENT, position: 1, status: "in_progress",
+        checked_in_at: "2026-08-03T04:00:00.000Z", called_at: "2026-08-03T04:10:00.000Z", queue_date: "2026-08-10",
+      });
+      expect(await tryStatus("receptionist", appt.id, "completed")).toBe("completed");
+    });
+
+    it("a check-in rolls back to scheduled only while nothing is queued for it", async () => {
+      const queued = await appointment({ status: "checked_in" });
+      await insertOne("queue_entries", {
+        clinic_id: CLINIC, appointment_id: queued.id, patient_id: PATIENT, position: 1, status: "waiting",
+        checked_in_at: "2026-08-03T04:00:00.000Z", queue_date: "2026-08-11",
+      });
+      expect(await tryStatus("receptionist", queued.id, "scheduled")).toBe("checked_in");
+
+      const unqueued = await appointment({ status: "checked_in" });
+      expect(await tryStatus("receptionist", unqueued.id, "scheduled")).toBe("scheduled");
+    });
+
+    it("a portal patient may only cancel their own scheduled appointment", async () => {
+      const scheduled = await appointment();
+      expect(await tryStatus("patient", scheduled.id, "cancelled")).toBe("cancelled");
+      const checkedIn = await appointment({ status: "checked_in" });
+      expect(await tryStatus("patient", checkedIn.id, "cancelled")).toBe("checked_in");
+      const other = await appointment();
+      expect(await tryStatus("patient", other.id, "completed")).toBe("scheduled");
+      expect(await tryStatus("patient", other.id, "no_show")).toBe("scheduled");
+    });
+
+    it("another clinic's dentist cannot change the status at all", async () => {
+      const appt = await appointment();
+      expect(await tryStatus("other_dentist", appt.id, "cancelled")).toBe("scheduled");
+    });
+
+    it("the dentist corrects a system-inferred no-show within seven days, and only that", async () => {
+      const inferred = await appointment({ status: "no_show" });
+      await noShowMark(inferred.id, null, 1);
+      expect(await tryStatus("receptionist", inferred.id, "completed")).toBe("no_show");
+      expect(await tryStatus("dentist", inferred.id, "completed")).toBe("completed");
+
+      const recorded = await appointment({ status: "no_show" });
+      await noShowMark(recorded.id, USERS.receptionist.id, 1);
+      expect(await tryStatus("dentist", recorded.id, "completed")).toBe("no_show");
+
+      const stale = await appointment({ status: "no_show" });
+      await noShowMark(stale.id, null, 8);
+      expect(await tryStatus("dentist", stale.id, "completed")).toBe("no_show");
+
+      const unevidenced = await appointment({ status: "no_show" });
+      expect(await tryStatus("dentist", unevidenced.id, "completed")).toBe("no_show");
+
+      // Never back to scheduled, whoever inferred it.
+      expect(await tryStatus("dentist", inferred.id, "scheduled")).toBe("completed");
+      const inferred2 = await appointment({ status: "no_show" });
+      await noShowMark(inferred2.id, null, 1);
+      expect(await tryStatus("dentist", inferred2.id, "scheduled")).toBe("no_show");
+    });
+
+    it("the service role is not restricted (the nightly no-show job)", async () => {
+      const appt = await appointment({ status: "completed" });
+      expect((await raw.from("appointments").update({ status: "no_show" }).eq("id", appt.id)).error).toBeNull();
+    });
+  });
+
+  // ── F13b / F13c / F13d: no hard delete, no payment edits ────────────────────
+  describe("no hard delete and no payment edits from a session", () => {
+    it("the dentist cannot hard-delete a patient, appointment, treatment, payment or follow-up", async () => {
+      const patient = await insertOne("patients", { clinic_id: CLINIC, name: "Delete target" });
+      const appt = await appointment({ patient_id: patient.id });
+      const rows: Array<[string, string]> = [
+        ["patients", patient.id],
+        ["appointments", appt.id],
+        ["treatments", (await insertOne("treatments", { clinic_id: CLINIC, patient_id: patient.id, appointment_id: appt.id, treatment_type: "Cleaning", cost: 100, status: "planned" })).id],
+        ["payments", (await insertOne("payments", { clinic_id: CLINIC, patient_id: patient.id, amount: 50, method: "cash", payment_date: "2026-08-01" })).id],
+        ["follow_ups", (await followUp({ patient_id: patient.id })).id],
+      ];
+      for (const [table, id] of rows.reverse()) {
+        for (const role of ["dentist", "receptionist", "patient"] as const) {
+          await as(role).from(table).delete().eq("id", id);
+        }
+        expect({ table, kept: (await read(table, id)) !== null }).toEqual({ table, kept: true });
+      }
+    });
+
+    it("no staff session can change a recorded payment; recording one still works", async () => {
+      const { data: inserted, error } = await as("receptionist")
+        .from("payments")
+        .insert({ clinic_id: CLINIC, patient_id: PATIENT, amount: 75, method: "upi", payment_date: "2026-08-02" })
+        .select("id")
+        .single();
+      expect(error).toBeNull();
+      for (const role of ["dentist", "receptionist"] as const) {
+        await as(role).from("payments").update({ amount: 1, payment_date: "2026-01-01" }).eq("id", inserted.id);
+        await as(role).from("payments").update({ deleted_at: new Date().toISOString() }).eq("id", inserted.id);
+      }
+      expect(await read("payments", inserted.id)).toMatchObject({ amount: 75, payment_date: "2026-08-02", deleted_at: null });
+    });
+
+    it("no session can erase a queue entry; staff still update it", async () => {
+      const appt = await appointment({ status: "checked_in" });
+      const entry = await insertOne("queue_entries", {
+        clinic_id: CLINIC, appointment_id: appt.id, patient_id: PATIENT, position: 4, status: "waiting",
+        checked_in_at: "2026-08-03T04:00:00.000Z", queue_date: "2026-08-12",
+      });
+      for (const role of ["dentist", "receptionist", "patient"] as const) {
+        await as(role).from("queue_entries").delete().eq("id", entry.id);
+      }
+      expect(await read("queue_entries", entry.id)).not.toBeNull();
+      expect((await as("receptionist").from("queue_entries").update({ position: 2 }).eq("id", entry.id)).error).toBeNull();
+      expect((await read("queue_entries", entry.id)).position).toBe(2);
+      const { data: visible } = await as("dentist").from("queue_entries").select("id").eq("id", entry.id);
+      expect(visible).toHaveLength(1);
+    });
+  });
+
   // ── F5: queue soft removal ──────────────────────────────────────────────────
   describe("queue soft removal", () => {
     async function queueEntry(appt: Record<string, any>, over: Record<string, unknown> = {}) {
