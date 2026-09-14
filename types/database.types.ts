@@ -132,6 +132,7 @@ export type Database = {
           new_value: Json | null
           old_value: Json | null
           performed_by: string | null
+          performed_by_role: Database["public"]["Enums"]["user_role"] | null
           timestamp: string
         }
         Insert: {
@@ -141,6 +142,7 @@ export type Database = {
           new_value?: Json | null
           old_value?: Json | null
           performed_by?: string | null
+          performed_by_role?: Database["public"]["Enums"]["user_role"] | null
           timestamp?: string
         }
         Update: {
@@ -150,6 +152,7 @@ export type Database = {
           new_value?: Json | null
           old_value?: Json | null
           performed_by?: string | null
+          performed_by_role?: Database["public"]["Enums"]["user_role"] | null
           timestamp?: string
         }
         Relationships: [

@@ -498,6 +498,86 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
     });
   });
 
+  // ── F6 / F7 / F16 / F17 / F20 / F21: what records are evidence of ───────────
+  describe("record evidence on the real stack", () => {
+    // Seeded in the other clinic, in October, so no earlier case shares the window.
+    const C2 = OTHER_CLINIC;
+    let P2 = "";
+    const at = (iso: string) => ({
+      clinic_id: C2, patient_id: P2, dentist_id: USERS.other_dentist.id, scheduled_at: iso, duration_minutes: 30, source: "phone_call",
+    });
+    const history = (appointmentId: string, status: string, performedBy: string | null) =>
+      raw.from("appointment_history").insert({
+        appointment_id: appointmentId, action: status === "cancelled" ? "cancelled" : "status_changed",
+        old_value: { status: "scheduled" }, new_value: { status }, performed_by: performedBy,
+      });
+
+    const ids: Record<string, string> = {};
+
+    beforeAll(async () => {
+      P2 = (await insertOne("patients", { clinic_id: C2, name: "Evidence" })).id;
+      await insertOne("unavailable_dates", { clinic_id: C2, date: "2026-10-07" });
+      ids.patientCancel = (await insertOne("appointments", { ...at("2026-10-05T04:30:00.000Z"), status: "cancelled" })).id;
+      ids.clinicCancel = (await insertOne("appointments", { ...at("2026-10-07T04:30:00.000Z"), status: "cancelled" })).id;
+      ids.staffCancel = (await insertOne("appointments", { ...at("2026-10-08T04:30:00.000Z"), status: "cancelled" })).id;
+      ids.inferredNoShow = (await insertOne("appointments", { ...at("2026-10-09T04:30:00.000Z"), status: "no_show" })).id;
+      ids.recordedNoShow = (await insertOne("appointments", { ...at("2026-10-12T04:30:00.000Z"), status: "no_show" })).id;
+      await history(ids.patientCancel, "cancelled", USERS.patient.id);
+      await history(ids.clinicCancel, "cancelled", USERS.other_dentist.id);
+      await history(ids.staffCancel, "cancelled", USERS.other_dentist.id);
+      await history(ids.inferredNoShow, "no_show", null);
+      await history(ids.recordedNoShow, "no_show", USERS.other_dentist.id);
+
+      ids.clicked = (await insertOne("appointments", { ...at("2026-10-13T04:30:00.000Z"), status: "completed" })).id;
+      ids.real = (await insertOne("appointments", { ...at("2026-10-14T04:30:00.000Z"), status: "completed" })).id;
+      await insertOne("queue_entries", { clinic_id: C2, appointment_id: ids.clicked, patient_id: P2, position: 1, status: "completed", queue_date: "2026-10-13", checked_in_at: "2026-10-20T09:00:00.000Z", completed_at: "2026-10-20T09:00:02.000Z" });
+      await insertOne("queue_entries", { clinic_id: C2, appointment_id: ids.real, patient_id: P2, position: 1, status: "completed", queue_date: "2026-10-14", checked_in_at: "2026-10-14T04:20:00.000Z", called_at: "2026-10-14T04:35:00.000Z", completed_at: "2026-10-14T05:05:00.000Z" });
+    });
+
+    it("the history stamps the actor's role, and none for a system change", async () => {
+      const { data } = await raw.from("appointment_history").select("appointment_id, performed_by_role").in("appointment_id", [ids.patientCancel, ids.staffCancel, ids.inferredNoShow]);
+      const role = (id: string) => (data as Array<{ appointment_id: string; performed_by_role: string | null }>).find((r) => r.appointment_id === id)?.performed_by_role;
+      expect(role(ids.patientCancel)).toBe("patient");
+      expect(role(ids.staffCancel)).toBe("dentist");
+      expect(role(ids.inferredNoShow)).toBeNull();
+    });
+
+    it("cancellations carry their side and no-shows their basis, read through the dentist's session", async () => {
+      const { SupabaseDiagnosisContext } = await import("@/lib/business-brain/diagnosis-context");
+      const ctx = new SupabaseDiagnosisContext(as("other_dentist"), "Asia/Kolkata");
+      const events = (await ctx.listCancellationEvents({ clinicId: C2, from: "2026-10-01", to: "2026-10-31", limit: 500 })) ?? [];
+      const byId = new Map(events.map((e) => [e.appointmentId, e]));
+      expect(byId.get(ids.patientCancel)).toMatchObject({ outcome: "cancelled", side: "patient" });
+      expect(byId.get(ids.clinicCancel)).toMatchObject({ outcome: "cancelled", side: "clinic" });
+      expect(byId.get(ids.staffCancel)).toMatchObject({ outcome: "cancelled", side: "unknown" });
+      expect(byId.get(ids.inferredNoShow)).toMatchObject({ outcome: "no_show", noShowBasis: "inferred" });
+      expect(byId.get(ids.recordedNoShow)).toMatchObject({ outcome: "no_show", noShowBasis: "recorded" });
+      expect(byId.get(ids.inferredNoShow)).not.toHaveProperty("side");
+    });
+
+    it("a clicked-through visit records no arrival; a real one keeps its arrival", async () => {
+      const { SupabaseDiagnosisContext } = await import("@/lib/business-brain/diagnosis-context");
+      const ctx = new SupabaseDiagnosisContext(as("other_dentist"), "Asia/Kolkata");
+      const rows = (await ctx.listAppointmentArrivals({ clinicId: C2, from: "2026-10-13", to: "2026-10-14", limit: 500 })) ?? [];
+      expect(rows.find((r) => r.appointmentId === ids.clicked)).toMatchObject({ arrivedAt: null, arrivalDeltaMinutes: null, actualMinutes: null });
+      expect(rows.find((r) => r.appointmentId === ids.real)).toMatchObject({ arrivalDeltaMinutes: -10, actualMinutes: 30 });
+    });
+
+    it("a completed treatment with no performed_at is dated by its recorded completion, labelled as such", async () => {
+      const appt = await insertOne("appointments", { ...at("2026-10-15T04:30:00.000Z"), status: "completed" });
+      const t = await insertOne("treatments", { clinic_id: C2, patient_id: P2, appointment_id: appt.id, treatment_type: "root canal", cost: 4000, status: "planned" });
+      await raw.from("treatments").update({ status: "completed" }).eq("id", t.id);
+      const { SupabaseDiagnosisContext } = await import("@/lib/business-brain/diagnosis-context");
+      const ctx = new SupabaseDiagnosisContext(as("other_dentist"), "UTC");
+      const today = new Date().toISOString().slice(0, 10);
+      const rows = (await ctx.listCompletedTreatments({ clinicId: C2, from: today, to: today, limit: 500 })) ?? [];
+      expect(rows.find((r) => r.treatmentId === t.id)).toMatchObject({ date: today, dateBasis: "recorded", treatmentType: "Root Canal" });
+      // Not in a window before its completion was recorded.
+      const earlier = (await ctx.listCompletedTreatments({ clinicId: C2, from: "2026-10-15", to: "2026-10-15", limit: 500 })) ?? [];
+      expect(earlier.find((r) => r.treatmentId === t.id)).toBeUndefined();
+    });
+  });
+
   // ── F5: queue soft removal ──────────────────────────────────────────────────
   describe("queue soft removal", () => {
     async function queueEntry(appt: Record<string, any>, over: Record<string, unknown> = {}) {

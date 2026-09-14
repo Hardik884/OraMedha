@@ -83,7 +83,7 @@ import {
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/types/database.types";
-import { dateRange } from "@/business-brain";
+import { arrivalRecorded, dateRange } from "@/business-brain";
 import { isWhatsAppReachable } from "@/lib/messaging/eligibility";
 import { getUtcBoundariesForLocalDate, zonedDateToUTC } from "@/lib/utils";
 
@@ -250,7 +250,7 @@ interface AppointmentRow {
 }
 
 const APPOINTMENT_EVENT_COLUMNS =
-  "id, appointment_id, action, timestamp, status_after:new_value->>status, previous_scheduled_at:old_value->>scheduled_at";
+  "id, appointment_id, action, timestamp, performed_by, performed_by_role, status_after:new_value->>status, previous_scheduled_at:old_value->>scheduled_at";
 interface AppointmentEventRow {
   id: string;
   appointment_id: string;
@@ -258,6 +258,8 @@ interface AppointmentEventRow {
   timestamp: string;
   status_after: string | null;
   previous_scheduled_at: string | null;
+  performed_by: string | null;
+  performed_by_role: string | null;
 }
 
 const TREATMENT_COLUMNS =
@@ -382,6 +384,9 @@ function appointmentEventFact(clinicId: string, r: AppointmentEventRow): Appoint
     at: r.timestamp,
     statusAfter: r.status_after,
     previousScheduledAt: r.previous_scheduled_at,
+    // Whether a person acted, and in what role — never who.
+    recordedBy: r.performed_by === null ? "system" : "person",
+    actorRole: r.performed_by_role,
   };
 }
 
@@ -439,6 +444,7 @@ function queueFact(clinicId: string, r: QueueRow): QueueVisitFact {
     checkedInAt: r.checked_in_at,
     calledAt: r.called_at,
     completedAt: r.completed_at,
+    arrivalRecorded: arrivalRecorded({ checkedInAt: r.checked_in_at, calledAt: r.called_at, completedAt: r.completed_at }),
   };
 }
 

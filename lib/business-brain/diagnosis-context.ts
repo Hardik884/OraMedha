@@ -59,7 +59,15 @@ import type {
   OutstandingBalanceRow,
   PendingTreatmentRow,
 } from "@/business-brain";
-import { MetricUnit } from "@/business-brain";
+import {
+  MetricUnit,
+  arrivalRecorded,
+  canonicalTreatmentType,
+  cancellationSide,
+  groupableTreatmentType,
+  noShowBasis,
+  treatmentPerformedAt,
+} from "@/business-brain";
 import type { Database } from "@/types/database.types";
 import { getUtcBoundariesForLocalDate } from "@/lib/utils";
 import { treatmentTotalCharge } from "@/lib/billing/balance";
@@ -279,14 +287,14 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
     if (lost.length === 0) return [];
 
     const ids = lost.map((a) => a.id);
-    const [history, treatmentRows, refills] = await Promise.all([
-      this.byIds<{ id: string; appointment_id: string; action: string; new_value: unknown; timestamp: string }>(
+    const [history, treatmentRows, refills, closures] = await Promise.all([
+      this.byIds<{ id: string; appointment_id: string; action: string; new_value: unknown; timestamp: string; performed_by: string | null; performed_by_role: string | null }>(
         "cancellation history",
         ids,
         (chunk, from, to) =>
           this.db
             .from("appointment_history")
-            .select("id, appointment_id, action, new_value, timestamp")
+            .select("id, appointment_id, action, new_value, timestamp, performed_by, performed_by_role")
             .in("appointment_id", chunk)
             .order("timestamp", { ascending: true })
             .order("id", { ascending: true })
@@ -320,22 +328,50 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
             .range(from, to),
         MAX_FOLLOW_UP_ROWS,
       ),
+      // Days the clinic had marked closed: a staff cancellation on one is the
+      // clinic's, not the patient's.
+      readAll<{ date: string }>(
+        "cancellation closures",
+        (from, to) =>
+          this.db
+            .from("unavailable_dates")
+            .select("date")
+            .eq("clinic_id", window.clinicId)
+            .gte("date", window.from)
+            .lte("date", window.to)
+            .order("date", { ascending: true })
+            .range(from, to),
+        MAX_FOLLOW_UP_ROWS,
+      ),
     ]);
+    const closedDays = new Set(closures.map((c) => c.date));
 
     // Earliest recorded cancellation per appointment: a record reopened and
-    // re-cancelled should be dated from when the clinic first lost the slot.
+    // re-cancelled should be dated from when the clinic first lost the slot —
+    // and the side is read from that same row.
     const cancelledAt = new Map<string, string>();
+    const cancelledByRole = new Map<string, string | null>();
+    const statusChanges = new Map<string, { statusAfter: string | null; at: string; byPerson: boolean | null }[]>();
     for (const h of history) {
       const status = (h.new_value as { status?: string } | null)?.status;
+      const changes = statusChanges.get(h.appointment_id) ?? [];
+      changes.push({ statusAfter: status ?? null, at: h.timestamp, byPerson: h.performed_by !== null });
+      statusChanges.set(h.appointment_id, changes);
       if (status !== "cancelled" && h.action !== "cancelled") continue;
-      if (!cancelledAt.has(h.appointment_id)) cancelledAt.set(h.appointment_id, h.timestamp);
+      if (!cancelledAt.has(h.appointment_id)) {
+        cancelledAt.set(h.appointment_id, h.timestamp);
+        cancelledByRole.set(h.appointment_id, h.performed_by_role);
+      }
     }
 
-    // First recorded type per appointment, by id order so the choice is stable.
+    // First recorded treatment type per appointment, by id order so the choice
+    // is stable. Spellings of one type are one type; a consultation-only record
+    // names no treatment.
     const treatmentType = new Map<string, string>();
     for (const t of treatmentRows) {
-      if (t.appointment_id && !treatmentType.has(t.appointment_id)) {
-        treatmentType.set(t.appointment_id, t.treatment_type);
+      const type = groupableTreatmentType(t.treatment_type);
+      if (t.appointment_id && type !== null && !treatmentType.has(t.appointment_id)) {
+        treatmentType.set(t.appointment_id, type);
       }
     }
 
@@ -363,6 +399,14 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
         outcome: a.status === "no_show" ? ("no_show" as const) : ("cancelled" as const),
         treatmentType: treatmentType.get(a.id) ?? null,
         slotRefilled: filledSlots.has(`${a.dentist_id}|${Date.parse(a.scheduled_at)}`),
+        ...(a.status === "no_show"
+          ? { noShowBasis: noShowBasis(statusChanges.get(a.id) ?? []) }
+          : {
+              side: cancellationSide({
+                actorRole: cancelledByRole.get(a.id) ?? null,
+                onClosedDay: closedDays.has(this.localDate(a.scheduled_at)),
+              }),
+            }),
       };
     });
   }
@@ -494,16 +538,21 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
 
     return planned
       .filter((t) => !booked.has(t.patient_id))
-      .map((t) => {
+      .flatMap((t) => {
+        // A planned consultation charge is not treatment work awaiting a visit.
+        const treatmentType = groupableTreatmentType(t.treatment_type);
+        if (treatmentType === null) return [];
         const acceptedOn = this.localDate(t.created_at);
-        return {
-          treatmentId: t.id,
-          patientId: t.patient_id,
-          acceptedOn,
-          ageDays: ageInDays(acceptedOn, window.to),
-          treatmentType: t.treatment_type,
-          quotedValue: currency(Number(t.cost ?? 0)),
-        };
+        return [
+          {
+            treatmentId: t.id,
+            patientId: t.patient_id,
+            acceptedOn,
+            ageDays: ageInDays(acceptedOn, window.to),
+            treatmentType,
+            quotedValue: currency(Number(t.cost ?? 0)),
+          },
+        ];
       });
   }
 
@@ -627,7 +676,12 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
 
     return appointments.map((a) => {
       const entry = arrivals.get(a.id);
-      const arrivedAt = entry?.checked_in_at ?? null;
+      // A visit clicked through to completion within a minute of its "check-in",
+      // never called in, records no arrival: that timestamp is a button press.
+      const arrived =
+        entry !== undefined &&
+        arrivalRecorded({ checkedInAt: entry.checked_in_at, calledAt: entry.called_at, completedAt: entry.completed_at });
+      const arrivedAt = arrived ? entry.checked_in_at : null;
       return {
         appointmentId: a.id,
         date: this.localDate(a.scheduled_at),
@@ -673,35 +727,99 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    */
   async listCompletedTreatments(window: EntityWindow): Promise<readonly CompletedTreatmentRow[]> {
     const { start, end } = bounds(window, this.timezone);
-    const completed = await this.windowRows<PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string }>(
-      "completed treatments",
+    type CompletedRow = PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string | null };
+    const columns = "id, patient_id, treatment_type, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at";
+    const [performed, undated] = await Promise.all([
+      this.windowRows<CompletedRow>(
+        "completed treatments",
+        (from, to) =>
+          this.db
+            .from("treatments")
+            .select(columns)
+            .eq("clinic_id", window.clinicId)
+            .is("deleted_at", null)
+            .eq("status", "completed")
+            .not("performed_at", "is", null)
+            .gte("performed_at", start)
+            .lte("performed_at", end)
+            .order("performed_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to),
+        window.limit,
+      ),
+      // Completed with no performed_at: dated by when the completion was
+      // RECORDED — an observed state-history version, never a baseline written
+      // when history capture began, which would date old work to that day.
+      this.undatedCompletions(window, start, end),
+    ]);
+    const completed = [
+      ...performed.map((t) => ({ row: t, dated: treatmentPerformedAt({ performedAt: t.performed_at, completionRecordedAt: null }) })),
+      ...undated,
+    ].filter((c) => c.dated.at !== null);
+    if (completed.length === 0) return [];
+
+    const patientIds = [...new Set(completed.map((c) => c.row.patient_id))];
+    const collected = await this.collectedByTreatment(window.clinicId, patientIds, window.to);
+
+    return completed.map(({ row: t, dated }) => ({
+      treatmentId: t.id,
+      patientId: t.patient_id,
+      date: this.localDate(dated.at as string),
+      dateBasis: dated.basis,
+      // Consultations stay in: this is what was billed, and a cheap consultation
+      // is exactly the case mix this row exists to show. Spellings are folded.
+      treatmentType: canonicalTreatmentType(t.treatment_type),
+      billedValue: currency(treatmentTotalCharge(t)),
+      collectedValue: currency(collected.get(t.id) ?? 0),
+    }));
+  }
+
+  /** Completed treatments with no performed_at whose completion was recorded inside the window. */
+  private async undatedCompletions(
+    window: EntityWindow,
+    start: string,
+    end: string,
+  ): Promise<Array<{ row: PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string | null }; dated: ReturnType<typeof treatmentPerformedAt> }>> {
+    const marks = await this.windowRows<{ treatment_id: string; recorded_at: string }>(
+      "completed treatments (recorded completions)",
       (from, to) =>
+        this.db
+          .from("treatment_status_history")
+          .select("treatment_id, recorded_at")
+          .eq("clinic_id", window.clinicId)
+          .eq("provenance", "observed")
+          .eq("new_status", "completed")
+          .is("performed_at", null)
+          .lte("recorded_at", end)
+          .order("recorded_at", { ascending: true })
+          .order("treatment_id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
+    if (marks.length === 0) return [];
+    // The first recorded completion per treatment — read from before the window
+    // too, so a treatment completed earlier, reopened and completed again inside
+    // the window is dated from the first time and stays out of this window.
+    const firstMark = new Map<string, string>();
+    for (const m of marks) if (!firstMark.has(m.treatment_id)) firstMark.set(m.treatment_id, m.recorded_at);
+    for (const [id, at] of firstMark) if (Date.parse(at) < Date.parse(start)) firstMark.delete(id);
+    if (firstMark.size === 0) return [];
+
+    const rows = await this.byIds<PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string | null }>(
+      "completed treatments (undated)",
+      [...firstMark.keys()],
+      (chunk, from, to) =>
         this.db
           .from("treatments")
           .select("id, patient_id, treatment_type, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at")
           .eq("clinic_id", window.clinicId)
           .is("deleted_at", null)
           .eq("status", "completed")
-          .not("performed_at", "is", null)
-          .gte("performed_at", start)
-          .lte("performed_at", end)
-          .order("performed_at", { ascending: true })
+          .is("performed_at", null)
+          .in("id", chunk)
           .order("id", { ascending: true })
           .range(from, to),
-      window.limit,
     );
-    if (completed.length === 0) return [];
-
-    const patientIds = [...new Set(completed.map((t) => t.patient_id))];
-    const collected = await this.collectedByTreatment(window.clinicId, patientIds, window.to);
-
-    return completed.map((t) => ({
-      treatmentId: t.id,
-      patientId: t.patient_id,
-      date: this.localDate(t.performed_at),
-      treatmentType: t.treatment_type,
-      billedValue: currency(treatmentTotalCharge(t)),
-      collectedValue: currency(collected.get(t.id) ?? 0),
-    }));
+    return rows.map((t) => ({ row: t, dated: treatmentPerformedAt({ performedAt: null, completionRecordedAt: firstMark.get(t.id) ?? null }) }));
   }
 }

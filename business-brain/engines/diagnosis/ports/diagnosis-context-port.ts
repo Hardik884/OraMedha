@@ -39,6 +39,7 @@
  */
 
 import type { MetricUnit } from "../../../domain";
+import type { CancellationSide, NoShowBasis, PerformedAtBasis } from "../../../ledger/record-evidence";
 
 /** Inclusive date window, "YYYY-MM-DD" bounds. */
 export interface EntityWindow {
@@ -82,6 +83,16 @@ export interface CancellationEvent {
   readonly treatmentType: string | null;
   /** Whether another appointment subsequently occupied the slot. */
   readonly slotRefilled: boolean;
+  /**
+   * For a cancellation: whether the patient or the clinic cancelled, or unknown
+   * (see `ledger/record-evidence.ts`). Absent on a no-show.
+   */
+  readonly side?: CancellationSide;
+  /**
+   * For a no-show: whether a person recorded it or the nightly job inferred it
+   * from a visit nobody closed. Absent on a cancellation.
+   */
+  readonly noShowBasis?: NoShowBasis;
   /**
    * The scheduled start's hour in the CLINIC's timezone, "HH:00". Supplied by the
    * adapter, which knows the timezone: the ISO start is a UTC instant, and its
@@ -147,7 +158,12 @@ export interface AppointmentArrivalRow {
   readonly appointmentId: string;
   readonly date: string;
   readonly scheduledStart: string;
-  /** ISO-8601 arrival, or null when no arrival was recorded. */
+  /**
+   * ISO-8601 arrival, or null when no arrival was recorded. A queue visit that
+   * was clicked through — completed within a minute of "check-in" with no call-in
+   * — has no recorded arrival either: its check-in time is when a button was
+   * pressed, not when a patient walked in.
+   */
   readonly arrivedAt: string | null;
   /** The arrival's hour in the clinic's timezone, "HH:00", or null without an arrival. */
   readonly arrivalLocalHour: string | null;
@@ -181,6 +197,12 @@ export interface CompletedTreatmentRow {
   readonly treatmentId: string;
   readonly patientId: string;
   readonly date: string;
+  /**
+   * What `date` is: the treatment's own performed_at, or — when none was
+   * entered — the moment its completion was recorded, which is a recording time
+   * and not necessarily when the work was done.
+   */
+  readonly dateBasis?: PerformedAtBasis;
   readonly treatmentType: string;
   readonly billedValue: MeasuredAmount;
   readonly collectedValue: MeasuredAmount;

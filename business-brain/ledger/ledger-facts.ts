@@ -138,6 +138,13 @@ export interface AppointmentEventFact {
   readonly at: string;
   /** Status after the change, when the change recorded one. */
   readonly statusAfter: string | null;
+  /**
+   * Who made the change: a person, or the system with no actor (the nightly
+   * no-show job — an inference, not an observation). Absent when not read.
+   */
+  readonly recordedBy?: "person" | "system";
+  /** The actor's role when the change was recorded; null when not recorded. Absent when not read. */
+  readonly actorRole?: string | null;
   /** Previous scheduled start, when the change moved the appointment. */
   readonly previousScheduledAt: string | null;
 }
@@ -213,6 +220,12 @@ export interface QueueVisitFact {
   readonly checkedInAt: string;
   /** Called into the chair; null when not recorded. */
   readonly calledAt: string | null;
+  /**
+   * Whether `checkedInAt` is evidence of a real arrival. False for a visit
+   * clicked through — completed within a minute of check-in, never called in —
+   * whose check-in is a button press (`record-evidence.ts`). Absent when not read.
+   */
+  readonly arrivalRecorded?: boolean;
   /** Finished with; null when not recorded. */
   readonly completedAt: string | null;
 }

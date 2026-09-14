@@ -47,7 +47,7 @@ import {
   type RootCauseGroupStat,
 } from "../../domain";
 import type { AppointmentFact, CapacityWindowFact, ClinicLedgerGraph, TreatmentFact } from "../../ledger";
-import { LedgerFactKind } from "../../ledger";
+import { LedgerFactKind, groupableTreatmentType, isUnresolvedVisit } from "../../ledger";
 import { addDays } from "../../utils";
 import { MetricKey } from "../metrics/metric-ids";
 import { DEFAULT_ROOT_CAUSE_CONFIG, type RootCauseConfig } from "./root-cause-config";
@@ -526,8 +526,10 @@ function attrition(ctx: Context): RootCauseAnalysis {
   if (problem !== null) return insufficient(ctx, problem, emptyPopulation, limitations);
 
   const tz = ctx.input.timezone;
+  const today = local(ctx.input.now, tz).date;
   let notYet = 0;
   let noOutcome = 0;
+  let unresolved = 0;
   const units: Unit[] = [];
   for (const a of (ctx.input.schedule as ClinicLedgerGraph).slice.appointments) {
     if (Date.parse(a.scheduledAt) >= ctx.nowMs) {
@@ -536,6 +538,12 @@ function attrition(ctx: Context): RootCauseAnalysis {
     }
     if (!ATTENDED.has(a.status) && !LOST.has(a.status)) {
       noOutcome += 1;
+      continue;
+    }
+    // Still checked in or in progress after its day ended: the patient arrived,
+    // but nobody recorded how the visit ended. Neither attended nor lost.
+    if (isUnresolvedVisit(a.status, local(a.scheduledAt, tz).date, today)) {
+      unresolved += 1;
       continue;
     }
     const at = local(a.scheduledAt, tz);
@@ -559,6 +567,7 @@ function attrition(ctx: Context): RootCauseAnalysis {
     excluded: [
       { reason: "not yet happened", count: notYet },
       { reason: "outcome not recorded (still marked scheduled)", count: noOutcome },
+      { reason: "outcome not recorded (still checked in or in progress after its day)", count: unresolved },
     ].filter((e) => e.count > 0),
   };
   const cfg = ctx.config.proportion;
@@ -699,9 +708,12 @@ function overrun(ctx: Context): RootCauseAnalysis {
     }
     const traversal = graph.treatmentsRecordedAtAppointment(a.id);
     const recordedTreatments: readonly TreatmentFact[] = traversal.status === "known" ? traversal.value : [];
-    const types = [...new Set(recordedTreatments.map((t) => t.treatmentType.trim().toLowerCase()))].filter((t) => t.length > 0).sort();
-    const labelFor = (type: string): string =>
-      recordedTreatments.find((t) => t.treatmentType.trim().toLowerCase() === type)?.treatmentType.trim() ?? type;
+    // One canonical spelling per type; a consultation (OPD) charge names no
+    // treatment, so it neither makes a visit typed nor makes it multi-typed.
+    const types = [
+      ...new Set(recordedTreatments.map((t) => groupableTreatmentType(t.treatmentType)).filter((t): t is string => t !== null)),
+    ].sort();
+    const labelFor = (type: string): string => type;
     const at = local(a.scheduledAt, tz);
     units.push({
       id: a.id,

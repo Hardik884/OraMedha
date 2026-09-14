@@ -228,6 +228,21 @@ describe("attrition: missing and future outcomes", () => {
     ]);
   });
 
+  it("leaves out a visit still checked in or in progress after its day — arrived, outcome unknown", () => {
+    const appointments = [
+      ...eveningCancellations(),
+      appt("stuck_checked_in", "2026-09-10", "11:00", "checked_in"),
+      appt("stuck_in_chair", "2026-09-11", "11:00", "in_progress"),
+      // Today's open visit is not stale yet: it counts as attended.
+      appt("in_chair_now", DATE, "08:00", "in_progress"),
+    ];
+    const analysis = one({ subjects: [subject(S)], schedule: book({ appointments }) });
+    expect(analysis.population.n).toBe(81);
+    expect(analysis.population.excluded).toEqual([
+      { reason: "outcome not recorded (still checked in or in progress after its day)", count: 2 },
+    ]);
+  });
+
   it("treats a back-dated booking's lead time as not recorded, not negative", () => {
     const appointments = eveningCancellations().map((a, i) => (i < 30 ? { ...a, bookedAt: new Date(Date.parse(a.scheduledAt) + 3_600_000).toISOString() } : a));
     const analysis = one({ subjects: [subject(S)], schedule: book({ appointments }) });
@@ -267,6 +282,16 @@ describe("overrun: treatment type and booked duration", () => {
     }
     return { appointments, queueVisits, treatments };
   }
+
+  it("a consultation (OPD) record neither types a visit nor makes it multi-typed", () => {
+    const mix = treatmentMix();
+    const opd = mix.appointments.map((a) => treatmentAt(a, "OPD Consultation", 1));
+    const analysis = one({ subjects: [subject(ConstraintCategory.SCHEDULE_ACCURACY)], schedule: book({ ...mix, treatments: [...mix.treatments, ...opd] }) });
+    const [rc] = analysis.associations;
+    expect(rc?.dimension).toBe(RootCauseDimension.TREATMENT_TYPE);
+    expect(rc?.group.label).toBe("Root Canal");
+    expect(rc?.group.n).toBe(16);
+  });
 
   it("locates overruns in one recorded treatment type", () => {
     const analysis = one({ subjects: [subject(ConstraintCategory.SCHEDULE_ACCURACY)], schedule: book(treatmentMix()) });
