@@ -848,7 +848,7 @@ export function TreatmentForm({
 
           {/* Patient-Visible Notes — shown in the patient portal */}
           <Field
-            label="Clinical Notes"
+            label="Notes for patient (shown in portal)"
             htmlFor="patient-notes"
           >
             <div className="space-y-1.5">

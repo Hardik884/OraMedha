@@ -170,7 +170,7 @@ function TreatmentDetail({
       {treatment.patient_visible_notes && (
         <div className="pt-4 border-t border-surface-muted">
           <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1">
-            Clinical Notes
+            Notes for patient (shown in portal)
           </p>
           <p className="text-sm text-text-body whitespace-pre-wrap">
             {treatment.patient_visible_notes}
