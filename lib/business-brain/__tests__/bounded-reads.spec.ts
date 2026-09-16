@@ -95,7 +95,10 @@ beforeAll(async () => {
     "action_completions",
     Array.from({ length: 1100 }, (_, i) => ({
       clinic_id: CLINIC, category: "capacity", constraint_id: `constraint.capacity:${CLINIC}:2026-09-01`,
-      completed_at: new Date(Date.parse("2026-08-01T00:00:00.000Z") + i * 60_000).toISOString(), completed_by: DENTIST, source: "declared",
+      completed_at: new Date(Date.parse("2026-08-01T00:00:00.000Z") + i * 60_000).toISOString(),
+      // Recorded when completed, so the as-of read keeps them whatever today's date is.
+      created_at: new Date(Date.parse("2026-08-01T00:00:00.000Z") + i * 60_000).toISOString(),
+      completed_by: DENTIST, source: "declared",
     })),
   );
 }, 180_000);

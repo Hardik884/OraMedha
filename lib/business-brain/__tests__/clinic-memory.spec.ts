@@ -135,7 +135,8 @@ function finding(f: ClinicFixture, category: string, date: string, rootCauses?: 
 async function seedSnapshots(f: ClinicFixture, from: string, build: (i: number, date: string) => unknown[]) {
   const rows: Record<string, unknown>[] = [];
   let i = 0;
-  for (let d = from; d <= D; d = addDays(d, 1)) rows.push({ clinic_id: f.clinic, business_date: d, findings: build(i++, d) });
+  // recorded_at pinned to the business day, for the same reason as completionRow's created_at.
+  for (let d = from; d <= D; d = addDays(d, 1)) rows.push({ clinic_id: f.clinic, business_date: d, findings: build(i++, d), recorded_at: `${d}T04:01:00.000Z` });
   await insert("finding_snapshots", rows);
 }
 
@@ -146,6 +147,10 @@ function completionRow(f: ClinicFixture, date: string, targets: readonly string[
     category: "retention",
     constraint_id: `constraint.retention:${f.clinic}:${date}`,
     completed_at: at(date),
+    // Recorded when it was completed, as the app records it. Left to default, the
+    // row would be recorded "now" and the as-of readers would rightly ignore it
+    // once the real clock passes the fixture's dates.
+    created_at: at(date),
     completed_by: f.dentist,
     source: "declared",
     target_patient_ids: targets,
