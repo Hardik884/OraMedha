@@ -345,10 +345,10 @@ Each patient record must store the following fields:
 **Behaviours:**
 - Status transitions must follow the lifecycle order. Invalid transitions (e.g., `completed` → `scheduled`) must be rejected.
   **Enforced by the database too** (`20260918100200`): for signed-in callers a
-  trigger allows only the lifecycle, the dentist's direct completion from
-  `scheduled`/`checked_in` (a visit seen with no recorded arrival — no check-in
-  or call-in is invented), a receptionist completing a patient the live queue
-  has in the chair, the check-in rollback while nothing is queued, the patient's
+  trigger allows only the lifecycle, any staff member completing a `checked_in`
+  visit whatever the queue says (`20260918100800`), the dentist's direct
+  completion from `scheduled` (a visit seen with no recorded arrival — no
+  check-in or call-in is invented), the check-in rollback while nothing is queued, the patient's
   own cancellation of a `scheduled` visit, and correction of a no-show the
   nightly job INFERRED (no actor) within 7 days. `lib/appointments/visit-completion.ts`
   is the application's copy of the last two rules.
@@ -388,6 +388,12 @@ The queue is a real-time view of patients who have checked in for the current da
   patient's existing queue entry (`lib/queue/call-in.ts`) — never creating one,
   never overwriting a recorded `called_at`.
 - A completed visit with no `called_at` has an UNMEASURED wait, not a zero one.
+- **"Mark Done & Call Next" always advances** (`lib/queue/advance.ts`), however far
+  the queue has drifted from its appointments: a still-`scheduled` appointment is
+  checked in from its queue entry first; a chair whose visit was already completed
+  is closed with no invented `completed_at`; a cancelled, missed or deleted one is
+  taken off the live queue; waiting entries with nothing left to call them in for
+  are skipped and removed.
 - **Supabase Realtime** must broadcast queue changes to all subscribed clients so patients and staff see live updates without polling.
 - Queue resets daily (entries are scoped to today's date).
 

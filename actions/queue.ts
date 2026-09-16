@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@/lib/supabase/server";
 import { resolveSession as resolveCachedSession } from "@/lib/auth/session";
 import { getTodayInTimezone } from "@/lib/utils";
-import { completeAppointmentCascade } from "@/lib/appointments/complete";
+import { closeChair, callNext } from "@/lib/queue/advance";
 import type { ActionResult, QueueEntry, QueueEntryWithPatient } from "@/types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -257,50 +257,22 @@ export async function advanceQueue(): Promise<ActionResult<null>> {
       .eq("status", "in_progress")
       .maybeSingle();
 
+    // Close the chair and call the next patient. Both steps tolerate a queue that
+    // has drifted from its appointments (lib/queue/advance.ts): the queue always
+    // advances, and nothing is recorded that did not happen.
+    const now = new Date().toISOString();
     if (currentData) {
       const current = currentData as { id: string; appointment_id: string; patient_id: string };
-
-      // Complete the current appointment via the single authoritative
-      // workflow. This updates the appointment status, increments the visit
-      // count exactly once, marks the queue entry completed, auto-completes
-      // linked follow-ups, and writes audit history — identical behaviour to
-      // the dentist status-control path, and fully idempotent.
-      await completeAppointmentCascade(db, {
-        appointmentId: current.appointment_id,
+      await closeChair(db, {
         clinicId: cid,
+        entryId: current.id,
+        appointmentId: current.appointment_id,
         performedBy: profile.id,
+        now,
       });
     }
 
-    // Find the first waiting entry (lowest position) and promote to in_progress
-    const { data: nextData } = await db
-      .from("queue_entries")
-      .select("id, appointment_id, called_at")
-      .eq("clinic_id", cid)
-      .eq("queue_date", qDate)
-      .is("removed_at", null)
-      .eq("status", "waiting")
-      .order("position", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (nextData) {
-      const next = nextData as { id: string; appointment_id: string; called_at: string | null };
-
-      // A call-in already recorded (the dentist started this visit while another
-      // patient held the chair) is kept: it is when the patient was called.
-      await db
-        .from("queue_entries")
-        .update({ status: "in_progress", called_at: next.called_at ?? new Date().toISOString() })
-        .eq("id", next.id);
-
-      // Update appointment status to in_progress
-      await db
-        .from("appointments")
-        .update({ status: "in_progress", updated_at: new Date().toISOString() })
-        .eq("id", next.appointment_id)
-        .eq("clinic_id", cid);
-    }
+    await callNext(db, { clinicId: cid, queueDate: qDate, now });
 
     revalidatePath(`/${profile.role}/queue`);
     revalidatePath(`/${profile.role}/appointments`);

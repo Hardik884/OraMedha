@@ -21,6 +21,11 @@ const ANON_KEY =
   process.env.SUPABASE_TEST_ANON_KEY ??
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
 
+// writeAppointmentHistory() reads these at call time; point them at the local
+// stack only, so the queue-advance cases below can never reach real credentials.
+process.env.NEXT_PUBLIC_SUPABASE_URL = URL;
+process.env.SUPABASE_SERVICE_ROLE_KEY = KEY;
+
 async function reachable(): Promise<boolean> {
   try {
     const res = await fetch(`${URL}/rest/v1/`, { headers: { apikey: KEY }, signal: AbortSignal.timeout(2500) });
@@ -204,24 +209,28 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
       }
     });
 
-    it("a receptionist cannot skip straight to completed, the dentist can", async () => {
+    it("a visit with no recorded arrival is the dentist's alone to complete", async () => {
       const a = await appointment();
       expect(await tryStatus("receptionist", a.id, "completed")).toBe("scheduled");
       expect(await tryStatus("receptionist", a.id, "in_progress")).toBe("scheduled");
       expect(await tryStatus("dentist", a.id, "completed")).toBe("completed");
-
-      const b = await appointment({ status: "checked_in" });
-      expect(await tryStatus("receptionist", b.id, "completed")).toBe("checked_in");
-      expect(await tryStatus("dentist", b.id, "completed")).toBe("completed");
     });
 
-    it("a receptionist completes a checked-in visit only when the live queue has the patient in the chair", async () => {
-      const appt = await appointment({ status: "checked_in" });
-      await insertOne("queue_entries", {
-        clinic_id: CLINIC, appointment_id: appt.id, patient_id: PATIENT, position: 1, status: "in_progress",
-        checked_in_at: "2026-08-03T04:00:00.000Z", called_at: "2026-08-03T04:10:00.000Z", queue_date: "2026-08-10",
-      });
-      expect(await tryStatus("receptionist", appt.id, "completed")).toBe("completed");
+    it("any staff member completes a checked-in visit, whatever the queue says", async () => {
+      // No queue entry at all.
+      const none = await appointment({ status: "checked_in" });
+      expect(await tryStatus("receptionist", none.id, "completed")).toBe("completed");
+      // A queue entry that drifted: still waiting, or already removed.
+      for (const queue of [{ status: "waiting" }, { status: "waiting", removed_at: "2026-08-03T05:00:00.000Z" }]) {
+        const appt = await appointment({ status: "checked_in" });
+        await insertOne("queue_entries", {
+          clinic_id: CLINIC, appointment_id: appt.id, patient_id: PATIENT, position: 1,
+          checked_in_at: "2026-08-03T04:00:00.000Z", queue_date: "2026-08-10", ...queue,
+        });
+        expect({ queue, after: await tryStatus("receptionist", appt.id, "completed") }).toEqual({ queue, after: "completed" });
+      }
+      const dentists = await appointment({ status: "checked_in" });
+      expect(await tryStatus("dentist", dentists.id, "completed")).toBe("completed");
     });
 
     it("a check-in rolls back to scheduled only while nothing is queued for it", async () => {
@@ -575,6 +584,121 @@ describe.skipIf(!LOCAL_UP)("PMS hardening — database enforcement", () => {
       // Not in a window before its completion was recorded.
       const earlier = (await ctx.listCompletedTreatments({ clinicId: C2, from: "2026-10-15", to: "2026-10-15", limit: 500 })) ?? [];
       expect(earlier.find((r) => r.treatmentId === t.id)).toBeUndefined();
+    });
+  });
+
+  // ── Mark Done & Call Next on a queue out of step with its appointments ──────
+  describe("queue advance never blocks", () => {
+    let day = 0;
+    /** A fresh queue day per case, so no case sees another's chair. */
+    const nextDay = () => `2026-11-${String(++day).padStart(2, "0")}`;
+    // Times relative to the real clock: the cascade stamps completed_at with it.
+    const NOW = new Date().toISOString();
+    const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+
+    async function seat(date: string, apptStatus: string, over: Record<string, unknown> = {}, queue: Record<string, unknown> = {}) {
+      const appt = await appointment({ status: apptStatus, ...over });
+      const entry = await insertOne("queue_entries", {
+        clinic_id: CLINIC, appointment_id: appt.id, patient_id: PATIENT, position: 1, status: "in_progress",
+        checked_in_at: minutesAgo(60), called_at: minutesAgo(50), queue_date: date, ...queue,
+      });
+      return { appt, entry };
+    }
+    async function wait(date: string, apptStatus: string, position: number, over: Record<string, unknown> = {}) {
+      const appt = await appointment({ status: apptStatus, ...over });
+      const entry = await insertOne("queue_entries", {
+        clinic_id: CLINIC, appointment_id: appt.id, patient_id: PATIENT, position, status: "waiting",
+        checked_in_at: minutesAgo(55), queue_date: date,
+      });
+      return { appt, entry };
+    }
+    async function advance(date: string) {
+      const { closeChair, callNext } = await import("@/lib/queue/advance");
+      const receptionist = as("receptionist");
+      const { data: chair } = await receptionist
+        .from("queue_entries").select("id, appointment_id").eq("clinic_id", CLINIC).eq("queue_date", date)
+        .is("removed_at", null).eq("status", "in_progress").maybeSingle();
+      const outcome = chair
+        ? await closeChair(receptionist, { clinicId: CLINIC, entryId: chair.id, appointmentId: chair.appointment_id, performedBy: USERS.receptionist.id, now: NOW })
+        : null;
+      const called = await callNext(receptionist, { clinicId: CLINIC, queueDate: date, now: NOW });
+      return { outcome, called };
+    }
+
+    it("the normal path: completes the chair and calls the next patient", async () => {
+      const date = nextDay();
+      const chair = await seat(date, "in_progress");
+      const next = await wait(date, "checked_in", 2);
+      expect(await advance(date)).toEqual({ outcome: "completed", called: next.entry.id });
+      expect(await read("appointments", chair.appt.id)).toMatchObject({ status: "completed" });
+      expect((await read("queue_entries", chair.entry.id)).completed_at).not.toBeNull();
+      expect(await read("appointments", next.appt.id)).toMatchObject({ status: "in_progress" });
+      expect((await read("queue_entries", next.entry.id)).status).toBe("in_progress");
+      expect(Date.parse((await read("queue_entries", next.entry.id)).called_at)).toBe(Date.parse(NOW));
+      expect(Date.parse((await read("queue_entries", chair.entry.id)).completed_at)).toBeGreaterThanOrEqual(Date.parse(minutesAgo(1)));
+    });
+
+    it("a chair whose appointment is still checked in (or was never checked in) is completed", async () => {
+      for (const status of ["checked_in", "scheduled"]) {
+        const date = nextDay();
+        const chair = await seat(date, status);
+        const next = await wait(date, "checked_in", 2);
+        expect({ status, ...(await advance(date)) }).toEqual({ status, outcome: "completed", called: next.entry.id });
+        expect({ status, after: (await read("appointments", chair.appt.id)).status }).toEqual({ status, after: "completed" });
+      }
+    });
+
+    it("a chair whose visit was already completed is closed without an invented end time", async () => {
+      const date = nextDay();
+      const chair = await seat(date, "completed");
+      const next = await wait(date, "checked_in", 2);
+      expect(await advance(date)).toEqual({ outcome: "already_completed", called: next.entry.id });
+      expect(await read("queue_entries", chair.entry.id)).toMatchObject({ status: "completed", completed_at: null, removed_at: null });
+    });
+
+    it("a chair whose appointment was cancelled, missed or deleted is taken off the queue, never completed", async () => {
+      for (const over of [{ status: "cancelled" }, { status: "no_show" }, { status: "in_progress", deleted_at: NOW }]) {
+        const date = nextDay();
+        const chair = await seat(date, over.status, over);
+        const next = await wait(date, "checked_in", 2);
+        expect({ over, ...(await advance(date)) }).toEqual({ over, outcome: "removed", called: next.entry.id });
+        const entry = await read("queue_entries", chair.entry.id);
+        expect({ over, status: entry.status, removed: entry.removed_at !== null, completed_at: entry.completed_at }).toEqual({
+          over, status: "in_progress", removed: true, completed_at: null,
+        });
+      }
+    });
+
+    it("skips waiting entries whose appointment is closed, and checks in a scheduled one before calling it", async () => {
+      const date = nextDay();
+      await seat(date, "in_progress");
+      const cancelled = await wait(date, "cancelled", 2);
+      const done = await wait(date, "completed", 3);
+      const unchecked = await wait(date, "scheduled", 4);
+      expect((await advance(date)).called).toBe(unchecked.entry.id);
+      expect((await read("queue_entries", cancelled.entry.id)).removed_at).not.toBeNull();
+      expect((await read("queue_entries", done.entry.id)).removed_at).not.toBeNull();
+      expect(await read("appointments", unchecked.appt.id)).toMatchObject({ status: "in_progress" });
+    });
+
+    it("a chair whose recorded times cannot hold a completion now is still closed, with no end time", async () => {
+      const date = nextDay();
+      // A call-in recorded later than now (a skewed clock): completed_at = now would
+      // break completed_at >= called_at, so the cascade's queue update cannot land.
+      const future = new Date(Date.now() + 3_600_000).toISOString();
+      const chair = await seat(date, "in_progress", {}, { checked_in_at: future, called_at: future });
+      const next = await wait(date, "checked_in", 2);
+      expect(await advance(date)).toEqual({ outcome: "completed", called: next.entry.id });
+      expect(await read("queue_entries", chair.entry.id)).toMatchObject({ status: "completed", completed_at: null });
+      expect((await read("queue_entries", next.entry.id)).status).toBe("in_progress");
+    });
+
+    it("an empty chair or an empty queue is not an error", async () => {
+      const date = nextDay();
+      expect(await advance(date)).toEqual({ outcome: null, called: null });
+      const next = await wait(date, "checked_in", 1);
+      expect(await advance(date)).toEqual({ outcome: null, called: next.entry.id });
+      expect(await advance(date)).toEqual({ outcome: "completed", called: null });
     });
   });
 
