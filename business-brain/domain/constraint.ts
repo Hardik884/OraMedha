@@ -34,6 +34,52 @@ export const ConstraintCategory = {
    * be filled. They warrant different words and different actions.
    */
   FORWARD_SCHEDULE: "forward_schedule",
+  /**
+   * Patients waiting, and the day running behind.
+   *
+   * Deliberately NOT folded into CAPACITY, for the mirror image of the reason
+   * FORWARD_SCHEDULE is not. CAPACITY is sized and worded entirely as chair time
+   * that went UNUSED — the Value Engine measures it as today's open minutes that
+   * went unbooked, and the briefing titles it "your chair was empty today". A
+   * queue is the opposite finding about the same resource: the chairs were busy
+   * (or badly arranged) and people sat in the waiting room. Routed into CAPACITY
+   * it was handed the empty-chair wording and the empty-minutes figure, so a
+   * clinic whose patients waited fifty minutes read a card telling them their
+   * chair was idle.
+   *
+   * Same resource, opposite direction. That warrants its own words, its own
+   * figure and its own action, exactly as the tense difference does for
+   * FORWARD_SCHEDULE.
+   */
+  PATIENT_FLOW: "patient_flow",
+  /**
+   * Patients seen once and gone quiet, with nothing booked and nothing on the
+   * recall list.
+   *
+   * Separate from RETENTION because they are different populations needing
+   * different work, and conflating them was already producing an incoherent
+   * card. RETENTION is about patients the clinic DECIDED to bring back —
+   * follow-ups it raised and returning volume it can compare against a prior
+   * period. This is about patients nobody decided anything about: no follow-up
+   * exists, so no backlog can ever grow, so the clinic's recall list looks clean
+   * while the base quietly empties.
+   *
+   * The Value Engine used to size RETENTION with the reactivation count while
+   * the card's own words counted overdue follow-ups. Splitting the categories is
+   * what lets each be sized by the population it actually describes.
+   */
+  REACTIVATION: "reactivation",
+  /**
+   * The gap between the time appointments are booked for and the time they take.
+   *
+   * Its own bottleneck rather than CAPACITY or PATIENT_FLOW, because it is the
+   * only one of the three that is a property of the BOOKING rather than of a
+   * day. Capacity and flow describe what happened on a date; this describes a
+   * template the clinic applies to every future date, which is both why it is
+   * measured over a window and why acting on it changes days that have not
+   * happened yet.
+   */
+  SCHEDULE_ACCURACY: "schedule_accuracy",
 } as const;
 
 export type ConstraintCategory =

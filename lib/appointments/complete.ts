@@ -154,6 +154,7 @@ export async function completeAppointmentCascade(
     .update({ status: "completed", completed_at: now })
     .eq("appointment_id", appointmentId)
     .eq("clinic_id", clinicId)
+    .is("removed_at", null)
     .in("status", ["waiting", "in_progress"]);
 
   // ── 3) Audit history (exactly once) ──────────────────────────────────────

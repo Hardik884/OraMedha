@@ -85,9 +85,53 @@ describe("averageWaitingTime", () => {
     expect(valueOf(averageWaitingTime, s)).toBe(40);
   });
 
-  it("reports zero when there is nothing measurable", () => {
-    expect(valueOf(averageWaitingTime, snapshot())).toBe(0);
+  it("is withheld, never zero, when there is nothing measurable", () => {
+    expect(averageWaitingTime(snapshot())).toBeNull();
     const unusable = snapshot({ queueToday: [queueEntry({ checkedInAt: "bad", startedAt: "bad" })] });
-    expect(valueOf(averageWaitingTime, unusable)).toBe(0);
+    expect(averageWaitingTime(unusable)).toBeNull();
+  });
+
+  it("does not measure a completed visit whose call-in was never recorded", () => {
+    // Checked in at 10:00, completed with no called_at. Measuring it to asOf
+    // (12:00) reported a two-hour wait nobody observed.
+    const s = snapshot({
+      queueToday: [queueEntry({ status: "completed", checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: null })],
+    });
+    expect(averageWaitingTime(s)).toBeNull();
+  });
+
+  it("does not measure a waiting entry whose appointment has already moved on", () => {
+    for (const appointmentStatus of ["in_progress", "completed", "cancelled", "no_show"]) {
+      const s = snapshot({
+        queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: null, appointmentStatus })],
+      });
+      expect(averageWaitingTime(s), appointmentStatus).toBeNull();
+      expect(valueOf(patientsWaiting, s), appointmentStatus).toBe(0);
+    }
+  });
+
+  it("measures an open wait as known at a moment within the day", () => {
+    const s = snapshot({
+      knowledge: { mode: "point_in_time", knownAt: `${DATE}T12:00:00.000Z` },
+      queueToday: [queueEntry({ checkedInAt: `${DATE}T11:00:00.000Z`, startedAt: null })],
+    });
+    expect(valueOf(averageWaitingTime, s)).toBe(60);
+  });
+
+  it("does not measure an open wait on a past day read from current records", () => {
+    const s = snapshot({
+      knowledge: { mode: "current_state", knownAt: `${DATE}T12:00:00.000Z`, reason: "before_history_capture" },
+      queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: null })],
+    });
+    expect(averageWaitingTime(s)).toBeNull();
+  });
+
+  it("does not measure a wait nobody resolved once the day has ended", () => {
+    const s = snapshot({
+      asOf: `${DATE}T23:59:59.999Z`,
+      knowledge: { mode: "point_in_time", knownAt: `${DATE}T23:59:59.999Z` },
+      queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: null })],
+    });
+    expect(averageWaitingTime(s)).toBeNull();
   });
 });

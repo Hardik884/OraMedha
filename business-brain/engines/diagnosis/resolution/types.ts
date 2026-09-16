@@ -3,8 +3,8 @@
  *
  * A matcher can say "these two explanations both fit, and THIS measurement would
  * separate them" but cannot take the measurement: daily aggregates do not carry
- * which appointment was cancelled when. Ten of the catalogue's discriminators are
- * therefore marked `requires_entity_data`, and every hypothesis they would
+ * which appointment was cancelled when. The catalogue's `requires_entity_data`
+ * discriminators are therefore marked as such, and every hypothesis they would
  * separate stays `undetermined`.
  *
  * This layer takes those rows once they have been fetched and turns them into
@@ -41,7 +41,6 @@ import type {
   NoShowHistoryRow,
   OutstandingBalanceRow,
   PendingTreatmentRow,
-  RecallContactAttemptRow,
 } from "../ports/diagnosis-context-port";
 
 /**
@@ -57,7 +56,6 @@ export interface EntityContext {
   readonly pendingTreatments?: readonly PendingTreatmentRow[] | null;
   readonly outstandingBalances?: readonly OutstandingBalanceRow[] | null;
   readonly appointmentArrivals?: readonly AppointmentArrivalRow[] | null;
-  readonly recallContactAttempts?: readonly RecallContactAttemptRow[] | null;
   readonly completedTreatments?: readonly CompletedTreatmentRow[] | null;
 }
 

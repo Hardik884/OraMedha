@@ -21,10 +21,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { Database } from "@/types/database.types";
 import type { EntityWindow } from "@/business-brain";
-import { applyEntityResolution, DEFAULT_ENTITY_RESOLUTION } from "@/business-brain";
+import {
+  applyEntityResolution,
+  Availability,
+  DEFAULT_ENTITY_RESOLUTION,
+  DISCRIMINATORS,
+} from "@/business-brain";
 import type { Diagnosis } from "@/business-brain";
 import { computeOutstandingBalance } from "@/lib/billing/balance";
-import { SupabaseDiagnosisContext } from "../diagnosis-context";
+import { EntityWindowTooLargeError, SupabaseDiagnosisContext } from "../diagnosis-context";
 
 const URL = process.env.SUPABASE_TEST_URL ?? "http://127.0.0.1:55321";
 const KEY =
@@ -423,6 +428,20 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
     });
   });
 
+  describe("clinic-local hours", () => {
+    it("buckets cancellations and arrivals by the clinic's hour, not the server's", async () => {
+      // 05:00 UTC is 10:30 in Kolkata. Bucketed in UTC, a morning clinic's losses
+      // would be reported against the small hours of the night.
+      const utc = await ctx.listCancellationEvents(WINDOW);
+      const local = await new SupabaseDiagnosisContext(db, "Asia/Kolkata").listCancellationEvents(WINDOW);
+      expect(utc?.find((e) => e.appointmentId === A_EARLY_CANCEL)?.localHour).toBe("05:00");
+      expect(local?.find((e) => e.appointmentId === A_EARLY_CANCEL)?.localHour).toBe("10:00");
+      // Checked in at 09:12 UTC: 14:42 in Kolkata.
+      const arrivals = await new SupabaseDiagnosisContext(db, "Asia/Kolkata").listAppointmentArrivals(WINDOW);
+      expect(arrivals?.find((a) => a.appointmentId === A_ARRIVED)?.arrivalLocalHour).toBe("14:00");
+    });
+  });
+
   describe("no-show history", () => {
     it("counts prior attendance strictly BEFORE each missed appointment", async () => {
       // Both misses belong to the same patient. If history were counted from the
@@ -516,18 +535,14 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
       expect(canonical).toBe(1500);
     });
 
-    it("keeps the newest candidates under the row-limit cap, not the oldest", async () => {
-      // Under limit:1, the DB fetch (ordered by created_at) returns exactly the
-      // single most-recently-created billable treatment across the whole
-      // clinic fixture — T_LIMIT_NEW (6 April), the newest of all seeded
-      // completed/in_progress treatments. The bug's ascending order would have
-      // kept the OLDEST instead (T_ATTENDED-adjacent fixtures from March/early
-      // April), silently dropping the genuinely recent, most-likely-still-owed
-      // work.
-      const capped = await ctx.listOutstandingBalances({ ...WINDOW, limit: 1 });
-      expect(capped).toHaveLength(1);
-      expect(capped?.[0]?.invoiceId).toBe(T_LIMIT_NEW);
-      expect(capped?.[0]?.invoiceId).not.toBe(T_LIMIT_OLD);
+    it("refuses a window larger than its limit rather than answering from part of it", async () => {
+      // Hardening: this used to keep the newest N and drop the rest, which made an
+      // ageing distribution read from recent balances only look complete. A
+      // window the limit cannot hold is now refused, and the service records the
+      // discriminator as unanswered.
+      await expect(ctx.listOutstandingBalances({ ...WINDOW, limit: 1 })).rejects.toBeInstanceOf(EntityWindowTooLargeError);
+      const whole = await ctx.listOutstandingBalances(WINDOW);
+      expect(whole.map((r) => r.invoiceId)).toEqual(expect.arrayContaining([T_LIMIT_NEW, T_LIMIT_OLD]));
     });
   });
 
@@ -609,13 +624,16 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
   });
 
   describe("what this deployment cannot answer", () => {
-    it("returns NULL for recall contact attempts, never an empty list", async () => {
-      // DentGrow records no contact attempts. `[]` would assert that none were
-      // made — which is one of the two answers the discriminator is trying to
-      // choose between, so returning it would settle the question by accident,
-      // in the direction that blames the clinic.
-      const attempts = await ctx.listRecallContactAttempts(WINDOW);
-      expect(attempts).toBeNull();
+    it("offers no method for recall contact attempts, and catalogues them as data capture", async () => {
+      // DentGrow records no contact attempt or outcome against a follow-up. The
+      // port used to declare a method that could only ever return null; it now
+      // declares nothing, and the discriminator says plainly that the data would
+      // have to be captured. Either way no hypothesis may be settled from it.
+      expect("listRecallContactAttempts" in ctx).toBe(false);
+      expect(DISCRIMINATORS.RECALL_CONTACT_ATTEMPTS.availability).toBe(
+        Availability.REQUIRES_DATA_CAPTURE,
+      );
+      expect(DISCRIMINATORS.RECALL_CONTACT_ATTEMPTS.portMethod).toBeNull();
     });
 
     it("distinguishes that from a method that genuinely found nothing", async () => {
@@ -705,21 +723,17 @@ describe.skipIf(!LOCAL_UP)("diagnosis context (integration)", () => {
       expect(resolved[0].evidence[0]?.description).toContain("1 of 5 vacated slot(s)");
     });
 
-    it("leaves hypotheses open when the deployment cannot answer", async () => {
-      // The null path, end to end: the adapter returns null for recall contact
-      // attempts, and nothing downstream may read that as "no attempts made".
-      const attempts = await ctx.listRecallContactAttempts(WINDOW);
-      expect(attempts).toBeNull();
-
-      const before = pendingDiagnosis("recall_contact_attempts");
+    it("leaves hypotheses open when a method could not answer", async () => {
+      // The null path, end to end: the service records a failed or unanswerable
+      // fetch as null, and nothing downstream may read that as "no cancellations".
+      const before = pendingDiagnosis("cancellation_timing");
       const after = applyEntityResolution(
         [before],
-        { recallContactAttempts: attempts },
+        { cancellationEvents: null },
         "2026-04-07T06:30:00.000Z",
         DEFAULT_ENTITY_RESOLUTION,
       );
       expect(after[0]).toEqual(before);
-      expect(after[0].discriminators[0].availability).toBe("requires_entity_data");
     });
   });
 });

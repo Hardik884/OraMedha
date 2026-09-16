@@ -23,7 +23,6 @@ import { round2 } from "../../signals/support/numbers";
 import { DISCRIMINATORS } from "../support/discriminators";
 import type {
   DiscriminatorResolver,
-  EntityContext,
   ResolutionOutcome,
   ResolverInput,
 } from "./types";
@@ -157,7 +156,8 @@ const cancellationSlotClustering: DiscriminatorResolver = (ctx, input) => {
   const byHour = new Map<string, number>();
   const byType = new Map<string, number>();
   for (const r of rows) {
-    const hour = `${r.scheduledStart.slice(11, 13)}:00`;
+    // The clinic's hour, from the adapter. The ISO start's own digits are UTC.
+    const hour = r.localHour;
     byHour.set(hour, (byHour.get(hour) ?? 0) + 1);
     if (r.treatmentType !== null) byType.set(r.treatmentType, (byType.get(r.treatmentType) ?? 0) + 1);
   }
@@ -182,8 +182,14 @@ const cancellationSlotClustering: DiscriminatorResolver = (ctx, input) => {
   }
 
   const threshold = concentrationShare * 100;
+  // Treatment type is recorded against few lost appointments (see
+  // CancellationEvent.treatmentType). One typed row out of eight is 100% of the
+  // typed set and says nothing about where losses concentrate, so a type share
+  // only counts once the TYPED sample itself clears the minimum.
+  const typeJudgeable = typed >= minimumSample;
   const concentrated =
-    (topHour?.sharePct ?? 0) >= threshold || (topType?.sharePct ?? 0) >= threshold;
+    (topHour?.sharePct ?? 0) >= threshold ||
+    (typeJudgeable && (topType?.sharePct ?? 0) >= threshold);
   const clustering = hypothesis(input, 0);
   const spread = hypothesis(input, 1);
 
@@ -446,7 +452,10 @@ const appointmentArrivalTimes: DiscriminatorResolver = (ctx, input) => {
   const early = deltas.filter((d) => d < 0).length;
   const late = deltas.filter((d) => d > 0).length;
   const byHour = new Map<string, number>();
-  for (const r of arrived) byHour.set(`${(r.arrivedAt as string).slice(11, 13)}:00`, (byHour.get(`${(r.arrivedAt as string).slice(11, 13)}:00`) ?? 0) + 1);
+  for (const r of arrived) {
+    const hour = r.arrivalLocalHour as string;
+    byHour.set(hour, (byHour.get(hour) ?? 0) + 1);
+  }
   const top = largestBucket(byHour, arrived.length);
 
   const description =

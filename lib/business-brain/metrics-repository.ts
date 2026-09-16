@@ -32,6 +32,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type {
+  SnapshotKnowledge,
   AppointmentSnapshot,
   ClinicDataSnapshot,
   FollowUpSnapshot,
@@ -40,12 +41,21 @@ import type {
   PaymentSnapshot,
   QueueEntrySnapshot,
   TreatmentSnapshot,
+  VisitDurationSnapshot,
 } from "@/business-brain";
 import type { Database } from "@/types/database.types";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
-import { openMinutes, type AvailabilityRule } from "@/lib/scheduling/slots";
 import { getUtcBoundariesForLocalDate } from "@/lib/utils";
-import { addDays, dateRange } from "@/business-brain";
+import { addDays, ALL_HISTORY_ENTITIES, historyCovers, type HistoryCapture, type HistoryEntity } from "@/business-brain";
+import { fetchScheduleInputs, openMinutesInRange, openMinutesOnDate } from "./schedule-inputs";
+import { readAll } from "./paged-read";
+
+/**
+ * Most rows one snapshot query may return. The cumulative reads (every treatment
+ * and payment a clinic has ever recorded) grow with clinic history; past this a
+ * snapshot fails loudly rather than measuring balances from part of a ledger.
+ */
+const MAX_SNAPSHOT_ROWS = 250_000;
 
 /**
  * TYPING NOTE
@@ -63,13 +73,10 @@ import { addDays, dateRange } from "@/business-brain";
  * carries runtime risk and belongs in its own change.
  *
  * Rather than spread `any` further, every query below declares the exact row
- * shape it selects and narrows the result once through {@link rows}. The
- * mapping code is then fully typed against these declarations — only the
- * client boundary is loose, and it is loose in exactly one place per query.
+ * shape it selects and narrows the result once, through `readAll`'s type
+ * parameter. The mapping code is then fully typed against these declarations —
+ * only the client boundary is loose, and it is loose in exactly one place per query.
  */
-function rows<T>(data: unknown): T[] {
-  return (data ?? []) as T[];
-}
 
 interface ClinicSettingsRow {
   timezone: string | null;
@@ -85,14 +92,6 @@ interface AppointmentRow {
   created_at: string;
   duration_minutes: number;
   source: string;
-}
-interface UnavailableDateRow {
-  date: string;
-}
-interface ConsultancyBlockDatedRow {
-  date: string;
-  start_time: string;
-  end_time: string;
 }
 interface PatientRow {
   id: string;
@@ -134,33 +133,49 @@ interface PaymentRow {
 }
 interface QueueRow {
   id: string;
+  appointment_id: string;
   status: string;
   checked_in_at: string;
   called_at: string | null;
+  completed_at: string | null;
+  removed_at: string | null;
+}
+interface QueueDurationRow {
+  appointment_id: string;
+  called_at: string | null;
+  completed_at: string | null;
 }
 interface FollowUpRow {
   id: string;
   due_date: string;
   status: string;
 }
-interface AvailabilityRuleRow {
-  start_time: string;
-  end_time: string;
-  slot_duration_minutes: number;
+
+
+
+/** The record reads a snapshot is built from, as current state or as known at a moment. */
+interface SnapshotReader {
+  appointments(start: string, end: string): Promise<AppointmentSnapshot[]>;
+  patientsRegistered(start: string, end: string): Promise<PatientSnapshot[]>;
+  patientsSeen(patientIds: string[]): Promise<PatientSnapshot[]>;
+  treatments(asOf: string): Promise<Array<Omit<TreatmentSnapshot, "isScheduled"> & { patientId: string }>>;
+  payments(date: string): Promise<PaymentSnapshot[]>;
+  followUps(date: string): Promise<FollowUpSnapshot[]>;
+  patientsWithFutureAppointments(asOf: string): Promise<Set<string>>;
+  patientRoster(asOf: string): Promise<PatientRosterRow[]>;
+  patientsOnPaymentPlan(date: string): Promise<Set<string>>;
 }
 
-/** Postgres `time` columns arrive as "HH:MM:SS"; the slot engine wants "HH:MM". */
-function toHhMm(time: string): string {
-  return time.slice(0, 5);
-}
+type RpcRow<N extends keyof Database["public"]["Functions"]> = Database["public"]["Functions"][N]["Returns"] extends (infer R)[] ? R : never;
+type AppointmentStateRow = RpcRow<"appointment_states_as_of">;
+type TreatmentStateRow = RpcRow<"treatment_states_as_of">;
+type FollowUpStateRow = RpcRow<"follow_up_states_as_of">;
+type PaymentStateRow = RpcRow<"payment_states_as_of">;
+type PatientStateRow = RpcRow<"patient_states_as_of">;
 
-/**
- * Day-of-week (0 = Sunday) for a "YYYY-MM-DD" business date.
- * Read from the date string itself — the business date is already clinic-local,
- * so converting it through a timezone again would shift it.
- */
-function dayOfWeek(date: string): number {
-  return new Date(`${date}T12:00:00.000Z`).getUTCDay();
+/** A timestamp, or null when it falls after the moment being described. */
+function notAfter(iso: string | null, knownAt: string): string | null {
+  return iso !== null && Date.parse(iso) <= Date.parse(knownAt) ? iso : null;
 }
 
 export interface SupabaseMetricsRepositoryOptions {
@@ -181,6 +196,12 @@ export interface SupabaseMetricsRepositoryOptions {
   readonly trailingWindowDays?: number;
   /** Length of the forward schedule window, in days after `date`. */
   readonly forwardWindowDays?: number;
+  /**
+   * The real present, ISO-8601. A snapshot whose moment is earlier describes the
+   * past and is read from state history where history reaches it. Injected for
+   * tests only; production reads the clock.
+   */
+  readonly now?: string;
 }
 
 /**
@@ -214,11 +235,14 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
 
     // Clinic settings drive both the day boundaries and the slot size used for
     // capacity, so they must be resolved before anything date-scoped runs.
-    const { data: settings } = await this.db
+    const { data: settings, error: settingsError } = await this.db
       .from("clinic_settings")
       .select("timezone, average_appointment_duration, chair_count, recall_interval_days")
       .eq("clinic_id", clinicId)
       .maybeSingle();
+    // A failed read is not "no settings": falling back would measure the day in
+    // the wrong timezone with a guessed chair count and say nothing.
+    if (settingsError) throw new Error(`clinic_settings: ${settingsError.message}`);
 
     const cfg = (settings ?? null) as ClinicSettingsRow | null;
     const timezone = cfg?.timezone ?? DEFAULT_TIMEZONE;
@@ -253,8 +277,23 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     const forwardTo = addDays(date, forwardDays);
 
     // One read of the schedule rules covers today, the trailing window and the
-    // forward window — see fetchScheduleInputs.
-    const scheduleInputs = await this.fetchScheduleInputs(clinicId, trailingFrom, forwardTo);
+    // forward window — see fetchScheduleInputs. Schedule rules are not versioned:
+    // a past day reads today's rules, and every reading that uses them says so.
+    const scheduleInputs = await fetchScheduleInputs(this.db, clinicId, trailingFrom, forwardTo);
+
+    // WHAT THE SNAPSHOT KNOWS
+    // -----------------------
+    // A snapshot of the present reads records as they stand. A snapshot of a past
+    // moment reads each record's state AS RECORDED BY THAT MOMENT, from the state
+    // history (migration 20260917100000): an appointment cancelled since still
+    // counts as booked, a payment keyed in since for an earlier date is not yet on
+    // the books. Only where history does not reach the moment — before capture
+    // began — are current records read instead, and the snapshot says so.
+    // Without an injected moment the snapshot's clock IS the present; reading the
+    // clock a second time would make a present snapshot look a few ms in the past.
+    const now = this.options.now ?? (this.options.asOf === undefined ? clock : new Date().toISOString());
+    const knowledge = await this.resolveKnowledge(asOf, now);
+    const reader = knowledge.mode === "point_in_time" ? this.pointInTime(clinicId, asOf) : this.current(clinicId);
 
     const [
       appointmentsToday,
@@ -268,18 +307,20 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       patientsOnPaymentPlan,
       trailingAppointments,
       forwardAppointments,
+      trailingQueueDurations,
     ] = await Promise.all([
-      this.fetchAppointments(clinicId, dayStart, dayEnd),
-      this.fetchPatientsRegistered(clinicId, dayStart, dayEnd),
-      this.fetchTreatments(clinicId, asOf),
-      this.fetchPayments(clinicId, date),
-      this.fetchQueue(clinicId, date),
-      this.fetchFollowUps(clinicId, date),
-      this.fetchPatientsWithFutureAppointments(clinicId, asOf),
-      this.fetchPatientRoster(clinicId, asOf),
-      this.fetchPatientsOnPaymentPlan(clinicId, date),
-      this.fetchAppointmentsInRange(clinicId, trailingFrom, date, timezone),
-      this.fetchAppointmentsInRange(clinicId, forwardFrom, forwardTo, timezone),
+      reader.appointments(dayStart, dayEnd),
+      reader.patientsRegistered(dayStart, dayEnd),
+      reader.treatments(asOf),
+      reader.payments(date),
+      this.fetchQueue(clinicId, date, knowledge),
+      reader.followUps(date),
+      reader.patientsWithFutureAppointments(asOf),
+      reader.patientRoster(asOf),
+      reader.patientsOnPaymentPlan(date),
+      reader.appointments(getUtcBoundariesForLocalDate(trailingFrom, timezone).start, getUtcBoundariesForLocalDate(date, timezone).end),
+      reader.appointments(getUtcBoundariesForLocalDate(forwardFrom, timezone).start, getUtcBoundariesForLocalDate(forwardTo, timezone).end),
+      this.fetchVisitDurations(clinicId, trailingFrom, date, knowledge),
     ]);
 
     // Depends on today's appointments, so it cannot join the parallel batch.
@@ -290,8 +331,19 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     // `bookedMinutes` already exclude them elsewhere in this file; leaving it
     // unfiltered inflated `patients.returning_today` on days with cancellations
     // (audit: patientsSeenToday row-status gap).
-    const patientsSeenToday = await this.fetchPatientsSeen(
-      clinicId,
+    const appointmentStatusById = new Map(appointmentsToday.map((a) => [a.id, a.status]));
+
+    // History kept because its patient was deleted: the work was delivered and
+    // the money collected, so past production and collections still count it.
+    // Balances and the pipeline never do (see the calculators' patientDeleted).
+    const [deletedPatientTreatments, deletedPatientPayments] = await Promise.all([
+      this.fetchPatientDeletedTreatments(clinicId, asOf, knowledge),
+      this.fetchPatientDeletedPayments(clinicId, date, knowledge),
+    ]);
+    const liveTreatmentIds = new Set(treatments.map((t) => t.id));
+    const livePaymentIds = new Set(payments.map((p) => p.id));
+
+    const patientsSeenToday = await reader.patientsSeen(
       appointmentsToday
         .filter((a) => (LIVE_APPOINTMENT_STATUSES as readonly string[]).includes(a.status))
         .map((a) => a.patientId),
@@ -301,21 +353,34 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       clinicId,
       date,
       asOf,
+      timezone,
+      knowledge,
       appointmentsToday,
       patientsRegisteredToday,
       patientsSeenToday,
+      // Each queue entry with its appointment's status as the snapshot read it,
+      // so an entry left "waiting" behind a visit already started or closed is
+      // not counted as a patient waiting. Entries whose appointment is not among
+      // the day's appointments carry no status: unknown, not waiting-by-default.
+      queueToday: queueToday.map(({ appointmentId, ...entry }) => {
+        const status = appointmentStatusById.get(appointmentId);
+        return status === undefined ? entry : { ...entry, appointmentStatus: status };
+      }),
       // Keep patientId on the snapshot so revenue.outstanding can clamp per
       // patient (a deposit on one patient's planned work must not erase another
       // patient's billable debt).
-      treatments: treatments.map((t) => ({
-        ...t,
-        isScheduled: patientsWithFutureAppointment.has(t.patientId),
-      })),
-      payments,
-      queueToday,
+      treatments: [
+        ...treatments.map((t) => ({
+          ...t,
+          isScheduled: patientsWithFutureAppointment.has(t.patientId),
+        })),
+        // A row still live at the snapshot's moment is already above.
+        ...deletedPatientTreatments.filter((t) => !liveTreatmentIds.has(t.id)),
+      ],
+      payments: [...payments, ...deletedPatientPayments.filter((p) => !livePaymentIds.has(p.id))],
       followUps,
       capacity: {
-        openMinutesToday: this.openMinutesOnDate(date, scheduleInputs),
+        openMinutesToday: openMinutesOnDate(date, scheduleInputs),
         chairCount,
         typicalAppointmentMinutes,
       },
@@ -324,14 +389,14 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
         to: date,
         appointments: trailingAppointments,
         openChairMinutes:
-          this.openMinutesInRange(trailingFrom, date, scheduleInputs) * chairCount,
+          openMinutesInRange(trailingFrom, date, scheduleInputs) * chairCount,
       },
       forwardWindow: {
         from: forwardFrom,
         to: forwardTo,
         appointments: forwardAppointments,
         openChairMinutes:
-          this.openMinutesInRange(forwardFrom, forwardTo, scheduleInputs) * chairCount,
+          openMinutesInRange(forwardFrom, forwardTo, scheduleInputs) * chairCount,
       },
       patientRoster: roster.map((p) => ({
         id: p.id,
@@ -344,8 +409,181 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
       // one place that decides what "no interval configured" means.
       recallIntervalDays: cfg?.recall_interval_days ?? undefined,
       patientsOnPaymentPlan,
+      // Joined here rather than in SQL: the booked length lives on the
+      // appointment and the delivered length on the queue entry, and the
+      // trailing appointments were loaded a few lines above for the window
+      // metrics. Pairing them in memory avoids a second read of the same rows.
+      //
+      // An appointment with no queue entry contributes nothing — not a zero. A
+      // visit nobody checked in is a visit whose length was never measured, and
+      // counting it as on-time would make a clinic that forgets to close its
+      // queue entries look like one that books perfectly.
+      trailingVisitDurations: joinVisitDurations(trailingAppointments, trailingQueueDurations),
     };
   }
+
+  // ── How records are read ───────────────────────────────────────────────────
+
+  /**
+   * Point-in-time when the snapshot's moment is in the past AND every entity's
+   * history reaches back to it; current state otherwise, with the reason.
+   */
+  private async resolveKnowledge(asOf: string, now: string): Promise<SnapshotKnowledge> {
+    if (Date.parse(asOf) >= Date.parse(now)) return { mode: "current_state", knownAt: asOf, reason: "describes_present" };
+    const { data, error } = await this.db.from("entity_history_capture").select("entity, captured_since");
+    if (error) throw new Error(`entity_history_capture: ${error.message}`);
+    const captures: HistoryCapture[] = ((data ?? []) as { entity: string; captured_since: string }[]).map((r) => ({
+      entity: r.entity as HistoryEntity,
+      capturedSince: r.captured_since,
+    }));
+    return historyCovers(captures, ALL_HISTORY_ENTITIES, asOf).covered
+      ? { mode: "point_in_time", knownAt: asOf }
+      : { mode: "current_state", knownAt: now, reason: "before_history_capture" };
+  }
+
+  /** Records as they stand now. */
+  private current(clinicId: string): SnapshotReader {
+    return {
+      appointments: (windowStart, windowEnd) => this.fetchAppointments(clinicId, windowStart, windowEnd),
+      patientsRegistered: (windowStart, windowEnd) => this.fetchPatientsRegistered(clinicId, windowStart, windowEnd),
+      patientsSeen: (ids) => this.fetchPatientsSeen(clinicId, ids),
+      treatments: (asOf) => this.fetchTreatments(clinicId, asOf),
+      payments: (date) => this.fetchPayments(clinicId, date),
+      followUps: (date) => this.fetchFollowUps(clinicId, date),
+      patientsWithFutureAppointments: (asOf) => this.fetchPatientsWithFutureAppointments(clinicId, asOf),
+      patientRoster: (asOf) => this.fetchPatientRoster(clinicId, asOf),
+      patientsOnPaymentPlan: (date) => this.fetchPatientsOnPaymentPlan(clinicId, date),
+    };
+  }
+
+  /**
+   * Records as OraMedha knew them at `knownAt`: each one's latest state version
+   * recorded by then, from the database's point-in-time readers. Nothing recorded
+   * later (a cancellation, a deletion, a payment keyed in for an earlier date)
+   * reaches the snapshot.
+   */
+  private pointInTime(clinicId: string, knownAt: string): SnapshotReader {
+    let patients: Promise<PatientStateRow[]> | undefined;
+    const patientStates = () =>
+      (patients ??= readAll<PatientStateRow>(
+        "patient_states_as_of",
+        (from, to) =>
+          this.db.rpc("patient_states_as_of", { p_clinic_id: clinicId, p_known_at: knownAt }).order("patient_id", { ascending: true }).range(from, to),
+        MAX_SNAPSHOT_ROWS,
+      ).then((rows) => rows.filter((p) => !p.is_deleted)));
+
+    const appointmentStates = (args: { from?: string; to?: string; statuses?: Database["public"]["Enums"]["appointment_status"][] }) =>
+      readAll<AppointmentStateRow>(
+        "appointment_states_as_of",
+        (from, to) =>
+          this.db
+            .rpc("appointment_states_as_of", {
+              p_clinic_id: clinicId,
+              p_known_at: knownAt,
+              ...(args.from === undefined ? {} : { p_scheduled_from: args.from }),
+              ...(args.to === undefined ? {} : { p_scheduled_to: args.to }),
+              ...(args.statuses === undefined ? {} : { p_statuses: args.statuses }),
+            })
+            .order("appointment_id", { ascending: true })
+            .range(from, to),
+        MAX_SNAPSHOT_ROWS,
+      ).then((rows) => rows.filter((a) => !a.is_deleted));
+
+    return {
+      appointments: async (windowStart, windowEnd) =>
+        (await appointmentStates({ from: windowStart, to: windowEnd })).map((a) => ({
+          id: a.appointment_id,
+          patientId: a.patient_id,
+          status: a.status,
+          scheduledAt: a.scheduled_at,
+          createdAt: a.entity_created_at,
+          durationMinutes: a.duration_minutes,
+          source: a.source,
+        })),
+      patientsRegistered: async (windowStart, windowEnd) =>
+        (await patientStates())
+          .filter((p) => Date.parse(p.entity_created_at) >= Date.parse(windowStart) && Date.parse(p.entity_created_at) <= Date.parse(windowEnd))
+          .map((p) => ({ id: p.patient_id, createdAt: p.entity_created_at })),
+      patientsSeen: async (ids) => {
+        const wanted = new Set(ids);
+        return (await patientStates()).filter((p) => wanted.has(p.patient_id)).map((p) => ({ id: p.patient_id, createdAt: p.entity_created_at }));
+      },
+      treatments: async (asOf) => {
+        const rows = await readAll<TreatmentStateRow>(
+          "treatment_states_as_of",
+          (from, to) =>
+            this.db.rpc("treatment_states_as_of", { p_clinic_id: clinicId, p_known_at: knownAt }).order("treatment_id", { ascending: true }).range(from, to),
+          MAX_SNAPSHOT_ROWS,
+        );
+        return rows
+          .filter((t) => !t.is_deleted)
+          .map((t) => {
+            // Work dated after the snapshot's moment had not been delivered then,
+            // whenever it was keyed in: the same rule the current-state read applies.
+            const performedInFuture = t.performed_at !== null && Date.parse(t.performed_at) > Date.parse(asOf);
+            return {
+              id: t.treatment_id,
+              cost: Number(t.cost ?? 0),
+              status: performedInFuture ? "planned" : t.status,
+              performedAt: performedInFuture ? null : t.performed_at,
+              patientId: t.patient_id,
+              opdCharged: t.opd_charged ?? false,
+              opdFee: Number(t.opd_fee ?? 0),
+              xrayTaken: t.xray_taken ?? false,
+              xrayCost: Number(t.xray_cost ?? 0),
+            };
+          });
+      },
+      payments: async (date) =>
+        (
+          await readAll<PaymentStateRow>(
+            "payment_states_as_of",
+            (from, to) =>
+              this.db
+                .rpc("payment_states_as_of", { p_clinic_id: clinicId, p_known_at: knownAt, p_payment_to: date })
+                .order("payment_id", { ascending: true })
+                .range(from, to),
+            MAX_SNAPSHOT_ROWS,
+          )
+        )
+          .filter((p) => !p.is_deleted)
+          .map((p) => ({ id: p.payment_id, amount: Number(p.amount ?? 0), paymentDate: p.payment_date, patientId: p.patient_id })),
+      followUps: async (date) =>
+        (
+          await readAll<FollowUpStateRow>(
+            "follow_up_states_as_of",
+            (from, to) =>
+              this.db
+                .rpc("follow_up_states_as_of", { p_clinic_id: clinicId, p_known_at: knownAt, p_due_to: date, p_statuses: ["pending"] })
+                .order("follow_up_id", { ascending: true })
+                .range(from, to),
+            MAX_SNAPSHOT_ROWS,
+          )
+        )
+          .filter((f) => !f.is_deleted)
+          .map((f) => ({ id: f.follow_up_id, dueDate: f.due_date, status: f.status })),
+      patientsWithFutureAppointments: async (asOf) =>
+        new Set(
+          (await appointmentStates({ from: asOf, statuses: [...LIVE_APPOINTMENT_STATUSES] }))
+            .filter((a) => Date.parse(a.scheduled_at) > Date.parse(asOf))
+            .map((a) => a.patient_id),
+        ),
+      patientRoster: async (asOf) => {
+        const [roster, visits] = await Promise.all([patientStates(), appointmentStates({ to: asOf, statuses: ["completed"] })]);
+        const lastVisit = new Map<string, string>();
+        for (const v of visits) {
+          const current = lastVisit.get(v.patient_id);
+          if (current === undefined || Date.parse(v.scheduled_at) > Date.parse(current)) lastVisit.set(v.patient_id, v.scheduled_at);
+        }
+        return roster
+          .filter((p) => Date.parse(p.entity_created_at) <= Date.parse(asOf))
+          .map((p) => ({ id: p.patient_id, created_at: p.entity_created_at, last_visit: lastVisit.get(p.patient_id) ?? null }));
+      },
+      patientsOnPaymentPlan: async (date) =>
+        new Set((await patientStates()).filter((p) => p.payment_plan_until !== null && p.payment_plan_until >= date).map((p) => p.patient_id)),
+    };
+  }
+
 
   // ── Queries ────────────────────────────────────────────────────────────────
 
@@ -354,16 +592,22 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     dayStart: string,
     dayEnd: string,
   ): Promise<AppointmentSnapshot[]> {
-    const { data, error } = await this.db
-      .from("appointments")
-      .select("id, patient_id, status, scheduled_at, created_at, duration_minutes, source")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .gte("scheduled_at", dayStart)
-      .lte("scheduled_at", dayEnd);
-    if (error) throw new Error(`appointments: ${error.message}`);
+    const data = await readAll<AppointmentRow>(
+      "appointments",
+      (from, to) =>
+        this.db
+          .from("appointments")
+          .select("id, patient_id, status, scheduled_at, created_at, duration_minutes, source")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .gte("scheduled_at", dayStart)
+          .lte("scheduled_at", dayEnd)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
 
-    return rows<AppointmentRow>(data).map((a) => ({
+    return data.map((a) => ({
       id: a.id,
       patientId: a.patient_id,
       status: a.status,
@@ -379,16 +623,22 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     dayStart: string,
     dayEnd: string,
   ): Promise<PatientSnapshot[]> {
-    const { data, error } = await this.db
-      .from("patients")
-      .select("id, created_at")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .gte("created_at", dayStart)
-      .lte("created_at", dayEnd);
-    if (error) throw new Error(`patients (registered): ${error.message}`);
+    const data = await readAll<PatientRow>(
+      "patients (registered)",
+      (from, to) =>
+        this.db
+          .from("patients")
+          .select("id, created_at")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .gte("created_at", dayStart)
+          .lte("created_at", dayEnd)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
 
-    return rows<PatientRow>(data).map((p) => ({ id: p.id, createdAt: p.created_at }));
+    return data.map((p) => ({ id: p.id, createdAt: p.created_at }));
   }
 
   /**
@@ -403,15 +653,28 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     const unique = [...new Set(patientIds)];
     if (unique.length === 0) return [];
 
-    const { data, error } = await this.db
-      .from("patients")
-      .select("id, created_at")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .in("id", unique);
-    if (error) throw new Error(`patients (seen): ${error.message}`);
+    const seen: PatientRow[] = [];
+    // Chunked: an `in` list is part of the URL.
+    for (let i = 0; i < unique.length; i += 200) {
+      const chunk = unique.slice(i, i + 200);
+      seen.push(
+        ...(await readAll<PatientRow>(
+          "patients (seen)",
+          (from, to) =>
+            this.db
+              .from("patients")
+              .select("id, created_at")
+              .eq("clinic_id", clinicId)
+              .is("deleted_at", null)
+              .in("id", chunk)
+              .order("id", { ascending: true })
+              .range(from, to),
+          MAX_SNAPSHOT_ROWS,
+        )),
+      );
+    }
 
-    return rows<PatientRow>(data).map((p) => ({ id: p.id, createdAt: p.created_at }));
+    return seen.map((p) => ({ id: p.id, createdAt: p.created_at }));
   }
 
   /**
@@ -430,8 +693,9 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * cleaning while a planned crown goes unbooked reads as `true`, and the
    * crown will not appear in `treatment.accepted_pending_scheduling`.
    *
-   * That imprecision is accepted knowingly. Modelling it exactly needs a
-   * treatment-to-appointment link, which would force the dentist to record
+   * That imprecision is accepted knowingly. Modelling it exactly needs a link
+   * from planned work to its future visit — `treatments.appointment_id` is the
+   * visit the plan was recorded at, not that link — which would force the dentist to record
    * which future visit each planned item belongs to — workflow complexity that
    * is not worth the accuracy at this stage. The approximation still answers
    * the question the clinic actually asks:
@@ -476,15 +740,21 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     clinicId: string,
     asOf: string,
   ): Promise<Array<Omit<TreatmentSnapshot, "isScheduled"> & { patientId: string }>> {
-    const { data, error } = await this.db
-      .from("treatments")
-      .select("id, cost, status, performed_at, patient_id, created_at, opd_charged, opd_fee, xray_taken, xray_cost")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`);
-    if (error) throw new Error(`treatments: ${error.message}`);
+    const data = await readAll<TreatmentRow>(
+      "treatments",
+      (from, to) =>
+        this.db
+          .from("treatments")
+          .select("id, cost, status, performed_at, patient_id, created_at, opd_charged, opd_fee, xray_taken, xray_cost")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
 
-    return rows<TreatmentRow>(data)
+    return data
       .map((t) => {
         const performedAt = t.performed_at;
         // Performed strictly AFTER the snapshot moment — on a historical snapshot
@@ -552,44 +822,62 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * own small query rather than folded into the roster's shape.
    */
   private async fetchPatientsOnPaymentPlan(clinicId: string, date: string): Promise<Set<string>> {
-    const { data, error } = await this.db
-      .from("patients")
-      .select("id")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .gte("payment_plan_until", date);
-    if (error) throw new Error(`patients (payment plan): ${error.message}`);
-    return new Set(rows<{ id: string }>(data).map((p) => p.id));
+    const data = await readAll<{ id: string }>(
+      "patients (payment plan)",
+      (from, to) =>
+        this.db
+          .from("patients")
+          .select("id")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .gte("payment_plan_until", date)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
+    return new Set(data.map((p) => p.id));
   }
 
   private async fetchPatientRoster(clinicId: string, asOf: string): Promise<PatientRosterRow[]> {
-    const [rosterResult, visitsResult] = await Promise.all([
-      this.db
-        .from("patients")
-        .select("id, created_at")
-        .eq("clinic_id", clinicId)
-        .is("deleted_at", null)
-        .lte("created_at", asOf),
-      this.db
-        .from("appointments")
-        .select("patient_id, scheduled_at")
-        .eq("clinic_id", clinicId)
-        .is("deleted_at", null)
-        .eq("status", "completed")
-        .lte("scheduled_at", asOf),
+    const [roster, visits] = await Promise.all([
+      readAll<{ id: string; created_at: string }>(
+        "patients (roster)",
+        (from, to) =>
+          this.db
+            .from("patients")
+            .select("id, created_at")
+            .eq("clinic_id", clinicId)
+            .is("deleted_at", null)
+            .lte("created_at", asOf)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_SNAPSHOT_ROWS,
+      ),
+      readAll<{ patient_id: string; scheduled_at: string }>(
+        "patients (last visit)",
+        (from, to) =>
+          this.db
+            .from("appointments")
+            .select("patient_id, scheduled_at")
+            .eq("clinic_id", clinicId)
+            .is("deleted_at", null)
+            .eq("status", "completed")
+            .lte("scheduled_at", asOf)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_SNAPSHOT_ROWS,
+      ),
     ]);
-    if (rosterResult.error) throw new Error(`patients (roster): ${rosterResult.error.message}`);
-    if (visitsResult.error) throw new Error(`patients (last visit): ${visitsResult.error.message}`);
 
     const lastVisit = new Map<string, string>();
-    for (const v of rows<{ patient_id: string; scheduled_at: string }>(visitsResult.data)) {
+    for (const v of visits) {
       const current = lastVisit.get(v.patient_id);
       if (current === undefined || v.scheduled_at > current) {
         lastVisit.set(v.patient_id, v.scheduled_at);
       }
     }
 
-    return rows<{ id: string; created_at: string }>(rosterResult.data).map((p) => ({
+    return roster.map((p) => ({
       id: p.id,
       created_at: p.created_at,
       last_visit: lastVisit.get(p.id) ?? null,
@@ -611,16 +899,79 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
     clinicId: string,
     asOf: string,
   ): Promise<Set<string>> {
-    const { data, error } = await this.db
-      .from("appointments")
-      .select("patient_id")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .gt("scheduled_at", asOf)
-      .in("status", LIVE_APPOINTMENT_STATUSES);
-    if (error) throw new Error(`appointments (future): ${error.message}`);
+    const data = await readAll<{ patient_id: string }>(
+      "appointments (future)",
+      (from, to) =>
+        this.db
+          .from("appointments")
+          .select("patient_id")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .gt("scheduled_at", asOf)
+          .in("status", LIVE_APPOINTMENT_STATUSES)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
 
-    return new Set(rows<{ patient_id: string }>(data).map((a) => a.patient_id));
+    return new Set(data.map((a) => a.patient_id));
+  }
+
+  /**
+   * Completed treatments whose patient was deleted, as last recorded before the
+   * deletion and no later than the snapshot's moment (migration 20260918100500).
+   * Only delivered work: nothing planned or in progress enters a snapshot this
+   * way. No patient id travels with them.
+   */
+  private async fetchPatientDeletedTreatments(
+    clinicId: string,
+    asOf: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<TreatmentSnapshot[]> {
+    const rows = await readAll<RpcRow<"patient_deleted_treatments">>(
+      "patient_deleted_treatments",
+      (from, to) =>
+        this.db
+          .rpc("patient_deleted_treatments", { p_clinic_id: clinicId, p_known_at: knowledge.knownAt })
+          .order("treatment_id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
+    return rows
+      .filter((t) => t.status === "completed" && t.performed_at !== null && Date.parse(t.performed_at) <= Date.parse(asOf))
+      .map((t) => ({
+        id: t.treatment_id,
+        cost: Number(t.cost ?? 0),
+        status: t.status,
+        performedAt: t.performed_at,
+        opdCharged: t.opd_charged ?? false,
+        opdFee: Number(t.opd_fee ?? 0),
+        xrayTaken: t.xray_taken ?? false,
+        xrayCost: Number(t.xray_cost ?? 0),
+        // Not knowable for a deleted patient, and never read for completed work.
+        isScheduled: null,
+        patientDeleted: true,
+      }));
+  }
+
+  /** Payments whose patient was deleted, received on or before `date`, as known at the snapshot's moment. */
+  private async fetchPatientDeletedPayments(
+    clinicId: string,
+    date: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<PaymentSnapshot[]> {
+    const rows = await readAll<RpcRow<"patient_deleted_payments">>(
+      "patient_deleted_payments",
+      (from, to) =>
+        this.db
+          .rpc("patient_deleted_payments", { p_clinic_id: clinicId, p_known_at: knowledge.knownAt })
+          .order("payment_id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
+    return rows
+      .filter((p) => p.payment_date <= date)
+      .map((p) => ({ id: p.payment_id, amount: Number(p.amount ?? 0), paymentDate: p.payment_date, patientDeleted: true }));
   }
 
   /**
@@ -633,15 +984,21 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * granularity.
    */
   private async fetchPayments(clinicId: string, date: string): Promise<PaymentSnapshot[]> {
-    const { data, error } = await this.db
-      .from("payments")
-      .select("id, amount, payment_date, patient_id")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .lte("payment_date", date);
-    if (error) throw new Error(`payments: ${error.message}`);
+    const data = await readAll<PaymentRow>(
+      "payments",
+      (from, to) =>
+        this.db
+          .from("payments")
+          .select("id, amount, payment_date, patient_id")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .lte("payment_date", date)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
 
-    return rows<PaymentRow>(data).map((p) => ({
+    return data.map((p) => ({
       id: p.id,
       amount: Number(p.amount ?? 0),
       paymentDate: p.payment_date,
@@ -654,16 +1011,89 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * `queue_date`, which is the clinic-local business date — so it is compared
    * directly rather than through UTC boundaries.
    */
-  private async fetchQueue(clinicId: string, date: string): Promise<QueueEntrySnapshot[]> {
-    const { data, error } = await this.db
-      .from("queue_entries")
-      .select("id, status, checked_in_at, called_at")
-      .eq("clinic_id", clinicId)
-      .eq("queue_date", date);
-    if (error) throw new Error(`queue_entries: ${error.message}`);
+  /**
+   * Queue entries across the trailing window, reduced to the two timestamps that
+   * bound a visit.
+   *
+   * Scoped by `queue_date`, which is already the clinic's business date, so no
+   * timezone conversion is needed or wanted here — converting an
+   * already-local date through the clinic offset a second time would shift the
+   * window edges.
+   *
+   * `queue_entries` has no `deleted_at`: it is not a soft-deletable table (see
+   * CLAUDE.md 5.11), so no filter belongs here.
+   */
+  private async fetchVisitDurations(
+    clinicId: string,
+    from: string,
+    to: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<QueueDurationRow[]> {
+    // Ordered by check-in so "first entry wins" in the join below is the first
+    // entry in time, not whichever row the server happened to return first.
+    const rows = await readAll<QueueDurationRow>(
+      "queue_entries (durations)",
+      (start, end) =>
+        this.db
+          .from("queue_entries")
+          .select("appointment_id, called_at, completed_at")
+          .eq("clinic_id", clinicId)
+          .gte("queue_date", from)
+          .lte("queue_date", to)
+          .order("checked_in_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(start, end),
+      MAX_SNAPSHOT_ROWS,
+    );
+    // Queue entries are not versioned, but their timestamps are stamped by the
+    // server as each step happens: a step stamped after the snapshot's moment had
+    // not happened then.
+    return knowledge.mode === "point_in_time"
+      ? rows.map((r) => ({ ...r, called_at: notAfter(r.called_at, knowledge.knownAt), completed_at: notAfter(r.completed_at, knowledge.knownAt) }))
+      : rows;
+  }
 
-    return rows<QueueRow>(data).map((q) => ({
+  private async fetchQueue(
+    clinicId: string,
+    date: string,
+    knowledge: SnapshotKnowledge,
+  ): Promise<Array<QueueEntrySnapshot & { appointmentId: string }>> {
+    const rows = await readAll<QueueRow>(
+      "queue_entries",
+      (from, to) =>
+        this.db
+          .from("queue_entries")
+          .select("id, appointment_id, status, checked_in_at, called_at, completed_at, removed_at")
+          .eq("clinic_id", clinicId)
+          .eq("queue_date", date)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
+    // An entry soft-removed (its appointment cancelled or missed after check-in)
+    // is no longer in the queue from that moment. Before it, it was.
+    const data = rows.filter((q) =>
+      q.removed_at === null ? true : knowledge.mode === "point_in_time" && Date.parse(q.removed_at) > Date.parse(knowledge.knownAt),
+    );
+
+    if (knowledge.mode === "point_in_time") {
+      // Status as the stamped steps show it at the snapshot's moment. An entry
+      // checked in after that moment was not in the queue yet. A status with no
+      // stamp to date it (completed without completed_at) is left as recorded:
+      // queue entries are an unversioned input, and every reading says so.
+      return data
+        .filter((q) => Date.parse(q.checked_in_at) <= Date.parse(knowledge.knownAt))
+        .map((q) => {
+          const called = notAfter(q.called_at, knowledge.knownAt);
+          const completed = notAfter(q.completed_at, knowledge.knownAt);
+          const stamped = q.called_at !== null || q.completed_at !== null;
+          const status = completed !== null ? "completed" : called !== null ? "in_progress" : stamped ? "waiting" : q.status;
+          return { id: q.id, appointmentId: q.appointment_id, status, checkedInAt: q.checked_in_at, startedAt: called };
+        });
+    }
+    return data.map((q) => ({
       id: q.id,
+      appointmentId: q.appointment_id,
       status: q.status,
       checkedInAt: q.checked_in_at,
       // `called_at` is when waiting ended; null means the patient is still waiting.
@@ -676,137 +1106,79 @@ export class SupabaseMetricsDataRepository implements MetricsDataRepository {
    * due-today and overdue calculators need, and nothing more.
    */
   private async fetchFollowUps(clinicId: string, date: string): Promise<FollowUpSnapshot[]> {
-    const { data, error } = await this.db
-      .from("follow_ups")
-      .select("id, due_date, status")
-      .eq("clinic_id", clinicId)
-      .is("deleted_at", null)
-      .eq("status", "pending")
-      .lte("due_date", date);
-    if (error) throw new Error(`follow_ups: ${error.message}`);
+    const data = await readAll<FollowUpRow>(
+      "follow_ups",
+      (from, to) =>
+        this.db
+          .from("follow_ups")
+          .select("id, due_date, status")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .eq("status", "pending")
+          .lte("due_date", date)
+          .order("id", { ascending: true })
+          .range(from, to),
+      MAX_SNAPSHOT_ROWS,
+    );
 
-    return rows<FollowUpRow>(data).map((f) => ({ id: f.id, dueDate: f.due_date, status: f.status }));
+    return data.map((f) => ({ id: f.id, dueDate: f.due_date, status: f.status }));
+  }
+}
+
+/**
+ * Pair each trailing appointment's BOOKED length with the DELIVERED length its
+ * queue entry recorded.
+ *
+ * Exported for its tests: this is the one place two ledgers are joined, and the
+ * join is where the measurement can quietly go wrong.
+ *
+ * Three rules, each guarding a way the figure could lie:
+ *
+ * 1. Only appointments the patient actually attended contribute. A cancelled or
+ *    no-show appointment has a booked length and no delivered one, and including
+ *    it would read as an appointment that took zero minutes.
+ * 2. A visit with no queue entry, or a queue entry missing either timestamp,
+ *    yields `actualMinutes: null` — never a zero. The calculator drops those
+ *    rather than treating an unmeasured visit as a punctual one.
+ * 3. A negative interval (a `completed_at` before its `called_at`, which only
+ *    bad data produces) is discarded rather than clamped. Clamping to zero would
+ *    silently pull the clinic's average down using a row that means nothing.
+ */
+export function joinVisitDurations(
+  appointments: readonly AppointmentSnapshot[],
+  queueRows: readonly { appointment_id: string; called_at: string | null; completed_at: string | null }[],
+): VisitDurationSnapshot[] {
+  const byAppointment = new Map<string, { called: string | null; completed: string | null }>();
+  for (const row of queueRows) {
+    // First entry wins. A patient re-queued on the same appointment is a rare
+    // correction; taking the first keeps the join deterministic either way.
+    if (byAppointment.has(row.appointment_id)) continue;
+    byAppointment.set(row.appointment_id, {
+      called: row.called_at,
+      completed: row.completed_at,
+    });
   }
 
-  /**
-   * Schedule inputs for a date RANGE, fetched once.
-   *
-   * Capacity is per-day, but querying per day would issue three round-trips for
-   * every date in a 30-day window. Instead the rules, holidays and consultancy
-   * blocks are read once for the widest range needed, and each day's slot count
-   * is computed from them in memory. Query count is therefore constant no matter
-   * how long the windows are.
-   */
-  private async fetchScheduleInputs(clinicId: string, from: string, to: string) {
-    const [rulesResult, unavailableResult, blocksResult] = await Promise.all([
-      this.db
-        .from("availability_rules")
-        .select("day_of_week, start_time, end_time, slot_duration_minutes")
-        .eq("clinic_id", clinicId)
-        .eq("is_active", true),
-      this.db
-        .from("unavailable_dates")
-        .select("date")
-        .eq("clinic_id", clinicId)
-        .gte("date", from)
-        .lte("date", to),
-      this.db
-        .from("consultancy_schedules")
-        .select("date, start_time, end_time")
-        .eq("clinic_id", clinicId)
-        .eq("is_active", true)
-        .gte("date", from)
-        .lte("date", to),
-    ]);
+  const attended = new Set<string>(["checked_in", "in_progress", "completed"]);
 
-    if (rulesResult.error) throw new Error(`availability_rules: ${rulesResult.error.message}`);
-    if (unavailableResult.error) {
-      throw new Error(`unavailable_dates: ${unavailableResult.error.message}`);
-    }
-    if (blocksResult.error) {
-      throw new Error(`consultancy_schedules: ${blocksResult.error.message}`);
-    }
+  return appointments
+    .filter((a) => attended.has(a.status))
+    .map((a) => {
+      const entry = byAppointment.get(a.id);
+      return {
+        appointmentId: a.id,
+        scheduledMinutes: a.durationMinutes,
+        actualMinutes: measuredMinutes(entry?.called ?? null, entry?.completed ?? null),
+      };
+    });
+}
 
-    const rulesByDow = new Map<number, AvailabilityRule[]>();
-    for (const r of rows<AvailabilityRuleRow & { day_of_week: number }>(rulesResult.data)) {
-      const list = rulesByDow.get(r.day_of_week) ?? [];
-      list.push({
-        startTime: toHhMm(r.start_time),
-        endTime: toHhMm(r.end_time),
-        slotDurationMinutes: r.slot_duration_minutes,
-      });
-      rulesByDow.set(r.day_of_week, list);
-    }
-
-    const closedDates = new Set(rows<UnavailableDateRow>(unavailableResult.data).map((u) => u.date));
-
-    const blocksByDate = new Map<string, Array<{ start: string; end: string }>>();
-    for (const b of rows<ConsultancyBlockDatedRow>(blocksResult.data)) {
-      const list = blocksByDate.get(b.date) ?? [];
-      list.push({ start: toHhMm(b.start_time), end: toHhMm(b.end_time) });
-      blocksByDate.set(b.date, list);
-    }
-
-    return { rulesByDow, closedDates, blocksByDate };
-  }
-
-  /**
-   * Bookable slots the clinic OFFERS on a single date — capacity, not
-   * availability. Booked appointments are deliberately not subtracted: the
-   * engine divides booked by this figure to get utilization, so netting them off
-   * would make utilization always read 0%.
-   *
-   * Reuses `lib/scheduling/slots.ts` (empty `occupied`, no past-slot cutoff) so
-   * capacity is defined in exactly one place, including its handling of rule
-   * boundaries and external-consultancy blocks.
-   */
-  /**
-   * Minutes one chair is open on a date: the union of that weekday's active
-   * rules, less any consultancy block, zero when the clinic is shut.
-   *
-   * Deliberately NOT `getAvailableSlots(...).length`, which is what this used to
-   * be. That function is correct for booking — it validates that a full
-   * appointment fits inside a rule window — but its return is a list of
-   * candidate START TIMES stepped at `slot_duration_minutes`, and those overlap.
-   * A 09:00-13:00 rule stepped every 10 minutes yields 24 candidates for four
-   * hours of chair time. Counting them as capacity inflated the denominator by
-   * the ratio of appointment length to step size, so utilization read roughly a
-   * third of the truth on this clinic's Mondays and a different fraction on its
-   * Fridays.
-   *
-   * Timezone plays no part: rules are wall-clock times and their length is the
-   * same in any zone. Only the closed-date and block lookups are date-keyed, and
-   * the caller already resolves those in clinic-local terms.
-   */
-  private openMinutesOnDate(
-    date: string,
-    inputs: Awaited<ReturnType<SupabaseMetricsDataRepository["fetchScheduleInputs"]>>,
-  ): number {
-    if (inputs.closedDates.has(date)) return 0;
-    const rules = inputs.rulesByDow.get(dayOfWeek(date)) ?? [];
-    if (rules.length === 0) return 0;
-    return openMinutes(rules, inputs.blocksByDate.get(date) ?? []);
-  }
-
-  /** Total slots offered across an inclusive date range. */
-  /** Open minutes per chair summed across an inclusive date range. */
-  private openMinutesInRange(
-    from: string,
-    to: string,
-    inputs: Awaited<ReturnType<SupabaseMetricsDataRepository["fetchScheduleInputs"]>>,
-  ): number {
-    return dateRange(from, to).reduce((sum, d) => sum + this.openMinutesOnDate(d, inputs), 0);
-  }
-
-  /** Appointments whose scheduled time falls inside an inclusive date range. */
-  private async fetchAppointmentsInRange(
-    clinicId: string,
-    from: string,
-    to: string,
-    timezone: string,
-  ): Promise<AppointmentSnapshot[]> {
-    const { start } = getUtcBoundariesForLocalDate(from, timezone);
-    const { end } = getUtcBoundariesForLocalDate(to, timezone);
-    return this.fetchAppointments(clinicId, start, end);
-  }
+/** Whole minutes between two timestamps, or null when either is absent or invalid. */
+function measuredMinutes(called: string | null, completed: string | null): number | null {
+  if (called === null || completed === null) return null;
+  const start = Date.parse(called);
+  const end = Date.parse(completed);
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  const minutes = (end - start) / 60_000;
+  return minutes < 0 ? null : Math.round(minutes);
 }

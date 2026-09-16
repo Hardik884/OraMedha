@@ -288,6 +288,30 @@ const CORRECTIVE_BY_HYPOTHESIS: Readonly<
     description:
       "Unpaid patient balances have built past the acceptable ceiling for money owed on delivered work. Send statements and call those patients to arrange payment or a plan, starting with the largest and oldest.",
   },
+  // Reactivation: dormant_patient_base
+  dormant_patient_base: {
+    title: "Call the patients who have quietly stopped coming",
+    description:
+      "A large group of patients has been seen before, has not been back within a recall interval, and has nothing booked — and none of them is on the overdue recall list, because no follow-up was ever raised for them. Work the inactive-patient list by longest absence: these people already chose this clinic once, which makes them the cheapest appointments available to fill.",
+  },
+  // Schedule accuracy: chronic_appointment_overrun
+  chronic_appointment_overrun: {
+    title: "Book the time appointments actually take",
+    description:
+      "Across the last month, appointments took materially longer than the time booked for them, and nobody queued today — so the difference is being absorbed by running late rather than showing up as a backlog. Review the slot lengths you book for the treatments that routinely overrun and lengthen them, so a full day on paper is a day the clinic can actually deliver.",
+  },
+  // Revenue leakage: production_collection_gap
+  sustained_under_collection: {
+    title: "Check that every completed treatment is being charged and settled",
+    description:
+      "Over the last month the clinic collected materially less than it delivered, and no single day breached the same-day collection check — so the shortfall is spread thinly rather than concentrated in one bad afternoon, which is why it has not been visible. Reconcile the month's completed treatments against payments and balances, and find the ones with neither.",
+  },
+  // Capacity: sustained_idle_capacity
+  sustained_idle_capacity: {
+    title: "Match the chair time you publish to the work you have",
+    description:
+      "Chair time has been going unused across the whole month rather than on one quiet day, so this is the shape of the week rather than bad luck. Either fill it — recall list, reactivation list, patients with planned treatment and no next visit — or reduce the hours you publish so the capacity you offer matches the demand you have.",
+  },
   // Retention: recall_backlog
   recall_backlog: {
     title: "Work the overdue recall backlog this week",
@@ -348,6 +372,16 @@ export const CAUSES_WITHOUT_STRATEGY: Readonly<
     reason:
       "Never reaches supported. Whether reached patients chose not to return needs post-visit feedback (post_visit_feedback), which OraMedha does not capture.",
   },
+  unbilled_delivery: {
+    kind: "unsettleable",
+    reason:
+      "Never reaches supported, and no discriminator can settle it. Work that was never charged produces no balance row, so it is invisible to invoice ageing — the one entity measurement that looks like it would separate the two. Settling it needs a reconciliation of completed treatments against charges raised, which is exactly what the supported sustained_under_collection strategy asks a person to do, because no query performs it.",
+  },
+  awaiting_payment: {
+    kind: "unsettleable",
+    reason:
+      "The mirror of unbilled_delivery, and unsettleable for the same reason. Kept as an explicit hypothesis rather than dropped, because the benign reading of a collection shortfall — money that will arrive — deserves to be named alongside the alarming one rather than quietly left out of consideration.",
+  },
   measured_condition: {
     kind: "unsettleable",
     reason:
@@ -365,6 +399,10 @@ const INVESTIGATIVE_BY_CATEGORY: Readonly<Record<ConstraintCategory, string>> = 
   [ConstraintCategory.RETENTION]: "why patients are not coming back",
   [ConstraintCategory.ACQUISITION]: "why fewer new patients are arriving",
   [ConstraintCategory.FORWARD_SCHEDULE]: "why the coming week is filling more slowly than usual",
+  [ConstraintCategory.PATIENT_FLOW]: "why patients are waiting after they arrive",
+  [ConstraintCategory.REACTIVATION]: "why patients who were seen before have stopped coming back",
+  [ConstraintCategory.SCHEDULE_ACCURACY]:
+    "why appointments are taking longer than the time booked for them",
 };
 
 /**
@@ -384,6 +422,15 @@ const VALUE_TYPES_BY_CATEGORY: Readonly<Record<ConstraintCategory, readonly Valu
   [ConstraintCategory.RETENTION]: [ValueType.RETENTION_IMPROVED],
   [ConstraintCategory.ACQUISITION]: [ValueType.OTHER],
   [ConstraintCategory.FORWARD_SCHEDULE]: [ValueType.APPOINTMENTS_BOOKED],
+  // Time given back to patients, which is what a shorter wait is.
+  [ConstraintCategory.PATIENT_FLOW]: [ValueType.HOURS_SAVED],
+  [ConstraintCategory.REACTIVATION]: [
+    ValueType.RETENTION_IMPROVED,
+    ValueType.APPOINTMENTS_BOOKED,
+  ],
+  // Booking realistic lengths does not create appointments; it makes the day the
+  // clinic publishes match the day it delivers, which is time rather than volume.
+  [ConstraintCategory.SCHEDULE_ACCURACY]: [ValueType.HOURS_SAVED],
 };
 
 /** Hypothesis slug from its `<diagnosisId>#h.<slug>` id. */

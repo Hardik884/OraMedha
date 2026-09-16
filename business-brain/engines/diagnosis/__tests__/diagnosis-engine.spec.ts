@@ -58,9 +58,13 @@ describe("DentGrowDiagnosisEngine", () => {
   it("does not report full confidence for a run that produced nothing", () => {
     const result = engine.run({ current: run(HEALTHY) }, context);
     expect(result.data).toEqual([]);
-    // three trend evaluators had no prior period, so two matchers are undecidable
-    // (12 of 14 decidable)
-    expect(result.confidence).toBe(0.86);
+    // Three trend evaluators had no prior period, so the two matchers that
+    // require returning_volume_dropping — patient_base_erosion and
+    // recall_process_failure — are undecidable. Derived from MATCHERS so the
+    // assertion tracks the registry instead of going stale behind it.
+    expect(result.confidence).toBe(
+      Math.round(((MATCHERS.length - 2) / MATCHERS.length) * 100) / 100,
+    );
     expect(
       (result.trace ?? []).find((t) => t.step === "summarise-run")?.reasoning,
     ).toContain("matcher decidability");

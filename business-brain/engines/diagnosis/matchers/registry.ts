@@ -16,17 +16,21 @@
 import { collectionGapMatcher } from "./financial/collection-gap";
 import { revenueShortfallMatcher } from "./financial/revenue-shortfall";
 import { outstandingReceivablesMatcher } from "./financial/outstanding-receivables";
+import { productionCollectionGapMatcher } from "./financial/production-collection-gap";
 import { pipelineConversionFailureMatcher } from "./clinical/pipeline-conversion-failure";
 import { capacityCeilingMatcher } from "./operational/capacity-ceiling";
 import { demandSupplyMismatchMatcher } from "./operational/demand-supply-mismatch";
 import { throughputCongestionMatcher } from "./operational/throughput-congestion";
+import { sustainedIdleCapacityMatcher } from "./operational/sustained-idle-capacity";
 import { patientBaseErosionMatcher } from "./retention/patient-base-erosion";
 import { recallProcessFailureMatcher } from "./retention/recall-process-failure";
 import { recallBacklogMatcher } from "./retention/recall-backlog";
+import { dormantPatientBaseMatcher } from "./retention/dormant-patient-base";
 import { acquisitionShortfallMatcher } from "./acquisition/acquisition-shortfall";
 import { scheduleAttritionMatcher } from "./scheduling/schedule-attrition";
 import { forwardScheduleGapMatcher } from "./scheduling/forward-schedule-gap";
 import { repeatNonAttendanceMatcher } from "./scheduling/repeat-non-attendance";
+import { chronicAppointmentOverrunMatcher } from "./scheduling/chronic-appointment-overrun";
 import type { PatternMatcher } from "./types";
 
 /** Every registered pattern matcher. */
@@ -35,20 +39,24 @@ export const MATCHERS: readonly PatternMatcher[] = [
   demandSupplyMismatchMatcher,
   throughputCongestionMatcher,
   capacityCeilingMatcher,
+  sustainedIdleCapacityMatcher,
   // Scheduling
   scheduleAttritionMatcher,
   forwardScheduleGapMatcher,
   repeatNonAttendanceMatcher,
+  chronicAppointmentOverrunMatcher,
   // Financial
   collectionGapMatcher,
   revenueShortfallMatcher,
   outstandingReceivablesMatcher,
+  productionCollectionGapMatcher,
   // Clinical
   pipelineConversionFailureMatcher,
   // Retention
   patientBaseErosionMatcher,
   recallProcessFailureMatcher,
   recallBacklogMatcher,
+  dormantPatientBaseMatcher,
   // Acquisition
   acquisitionShortfallMatcher,
 ];

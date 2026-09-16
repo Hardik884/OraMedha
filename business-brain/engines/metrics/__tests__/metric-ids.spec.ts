@@ -56,6 +56,7 @@ describe("metric manifest", () => {
         MetricKey.CAPACITY_CHAIR_UTILIZATION, // closed day: no open minutes to measure against
         MetricKey.CAPACITY_CHAIR_UTILIZATION_30D,
         MetricKey.PATIENTS_REACTIVATION_CANDIDATES,
+        MetricKey.QUEUE_AVERAGE_WAITING_TIME, // no measured wait: not "nobody waits"
         MetricKey.REVENUE_COLLECTION_RATE_30D,
         // The empty-clinic-day fixture supplies no patientsOnPaymentPlan set at
         // all, so this is correctly withheld — absent means no repository
@@ -68,6 +69,12 @@ describe("metric manifest", () => {
         // statement from never having looked.
         MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D,
         MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+        // No visit durations supplied at all, so neither can be measured. Zero
+        // overrun would be the claim "this clinic books accurately" and a zero
+        // sample would be indistinguishable from a measured zero — the precise
+        // distinction the withholding rule exists to keep.
+        MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D,
+        MetricKey.SCHEDULING_MEASURED_VISITS_30D,
         MetricKey.TREATMENT_AVERAGE_CASE_VALUE_30D,
       ].sort(),
     );

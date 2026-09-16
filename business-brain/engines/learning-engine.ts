@@ -1,24 +1,28 @@
 /**
- * LearningEngine
+ * LearningEngine — contract
  *
  * RESPONSIBILITY:
- * Feeds outcomes and value back into the system to improve future
- * diagnoses and strategies (tuning thresholds, weighting evidence,
- * ranking strategies). It is how the Business Brain gets smarter over time.
+ * Derives clinic-specific patterns from what actually followed completed actions:
+ * actions repeatedly followed by their intended result, actions followed by no
+ * measurable change, recommendations not taken up, problems that never clear,
+ * how long results take, and episodes that end sooner when someone acts.
  *
- * Consumes:  outcomes + value assessments + decision traces
- * Produces:  learning updates (e.g. adjusted thresholds / weights)
+ * Consumes:  outcomes assessed with windowed evidence + recorded findings + snoozes
+ * Produces:  learnings, per-subject assessments, and INERT proposals
  *
- * This phase defines the contract only. No learning logic is implemented.
+ * It never adjusts a threshold, rule, ranking or action. A proposal requires a
+ * person to accept it, and nothing in the Business Brain reads one back.
+ *
+ * THE IMPLEMENTATION LIVES IN `./learning/`.
  */
 
 import { BaseEngine } from "../core";
+import type { ClinicLearning } from "../domain";
+import type { LearningInput } from "./learning";
 
-/** Placeholder input. The concrete learning input is defined later. */
-export type LearningEngineInput = unknown;
+export type LearningEngineInput = LearningInput;
 
-/** Placeholder output. The concrete learning payload is defined later. */
-export type LearningEngineOutput = unknown;
+export type LearningEngineOutput = ClinicLearning;
 
 export abstract class LearningEngine extends BaseEngine<
   LearningEngineInput,

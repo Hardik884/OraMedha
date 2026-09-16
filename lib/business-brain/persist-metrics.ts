@@ -29,7 +29,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/types/database.types";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { DentGrowMetricsEngine, addDays } from "@/business-brain";
+import { DentGrowMetricsEngine, addDays, classifyMetricReading, type Metric, type SnapshotKnowledge, type StoredMetric } from "@/business-brain";
+import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
 import { SupabaseMetricsDataRepository } from "./metrics-repository";
 import { SupabaseMetricHistoryStore } from "./metric-history-store";
 
@@ -48,9 +49,9 @@ export interface PersistResult {
  * half-finished number as if it were the day's result. The scheduled caller
  * should ask for yesterday; {@link persistYesterday} does exactly that.
  *
- * Idempotent: the store upserts on (clinic, date, key), so re-running a day
- * corrects it rather than duplicating. That is also how a correction is
- * propagated after a data fix.
+ * Idempotent on (clinic, date, key). Every write is kept in metric_observations
+ * with its provenance, and the current row prefers the better provenance, so a
+ * late re-run cannot overwrite what was measured at the time.
  */
 export async function persistMetricDay(
   clinicId: string,
@@ -61,18 +62,41 @@ export async function persistMetricDay(
   const engine = new DentGrowMetricsEngine(new SupabaseMetricsDataRepository(client));
   const store = new SupabaseMetricHistoryStore(client);
 
-  const metrics = await engine.calculateMetrics(clinicId, date);
+  const { metrics, knowledge, timezone } = await engine.measureDay(clinicId, date);
   if (metrics.length === 0) return;
 
   await store.writeMetricDay(clinicId, {
     date,
-    metrics: metrics.map((m) => ({
-      // Metric ids are `key:clinicId:date`. The key contains dots but never a
-      // colon, so the first segment is the key.
-      key: m.id.slice(0, m.id.indexOf(":")),
+    metrics: withProvenance(metrics, date, timezone ?? DEFAULT_TIMEZONE, knowledge, new Date().toISOString()),
+  });
+}
+
+/**
+ * Each reading with how it came to exist: measured within the grace window from
+ * state as known at the end of its day, reconstructed later from that same state,
+ * or recomputed from today's records. See `classifyMetricReading`.
+ */
+export function withProvenance(
+  metrics: readonly Pick<Metric, "id" | "value" | "timestamp">[],
+  date: string,
+  timezone: string,
+  knowledge: SnapshotKnowledge | undefined,
+  producedAt: string,
+): StoredMetric[] {
+  return metrics.map((m) => {
+    // Metric ids are `key:clinicId:date`. The key contains dots but never a
+    // colon, so the first segment is the key.
+    const key = m.id.slice(0, m.id.indexOf(":"));
+    const reading = classifyMetricReading({ metricKey: key, date, timezone, producedAt, knowledge });
+    return {
+      key,
       value: m.value,
       measuredAt: m.timestamp,
-    })),
+      provenance: reading.provenance,
+      producedAt: reading.producedAt,
+      knowledgeAsOf: reading.knowledgeAsOf,
+      unversionedInputs: reading.unversionedInputs,
+    };
   });
 }
 
@@ -141,8 +165,14 @@ export async function persistYesterday(
  */
 export async function recordRecomputedHistory(
   clinicId: string,
-  days: readonly { date: string; metrics: readonly { id: string; value: number; timestamp: string }[] }[],
+  days: readonly {
+    date: string;
+    metrics: readonly { id: string; value: number; timestamp: string }[];
+    knowledge?: SnapshotKnowledge;
+    timezone?: string;
+  }[],
   db?: SupabaseClient<Database>,
+  producedAt: string = new Date().toISOString(),
 ): Promise<void> {
   if (days.length === 0) return;
   try {
@@ -150,13 +180,13 @@ export async function recordRecomputedHistory(
     const store = new SupabaseMetricHistoryStore(client);
     for (const day of days) {
       if (day.metrics.length === 0) continue;
+      // Measured by a dashboard load, so rarely inside the grace window: it is a
+      // point-in-time reconstruction where history covered the day, and a
+      // recomputation otherwise. Never recorded as measured at the time unless
+      // it genuinely was.
       await store.writeMetricDay(clinicId, {
         date: day.date,
-        metrics: day.metrics.map((m) => ({
-          key: m.id.slice(0, m.id.indexOf(":")),
-          value: m.value,
-          measuredAt: m.timestamp,
-        })),
+        metrics: withProvenance(day.metrics, day.date, day.timezone ?? DEFAULT_TIMEZONE, day.knowledge, producedAt),
       });
     }
   } catch (error) {

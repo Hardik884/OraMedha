@@ -17,7 +17,7 @@ import type {
   ScheduleWindow,
   TreatmentSnapshot,
 } from "../../../repositories";
-import { addDays } from "../../../utils";
+import { addDays, localDatePart } from "../../../utils";
 
 /**
  * Inclusive first day of a trailing window ending on `date`.
@@ -27,9 +27,9 @@ export function windowStart(date: string, days: number): string {
   return addDays(date, -(days - 1));
 }
 
-/** The "YYYY-MM-DD" part of an ISO timestamp. */
-export function datePart(iso: string): string {
-  return iso.slice(0, 10);
+/** The clinic-local business date of an ISO timestamp in this snapshot. */
+export function datePart(iso: string, s: Pick<ClinicDataSnapshot, "timezone">): string {
+  return localDatePart(iso, s.timezone);
 }
 
 /**
@@ -46,8 +46,8 @@ export function completedInWindow(
     (t) =>
       t.status === "completed" &&
       t.performedAt !== null &&
-      datePart(t.performedAt) >= from &&
-      datePart(t.performedAt) <= s.date,
+      datePart(t.performedAt, s) >= from &&
+      datePart(t.performedAt, s) <= s.date,
   );
 }
 

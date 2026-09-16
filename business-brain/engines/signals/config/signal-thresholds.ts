@@ -58,6 +58,19 @@ export interface SignalThresholdConfig {
     readonly minimumActivityForRevenueSignal: number;
     /** Completed treatments required before a collection gap is meaningful. */
     readonly minimumCompletionsForCollectionCheck: number;
+    /**
+     * Share of the window's production that should have been collected by now (%).
+     *
+     * A RATE, so global: a clinic collecting 60% of what it delivers has the same
+     * problem at any size, and holding it fixed is what keeps clinics comparable.
+     */
+    readonly minimumCollectionRate: number;
+    /**
+     * Production in the window required before a collection rate means anything
+     * (INR). A rate computed against a nearly-idle month is arithmetic, not a
+     * finding.
+     */
+    readonly minimumProductionForRateCheck: number;
   };
   readonly appointments: {
     /** Cancellation share of the day's appointments that is too high (%). */
@@ -87,6 +100,38 @@ export interface SignalThresholdConfig {
      * whether the clinic has one chair or four.
      */
     readonly repeatNonAttenderLimit: number;
+    /**
+     * Share by which booked appointments may overrun their booked length before
+     * the clinic's booking template is understood to be wrong (%).
+     *
+     * A RATE, so it stays global for the same reason the cancellation and
+     * no-show rates do: a clinic whose appointments run a third longer than
+     * booked has the same problem at one chair or six.
+     */
+    readonly appointmentOverrunRate: number;
+    /**
+     * Visits with BOTH a called and a completed timestamp required before the
+     * overrun reading means anything.
+     *
+     * A statistical guard rather than a size threshold — it is about whether the
+     * measurement is valid, not about how big the clinic is — so it stays global
+     * alongside `minimumAppointmentSample`.
+     */
+    readonly minimumMeasuredVisits: number;
+    /**
+     * Combined cancellation + no-show share of the trailing window that is too
+     * high (%). A rate, therefore global — see `appointmentOverrunRate`.
+     */
+    readonly sustainedAttritionRate: number;
+    /**
+     * Median booking lead time above which demand is read as pressing against
+     * capacity (days).
+     *
+     * Not calibrated: lead time is already expressed in the patient's units
+     * ("how long until I can be seen"), and a three-week wait is a three-week
+     * wait at one chair or six.
+     */
+    readonly longBookingLeadTimeDays: number;
   };
   readonly patients: {
     /** Minimum new patients expected on a working day. */
@@ -99,6 +144,17 @@ export interface SignalThresholdConfig {
      * clears the floor but the percentage is undefined, the floor grades it.
      */
     readonly returningVolumeFloor: number;
+    /**
+     * Patients gone quiet — seen at least once, not seen for the clinic's recall
+     * interval, nothing booked — before the dormant base is worth naming.
+     *
+     * NOT calibrated, and for the same dull reason `overdueFollowupLimit` is
+     * not: the honest denominator is active roster size and no metric measures
+     * it. Deriving this from production or capacity instead would invent a
+     * relationship rather than measure one. It is a call list, and a list of
+     * twenty-five people is a morning's work at any clinic size.
+     */
+    readonly lapsedPatientLimit: number;
   };
   readonly queue: {
     /** Waiting-room time that becomes an experience problem (minutes). */
@@ -121,6 +177,16 @@ export interface SignalThresholdConfig {
     readonly nearCapacityUtilization: number;
     /** Remaining slots at or below this is effectively full. */
     readonly minimumAvailableSlots: number;
+    /**
+     * Chair utilization over the trailing window below which the clinic is
+     * structurally under-used (%).
+     *
+     * Set BELOW the daily `minimumChairUtilization`, deliberately. A month that
+     * averages under this is a materially worse statement than one quiet day, and
+     * a threshold set at the same level would fire on any clinic whose daily rule
+     * fires regularly — which is every clinic the daily rule is wrong for.
+     */
+    readonly minimumSustainedChairUtilization: number;
   };
   readonly treatment: {
     /** Planned-but-undelivered treatment value that is too large to ignore (INR). */
@@ -166,6 +232,13 @@ export const DEFAULT_SIGNAL_THRESHOLDS: SignalThresholdConfig = {
     outstandingGrowthFloor: 5_000,
     minimumActivityForRevenueSignal: 3,
     minimumCompletionsForCollectionCheck: 2,
+    // 85%. Dental collection in a cash/UPI practice should run high; the gap
+    // between delivery and payment is days, not months. Below 85% over a month,
+    // money is being left on the table rather than merely arriving late.
+    minimumCollectionRate: 85,
+    // One month of the minimum daily revenue over ~25 working days. Below this
+    // the clinic barely produced, and a collection RATE over it is noise.
+    minimumProductionForRateCheck: 125_000,
   },
   appointments: {
     highCancellationRate: 10,
@@ -181,11 +254,27 @@ export const DEFAULT_SIGNAL_THRESHOLDS: SignalThresholdConfig = {
     // probably already having; two or more is a pattern, and the point at which
     // "handle these people differently" becomes a policy rather than a favour.
     repeatNonAttenderLimit: 2,
+    // A fifth longer than booked. Below that, ordinary variation between a quick
+    // check and a difficult filling explains it; at or above it, the booking
+    // template is systematically short and every day inherits the error.
+    appointmentOverrunRate: 20,
+    // Ten visits. Chosen as the point where one long appointment stops moving
+    // the aggregate — at n=3 a single difficult extraction reads as a broken
+    // booking policy.
+    minimumMeasuredVisits: 10,
+    // 15% of everything booked lost, cancellations and no-shows together. The
+    // separate daily thresholds are 10% and 8%; a month sustaining their rough
+    // sum is a policy problem rather than a run of bad luck.
+    sustainedAttritionRate: 15,
+    // Two weeks. Long enough that an urgent patient goes elsewhere, short enough
+    // that a genuinely booked-out practice clears it.
+    longBookingLeadTimeDays: 14,
   },
   patients: {
     minimumNewPatientsPerDay: 1,
     returningVolumeDropRate: 30,
     returningVolumeFloor: 2,
+    lapsedPatientLimit: 25,
   },
   queue: {
     maximumWaitingTimeMinutes: 30,
@@ -200,6 +289,7 @@ export const DEFAULT_SIGNAL_THRESHOLDS: SignalThresholdConfig = {
     minimumChairUtilization: 50,
     nearCapacityUtilization: 90,
     minimumAvailableSlots: 1,
+    minimumSustainedChairUtilization: 40,
   },
   treatment: {
     pendingTreatmentValueLimit: 50_000,
@@ -212,6 +302,22 @@ export const DEFAULT_SIGNAL_THRESHOLDS: SignalThresholdConfig = {
       "operational.near_full_capacity": { ceiling: "medium" },
       // A backlog is always worth surfacing, even when barely over the limit.
       "retention.followup_backlog": { floor: "low" },
+      // Same reasoning, and the same one-way growth: a dormant base only gets
+      // larger until somebody works it, so it stays visible while barely over —
+      // and it is never an emergency, because it took months to build and will
+      // not be cleared this morning.
+      "retention.lapsed_patient_base": { floor: "low", ceiling: "high" },
+      // A booking template that runs long is a standing condition, not today's
+      // crisis. Capped so it can never outrank something actually going wrong
+      // on the day the dentist is reading the card.
+      "scheduling.appointments_overrunning": { ceiling: "high" },
+      // A month-long condition, not today's emergency — and the clinic has had
+      // thirty days to notice it, so arriving as a crisis would be theatre.
+      "operational.sustained_low_utilization": { ceiling: "high" },
+      "scheduling.sustained_attrition": { ceiling: "high" },
+      // Never a finding on its own — it exists to strengthen the capacity-ceiling
+      // reading — so it must not compete for attention as though it were.
+      "scheduling.long_booking_lead_time": { ceiling: "medium" },
       // A quiet day is a business problem, not a crisis.
       "scheduling.low_appointment_volume": { ceiling: "high" },
       // A thin week ahead is a warning with days left to act on it. It should

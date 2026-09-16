@@ -267,12 +267,15 @@ export async function softDeletePatient(
     const admin: DbClient = createAdminClient();
 
     // Cascade soft-delete related records first, then the patient itself.
+    // Appointments, treatments, payments and follow-ups record WHY they were
+    // deleted (migration 20260918100500): the money and work of a deleted
+    // patient still happened, and past revenue and production keep counting it.
     // Each step surfaces the real Supabase/DB error so the exact failing
     // table and constraint are visible in server logs and returned to the caller.
 
     const { error: apptErr } = await admin
       .from("appointments")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -284,7 +287,7 @@ export async function softDeletePatient(
 
     const { error: txErr } = await admin
       .from("treatments")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -296,7 +299,7 @@ export async function softDeletePatient(
 
     const { error: pyErr } = await admin
       .from("payments")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -308,7 +311,7 @@ export async function softDeletePatient(
 
     const { error: fuErr } = await admin
       .from("follow_ups")
-      .update({ deleted_at: now })
+      .update({ deleted_at: now, deletion_cause: "patient_deleted" })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
       .is("deleted_at", null);
@@ -391,14 +394,15 @@ export async function softDeletePatient(
       return { data: null, error: `Failed to cascade delete (${msg}).` };
     }
 
-    // Remove any active queue entries for this patient. queue_entries has no
-    // soft-delete column — hard-delete waiting/in_progress entries to keep the
-    // live queue clean. completed entries are left for audit.
+    // Remove any active queue entries for this patient from the live queue.
+    // Soft removal (removed_at), like a cancellation: the check-in happened, and
+    // the queue history is evidence that outlives the live board.
     const { error: qErr } = await admin
       .from("queue_entries")
-      .delete()
+      .update({ removed_at: now })
       .eq("patient_id", id)
       .eq("clinic_id", cid)
+      .is("removed_at", null)
       .in("status", ["waiting", "in_progress"]);
     if (qErr) {
       const msg = `queue_entries: ${qErr.message ?? qErr.code ?? JSON.stringify(qErr)}`;

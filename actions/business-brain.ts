@@ -15,6 +15,7 @@ import {
 } from "@/lib/ai/prompts";
 import { parseDashboardActionSummary } from "@/lib/ai/dashboard-action-summary";
 import {
+  assessRunHealth,
   explanationInputFor,
   verifyExplanation,
   type Diagnosis,
@@ -24,7 +25,16 @@ import { getClinicConfig } from "@/lib/clinic/config";
 import { getTodayInTimezone } from "@/lib/utils";
 import { persistMetricRange, type PersistResult } from "@/lib/business-brain/persist-metrics";
 import { revalidatePath } from "next/cache";
-import { DismissProblemSchema, type ActionResult } from "@/types";
+import { CompleteActionSchema, DecideLearningProposalSchema, DismissProblemSchema, type ActionResult } from "@/types";
+import { loadActionLearning } from "@/lib/business-brain/action-outcomes";
+import { recordClinicDecision } from "@/lib/business-brain/clinic-memory";
+import { resolveActionTargets } from "@/lib/business-brain/action-targets";
+import { OUTCOME_SPEC_BY_CATEGORY } from "@/business-brain/engines/outcome";
+import { runDashboardBrain } from "@/lib/business-brain/dashboard-data";
+import { isCurrentCompletionCard } from "@/lib/business-brain/completion-card";
+import { createAdminClient } from "@/lib/supabase/admin";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/types/database.types";
 
 /**
  * Business Brain — AI explanation Server Action.
@@ -150,6 +160,13 @@ const DASHBOARD_ACTIONS_TIMEOUT_MS = 8_000;
 
 /** Most items a dashboard load will ever ask to have rephrased at once. Keeps the prompt small and the failure mode (whole batch discarded) cheap. */
 const MAX_DASHBOARD_ACTION_ITEMS = 8;
+/**
+ * The facts arrive from the browser, so their size is bounded here: a briefing
+ * reason is one sentence, and an unbounded one would make this action a general
+ * text-rewording endpoint on the clinic's AI quota.
+ */
+const MAX_DASHBOARD_ACTION_FACT_CHARS = 500;
+const MAX_DASHBOARD_ACTION_ID_CHARS = 120;
 
 export interface DashboardActionSummary {
   readonly id: string;
@@ -181,8 +198,16 @@ export async function summarizeDashboardActions(
       return { data: null, error: "Unauthorized" };
     }
 
-    const bounded = items
-      .filter((item) => item.id && item.fact)
+    const bounded = (Array.isArray(items) ? items : [])
+      .filter(
+        (item) =>
+          typeof item?.id === "string" &&
+          typeof item.fact === "string" &&
+          item.id.length > 0 &&
+          item.id.length <= MAX_DASHBOARD_ACTION_ID_CHARS &&
+          item.fact.trim().length > 0 &&
+          item.fact.length <= MAX_DASHBOARD_ACTION_FACT_CHARS,
+      )
       .slice(0, MAX_DASHBOARD_ACTION_ITEMS);
     if (bounded.length === 0) {
       return { data: [], error: null };
@@ -344,5 +369,230 @@ export async function dismissProblem(input: {
   } catch (error) {
     console.error("[dismissProblem]", error);
     return { data: null, error: "Could not snooze this problem." };
+  }
+}
+
+/**
+ * Record that one Business Brain action was completed.
+ *
+ * ## What the browser is allowed to say
+ *
+ * The category, the constraint id it was filed under, and an optional note.
+ * Nothing else. Clinic, actor, timestamp, target patients and the headline metric
+ * reading are all resolved on this side:
+ *
+ *   clinic_id   from the session's profile, never the request
+ *   completed_by from the session's profile
+ *   completed_at by the database default
+ *   targets      from the same population readers the briefing displayed
+ *   metric       from a fresh pipeline run
+ *
+ * The target list is the one that matters most. A request body carrying patient
+ * ids would be a client-controlled claim about which patients a clinic worked,
+ * and those ids would then be matched against clinic data to produce a
+ * "verified" figure — so the client is never given the chance.
+ *
+ * ## Why it reads the metric now rather than later
+ *
+ * `metric_history` stores COMPLETED days, so the reading at 11am on the day the
+ * work was done cannot be recovered afterwards. That number is the "12" in "the
+ * backlog fell from 12 to 3", and capturing it here is the only way to have it.
+ *
+ * ## What it must never do
+ *
+ * Award score points. The Clinic Score reads measured clinic metrics and nothing
+ * else, which is what makes it impossible to game by clicking — a completion
+ * moves it only through the data the work actually changed. This function writes
+ * one row and revalidates the page; it touches no score.
+ */
+export async function completeAction(input: {
+  category: string;
+  constraintId: string;
+  note?: string;
+}): Promise<ActionResult<{ completionId: string; targeted: number }>> {
+  try {
+    const { profile } = await resolveSession();
+    if (!profile || profile.role !== "dentist") {
+      return { data: null, error: "Forbidden" };
+    }
+    if (!isBusinessBrainEnabled(profile.clinic_id)) {
+      return { data: null, error: "Not available for this clinic." };
+    }
+
+    const parsed = CompleteActionSchema.safeParse(input);
+    if (!parsed.success) {
+      return { data: null, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+    }
+    const { category, constraintId, note } = parsed.data;
+
+    // Only a category the briefing can actually raise. Rejecting an unknown one
+    // keeps the table free of rows no outcome assessment could ever interpret.
+    const spec = OUTCOME_SPEC_BY_CATEGORY.get(category);
+    if (spec === undefined) {
+      return { data: null, error: "Unknown action category." };
+    }
+
+    // The card this completes: this clinic, this category, a recent run date.
+    const { timezone } = await getClinicConfig();
+    if (!isCurrentCompletionCard(constraintId, category, profile.clinic_id, getTodayInTimezone(timezone))) {
+      return { data: null, error: "This card is out of date. Refresh the page and try again." };
+    }
+
+    // Written with the service role: the client write path is closed at the
+    // database, so every fact on the row is the one resolved here.
+    const admin = createAdminClient() as unknown as SupabaseClient<Database>;
+
+    // Idempotent per card. A double-press, or a retry after a slow response, is
+    // one action — two rows would read as two overlapping actions and cap the
+    // attribution of both.
+    const existing = await admin
+      .from("action_completions")
+      .select("id, target_patient_ids")
+      .eq("clinic_id", profile.clinic_id)
+      .eq("constraint_id", constraintId)
+      .order("completed_at", { ascending: true })
+      .limit(1);
+    if (existing.error) {
+      console.error("[completeAction] idempotency lookup", existing.error.message);
+      return { data: null, error: "Could not record this as done." };
+    }
+    const prior = (existing.data ?? [])[0] as { id: string; target_patient_ids: string[] | null } | undefined;
+    if (prior !== undefined) {
+      return { data: { completionId: prior.id, targeted: prior.target_patient_ids?.length ?? 0 }, error: null };
+    }
+
+    // The population this card was about, derived from the same readers that
+    // built it. Empty for a category with nobody identifiable to target, which
+    // is reported downstream as "nothing to confirm" rather than as a failure.
+    const targetPatientIds = await resolveActionTargets(category);
+
+    // The headline reading at this moment. Best-effort: a completion is worth
+    // recording even if the pipeline cannot run, and a missing reading simply
+    // leaves the outcome at `insufficient_evidence`.
+    let metricKey: string | null = null;
+    let metricValue: number | null = null;
+    if (spec.metricKey !== null) {
+      try {
+        const { result } = await runDashboardBrain();
+        const found = result.metrics.find((m) => m.id.startsWith(`${spec.metricKey}:`));
+        if (found && Number.isFinite(found.value)) {
+          metricKey = spec.metricKey;
+          metricValue = found.value;
+        }
+      } catch (error) {
+        console.error("[completeAction] could not capture the metric reading", error);
+      }
+    }
+
+    const { data, error } = await admin
+      .from("action_completions")
+      .insert({
+        clinic_id: profile.clinic_id,
+        category,
+        constraint_id: constraintId,
+        completed_by: profile.id,
+        // A person pressed Done. An inferred completion is a different provenance
+        // and is never written from here.
+        source: "declared",
+        note: note ?? null,
+        target_patient_ids: targetPatientIds,
+        metric_key: metricKey,
+        metric_value: metricValue,
+      })
+      .select("id")
+      .single();
+
+    if (error || !data) {
+      console.error("[completeAction]", error?.message);
+      return { data: null, error: "Could not record this as done." };
+    }
+
+    // The Actions page is a server render, so the history section only picks the
+    // completion up on the next read. Revalidating here keeps the page's own data
+    // the single source of what is shown.
+    revalidatePath("/dentist/business-brain");
+    return {
+      data: { completionId: (data as { id: string }).id, targeted: targetPatientIds.length },
+      error: null,
+    };
+  } catch (error) {
+    console.error("[completeAction]", error);
+    return { data: null, error: "Could not record this as done." };
+  }
+}
+
+/**
+ * Record a dentist's decision on a learning proposal.
+ *
+ * ## An explicit, auditable path — and nothing more
+ *
+ * One append-only row in `clinic_decisions`. It changes no threshold, rule,
+ * ranking or action: the Business Brain lists accepted decisions through the
+ * memory reader for an explicit consumer, and no consumer applies them yet.
+ *
+ * ## What the browser may say
+ *
+ * Only which proposal and which decision. The proposal is re-derived from this
+ * clinic's own history on the server; a proposal the current evidence no longer
+ * produces is refused rather than recorded against a basis that no longer holds.
+ * The clinic and the author come from the session, and RLS pins both.
+ */
+export async function decideLearningProposal(input: {
+  proposalId: string;
+  decision: "accepted" | "rejected";
+}): Promise<ActionResult<{ decisionId: string }>> {
+  try {
+    const { db, profile } = await resolveSession();
+    // Recorded below with the service role: the client write path is closed at
+    // the database, and the clinic and author come only from this session.
+    if (!profile || profile.role !== "dentist") {
+      return { data: null, error: "Forbidden" };
+    }
+    if (!isBusinessBrainEnabled(profile.clinic_id)) {
+      return { data: null, error: "Not available for this clinic." };
+    }
+    const parsed = DecideLearningProposalSchema.safeParse(input);
+    if (!parsed.success) {
+      return { data: null, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+    }
+
+    const { result, date, timezone } = await runDashboardBrain();
+    // A proposal is only as current as the run that re-derives it.
+    if (!assessRunHealth(result).healthy) {
+      return { data: null, error: "Your clinic's records could not be read just now. Try again in a minute." };
+    }
+    const findings = [
+      ...(result.findings.top ? [result.findings.top] : []),
+      ...result.findings.next,
+      ...result.findings.supporting,
+      ...result.findings.wins,
+      ...result.findings.noActionRequired,
+    ].map((r) => r.finding);
+    const { learning } = await loadActionLearning(
+      db as never,
+      profile.clinic_id,
+      { date, timezone, metrics: result.metrics, findings },
+      new Date().toISOString(),
+    );
+    const proposal = learning?.proposals.find((p) => p.id === parsed.data.proposalId);
+    const basis = learning?.learnings.find((l) => l.id === proposal?.learningId);
+    if (proposal === undefined || basis === undefined) {
+      return { data: null, error: "This suggestion is no longer supported by your clinic's records." };
+    }
+
+    const decisionId = await recordClinicDecision(createAdminClient() as never, {
+      clinicId: profile.clinic_id,
+      decidedBy: profile.id,
+      target: { type: "proposal", id: proposal.id },
+      proposalKind: proposal.kind,
+      subject: proposal.subject,
+      decision: parsed.data.decision,
+      basis: { learningId: basis.id, learningKind: basis.kind, level: basis.level, confidence: basis.confidence, ...basis.counts },
+    });
+    revalidatePath("/dentist/business-brain");
+    return { data: { decisionId }, error: null };
+  } catch (error) {
+    console.error("[decideLearningProposal]", error);
+    return { data: null, error: "Could not record this decision." };
   }
 }

@@ -11,6 +11,24 @@
  * co-occurrence, and nothing records a booking request that was declined. That
  * hypothesis therefore stays undetermined even when the optional acquisition
  * signal is present, and says what would settle it.
+ *
+ * Two optional signals sharpen it, both reading the trailing window rather than
+ * the day:
+ *
+ * - `long_booking_lead_time` strengthens `demand_exceeds_capacity`. A full chair
+ *   plus a queue says demand met the ceiling TODAY; a median two-week wait to be
+ *   seen says it has been meeting it for a while. Neither claim is made by the
+ *   other, and the lead-time signal is deliberately not a finding on its own
+ *   because in isolation it is equally consistent with patients choosing later
+ *   dates.
+ *
+ * - `appointments_overrunning` SETTLES `schedule_overbooking`, which until now
+ *   could only ever be undetermined here — it required the entity-level service
+ *   time distribution, so a deployment with no context port wired up could never
+ *   reach it. The window metric answers the same question from data every clinic
+ *   already records, so the hypothesis becomes supported from aggregates. The
+ *   discriminator declaration stays, because the entity data still separates the
+ *   two more finely (which treatments overrun, and by how much).
  */
 
 import { DiagnosisPattern, MetricUnit, SignalCategory, SignalType } from "../../../../domain";
@@ -37,7 +55,11 @@ const REQUIRED = [
   ...QUEUE_SIGNALS,
 ] as const;
 
-const OPTIONAL = [SignalType.ACQUISITION_LOW_NEW_PATIENTS] as const;
+const OPTIONAL = [
+  SignalType.ACQUISITION_LOW_NEW_PATIENTS,
+  SignalType.SCHEDULING_LONG_BOOKING_LEAD_TIME,
+  SignalType.SCHEDULING_APPOINTMENTS_OVERRUNNING,
+] as const;
 
 const DEMAND_EXCEEDS_CAPACITY =
   "Patient demand on this day met or exceeded the clinic's available service capacity.";
@@ -74,6 +96,11 @@ export const capacityCeilingMatcher: PatternMatcher = {
     const openSlots = metricValue(ctx, MetricKey.CAPACITY_AVAILABLE_SLOTS_TODAY);
     const newPatients = metricValue(ctx, MetricKey.PATIENTS_NEW_TODAY);
     const lowNewPatients = ctx.signals.has(SignalType.ACQUISITION_LOW_NEW_PATIENTS);
+    const longLeadTime = ctx.signals.has(SignalType.SCHEDULING_LONG_BOOKING_LEAD_TIME);
+    const overrunning = ctx.signals.has(SignalType.SCHEDULING_APPOINTMENTS_OVERRUNNING);
+    const leadTimeDays = metricValue(ctx, MetricKey.SCHEDULING_BOOKING_LEAD_TIME_DAYS);
+    const overrunPercent = metricValue(ctx, MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D);
+    const measuredVisits = metricValue(ctx, MetricKey.SCHEDULING_MEASURED_VISITS_30D);
     const { capacity, patients } = ctx.config.signals;
 
     const arithmetic: EvidenceNote = {
@@ -87,6 +114,11 @@ export const capacityCeilingMatcher: PatternMatcher = {
         queueSignals: queueSignals.length,
         newPatients,
         lowNewPatients,
+        leadTimeDays,
+        longLeadTime,
+        overrunPercent,
+        measuredVisits,
+        overrunning,
       },
     };
 
@@ -101,6 +133,19 @@ export const capacityCeilingMatcher: PatternMatcher = {
             description: `The schedule reached the near-capacity mark and patients were still queueing, which is a direct measurement of demand meeting the service ceiling.`,
             data: { utilization, openSlots, queueSignals: queueSignals.length },
           },
+          // Added only when measured. A full day plus a queue is a statement about
+          // TODAY; a long median wait to be seen says the ceiling has been binding
+          // across the window, which is a materially stronger claim and the reason
+          // the lead-time metric was built.
+          ...(longLeadTime
+            ? [
+                {
+                  slug: "sustained-lead-time",
+                  description: `The median gap between booking and being seen is ${leadTimeDays ?? "above the configured limit"} days, so patients have been waiting for capacity across the window rather than only on this day.`,
+                  data: { leadTimeDays },
+                },
+              ]
+            : []),
         ],
       },
       {
@@ -118,12 +163,28 @@ export const capacityCeilingMatcher: PatternMatcher = {
           : undefined,
         requires: ["BOOKING_CHANNEL_ACTIVITY", "PATIENT_ACQUISITION_SOURCE"],
       },
-      {
-        slug: "schedule_overbooking",
-        statement: SCHEDULE_OVERBOOKING,
-        status: "undetermined",
-        requires: ["SERVICE_TIME_DISTRIBUTION"],
-      },
+      // Settled from aggregates where the window measured it, undetermined
+      // otherwise. The overrun signal carries its own sample guard, so its
+      // presence already means enough visits were measured to mean it.
+      overrunning
+        ? {
+            slug: "schedule_overbooking",
+            statement: SCHEDULE_OVERBOOKING,
+            status: "supported" as const,
+            supporting: [
+              {
+                slug: "booked-shorter-than-delivered",
+                description: `Across ${measuredVisits ?? "the measured"} visits in the trailing window, appointments took ${overrunPercent ?? "materially"}% longer than the time booked for them. A schedule built from those booked lengths is full on paper before it is full in the chair, which is how a full day produces a queue.`,
+                data: { overrunPercent, measuredVisits },
+              },
+            ],
+          }
+        : {
+            slug: "schedule_overbooking",
+            statement: SCHEDULE_OVERBOOKING,
+            status: "undetermined" as const,
+            requires: ["SERVICE_TIME_DISTRIBUTION"],
+          },
     ];
 
     return emit(ctx, {

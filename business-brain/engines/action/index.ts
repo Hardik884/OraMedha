@@ -6,7 +6,12 @@
  * into the specific screens, filters and drafts DentGrow can put in front of the
  * person doing the work.
  */
-export { generateActions, type ActionResult } from "./action-engine";
+export {
+  generateActions,
+  prepareActionPlan,
+  type ActionPlanSource,
+  type ActionResult,
+} from "./action-engine";
 export {
   ACTION_CATALOG,
   CATALOG_IDS,

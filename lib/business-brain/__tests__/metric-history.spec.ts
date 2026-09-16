@@ -145,7 +145,8 @@ const store = new SupabaseMetricHistoryStore(db);
 const outstanding = (day: StoredMetricDay | undefined) =>
   day?.metrics.find((m) => m.key === MetricKey.REVENUE_OUTSTANDING)?.value;
 
-describe.skipIf(!LOCAL_UP)("metric history (integration)", () => {
+// In order, never shuffled: the persistence tests write the same clinic-days the RLS tests then check are untouched.
+describe.skipIf(!LOCAL_UP)("metric history (integration)", { shuffle: false }, () => {
   beforeAll(seed);
   afterAll(cleanup);
 

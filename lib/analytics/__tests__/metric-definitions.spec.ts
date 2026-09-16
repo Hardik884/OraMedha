@@ -276,4 +276,36 @@ describe.skipIf(!LOCAL_UP)("analytics metric definitions (audit B4/B5/B6/B7)", (
     // P3's only visit is outside the range, so it must not appear at all.
     expect(result.topPatients.map((p) => p.patientId)).not.toContain(P3);
   });
+
+  // Last: it deletes a patient, which the range-scoped cases above do not expect.
+  it("F11 — collections over time keep a deleted patient's payments; the outstanding balance does not", async () => {
+    const before = await getRevenueAnalytics(db, FILTER);
+    const P5 = "9fd00000-0000-4000-8000-000000000025";
+    const A11 = "9fd00000-0000-4000-8000-00000000010b";
+    await insert("patients", { id: P5, clinic_id: CLINIC, name: "Deleted later", created_at: "2026-01-01T00:00:00Z" });
+    await insert("appointments", { id: A11, clinic_id: CLINIC, patient_id: P5, dentist_id: DENTIST, scheduled_at: "2026-05-08T10:00:00Z", source: "walk_in", status: "completed" });
+    await insert("treatments", {
+      id: "9fd00000-0000-4000-8000-000000000204", clinic_id: CLINIC, appointment_id: A11, patient_id: P5,
+      treatment_type: "Crown", cost: 1200, status: "completed", performed_at: "2026-05-08T10:30:00Z",
+      opd_charged: false, opd_fee: 0, xray_taken: false, xray_cost: null,
+    });
+    await insert("payments", [
+      { id: "9fd00000-0000-4000-8000-000000000304", clinic_id: CLINIC, patient_id: P5, appointment_id: A11, amount: 700, method: "cash", payment_date: "2026-05-08" },
+      // Deleted on its own, cause not recorded: stays out, as before.
+      { id: "9fd00000-0000-4000-8000-000000000305", clinic_id: CLINIC, patient_id: P5, appointment_id: null, amount: 800, method: "cash", payment_date: "2026-05-09" },
+    ]);
+    const deletedAt = "2026-06-01T00:00:00Z";
+    await raw.from("payments").update({ deleted_at: deletedAt }).eq("id", "9fd00000-0000-4000-8000-000000000305");
+    for (const table of ["appointments", "treatments", "payments"]) {
+      const { error } = await raw.from(table).update({ deleted_at: deletedAt, deletion_cause: "patient_deleted" }).eq("patient_id", P5).is("deleted_at", null);
+      if (error) throw new Error(`delete ${table}: ${error.message}`);
+    }
+    await raw.from("patients").update({ deleted_at: deletedAt }).eq("id", P5);
+
+    const after = await getRevenueAnalytics(db, FILTER);
+    const on = (r: typeof after, date: string) => r.overTime.find((d) => d.date === date)?.amount ?? 0;
+    expect(on(after, "2026-05-08") - on(before, "2026-05-08")).toBe(700);
+    expect(on(after, "2026-05-09")).toBe(on(before, "2026-05-09"));
+    expect(after.outstandingTotal).toBe(before.outstandingTotal);
+  });
 });

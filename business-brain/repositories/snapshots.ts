@@ -10,6 +10,8 @@
  * rows into these snapshots. This phase only defines the shape and consumes it.
  */
 
+import type { SnapshotKnowledge } from "../provenance/metric-provenance";
+
 /** An appointment scheduled on the target date. */
 export interface AppointmentSnapshot {
   readonly id: string;
@@ -50,6 +52,12 @@ export interface PaymentSnapshot {
    * all rows fall into one bucket (the old clinic-level behaviour).
    */
   readonly patientId?: string;
+  /**
+   * True for a payment kept only as history because its patient was deleted.
+   * It still counts toward money collected on its date; it never counts toward
+   * anything owed or forward-looking. Carries no patientId.
+   */
+  readonly patientDeleted?: boolean;
 }
 
 /** A treatment record, reduced to what metrics need. */
@@ -76,6 +84,12 @@ export interface TreatmentSnapshot {
   readonly xrayCost?: number;
   /** DentGrow treatment_status: planned | in_progress | completed | cancelled. */
   readonly status: string;
+  /**
+   * True for a treatment kept only as history because its patient was deleted.
+   * Its delivered work still counts toward production; it never counts toward a
+   * balance, the pipeline or anything forward-looking. Carries no patientId.
+   */
+  readonly patientDeleted?: boolean;
   /** ISO-8601 time the treatment was performed, or null if not yet performed. */
   readonly performedAt: string | null;
   /**
@@ -88,8 +102,14 @@ export interface TreatmentSnapshot {
    * Deliberately defined at the PATIENT level, not per treatment. A repository
    * answers "does this treatment's patient have another visit booked?", which
    * is an approximation of "is this specific treatment booked". Modelling the
-   * latter exactly requires a treatment-to-appointment link, and the workflow
-   * cost of asking a dentist to maintain one is not currently justified.
+   * latter exactly requires a link from planned work to the visit booked to
+   * deliver it, and the workflow cost of asking a dentist to maintain one is not
+   * currently justified.
+   *
+   * Do not mistake `treatments.appointment_id` for that link. It is NOT NULL, but
+   * it records the visit the treatment was WRITTEN DOWN at — for planned work,
+   * the past consultation that planned it. The clinic ledger names it
+   * `recordedAtAppointmentId` for exactly this reason.
    *
    * The direction of the error is known and one-way: the derived metric
    * UNDER-reports. Anything it flags as pending scheduling is genuinely
@@ -111,8 +131,15 @@ export interface QueueEntrySnapshot {
   readonly status: string;
   /** ISO-8601 time the patient checked in (started waiting). */
   readonly checkedInAt: string;
-  /** ISO-8601 time the patient was called in (waiting ended), or null if still waiting. */
+  /** ISO-8601 time the patient was called in (waiting ended), or null when no call-in was recorded. */
   readonly startedAt: string | null;
+  /**
+   * The status of the appointment this entry belongs to, when the snapshot knows
+   * it. An entry still marked waiting behind an appointment already in progress,
+   * completed, cancelled or missed is not a patient waiting — its call-in simply
+   * was not recorded. Absent means not known.
+   */
+  readonly appointmentStatus?: string;
 }
 
 /** A follow-up record relevant to the target date. */
@@ -139,6 +166,29 @@ export interface PatientRosterEntry {
   readonly lastVisit: string | null;
   /** Whether the patient has at least one upcoming, non-cancelled appointment. */
   readonly hasUpcomingAppointment: boolean;
+}
+
+/**
+ * One attended visit, with the time it was BOOKED for beside the time it
+ * actually took.
+ *
+ * The two numbers come from different ledgers on purpose, and that is the whole
+ * value of the shape: `scheduledMinutes` is the plan a clinic wrote into the
+ * appointment book, `actualMinutes` is what the queue recorded when staff called
+ * the patient in and marked them finished. Neither ledger alone can say whether
+ * a clinic books realistically.
+ *
+ * `actualMinutes` is `null` when either end of the interval was not recorded.
+ * Never inferred from anything else — a guessed duration would fabricate exactly
+ * the quantity this exists to measure, and the calculator drops such rows rather
+ * than treating an unrecorded visit as an on-time one.
+ */
+export interface VisitDurationSnapshot {
+  readonly appointmentId: string;
+  /** Minutes the appointment was booked for, as planned. */
+  readonly scheduledMinutes: number;
+  /** Minutes it actually took, called-in to finished; null when unrecorded. */
+  readonly actualMinutes: number | null;
 }
 
 /**
@@ -210,6 +260,17 @@ export interface ClinicDataSnapshot {
    * calculations (e.g. current waiting time) and as each metric's timestamp.
    */
   readonly asOf: string;
+  /**
+   * The clinic's IANA timezone. Calculators place timestamps on business dates
+   * in it; absent means UTC, which every fixture and the previous behaviour use.
+   */
+  readonly timezone?: string;
+  /**
+   * How the records behind this snapshot were read: from state history as known
+   * at a moment, or as they stand now. Absent means not stated, which no stored
+   * observation may treat as point-in-time. See `provenance/metric-provenance.ts`.
+   */
+  readonly knowledge?: SnapshotKnowledge;
 
   /** Appointments scheduled on `date`. */
   readonly appointmentsToday: readonly AppointmentSnapshot[];
@@ -294,4 +355,20 @@ export interface ClinicDataSnapshot {
    * OPTIONAL, as above.
    */
   readonly forwardWindow?: ScheduleWindow;
+
+  /**
+   * Attended visits across the SAME trailing window as {@link trailingWindow},
+   * each carrying its booked length beside its measured length.
+   *
+   * A separate field rather than a property of `ScheduleWindow`, because a
+   * schedule window is appointments plus the capacity offered for them — a
+   * forward window has no measured durations at all, and putting an always-empty
+   * array there would invite reading it as "nothing overran next week".
+   *
+   * OPTIONAL, as every window input is. A repository that cannot afford the read
+   * omits it and the overrun metrics are withheld rather than reported as zero —
+   * which matters more here than almost anywhere else, since a reported 0%
+   * overrun is the exact claim "this clinic books accurately".
+   */
+  readonly trailingVisitDurations?: readonly VisitDurationSnapshot[];
 }

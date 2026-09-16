@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/layouts/PageHeader";
 import { AppointmentCompleteControl } from "@/components/dentist/AppointmentCompleteControl";
+import { isCorrectableNoShow } from "@/lib/appointments/visit-completion";
 import { AppointmentHistoryTimeline } from "@/components/shared/AppointmentHistoryTimeline";
 import { AppointmentStatusBadge } from "@/components/shared/AppointmentStatusBadge";
 import { AppointmentTreatmentsSection } from "@/components/dentist/AppointmentTreatmentsSection";
@@ -215,6 +216,7 @@ export default async function DentistAppointmentDetailPage({ params }: Props) {
       <AppointmentCompleteControl
         appointmentId={appt.id}
         currentStatus={appt.status as AppointmentStatus}
+        correctableNoShow={isCorrectableNoShow(appt.status, appt.history, new Date().toISOString())}
       />
 
       {/* ── Audit history timeline ───────────────────────────── */}

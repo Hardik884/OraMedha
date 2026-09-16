@@ -84,3 +84,68 @@ export function dateRange(from: string, to: string): string[] {
   for (let offset = 0; offset <= span; offset++) dates.push(addDays(from, offset));
   return dates;
 }
+
+const LOCAL_DATE_FORMATS = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * The clinic-local "YYYY-MM-DD" of an ISO instant.
+ *
+ * An instant's own first ten characters are its UTC date, which is the clinic's
+ * date only when the clinic is in UTC: a treatment performed at 00:30 in
+ * Asia/Kolkata is the previous day in UTC, and one performed at 18:00 in
+ * America/Los_Angeles is the next. Pure — the timezone is an input, and `Intl`
+ * only expresses the instant in it. Without a timezone the UTC date is returned,
+ * which is exactly the previous behaviour.
+ */
+export function localDatePart(iso: string, timezone: string | undefined): string {
+  if (timezone === undefined || timezone === "UTC") return iso.slice(0, 10);
+  let format = LOCAL_DATE_FORMATS.get(timezone);
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+    LOCAL_DATE_FORMATS.set(timezone, format);
+  }
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? iso.slice(0, 10) : format.format(new Date(ms));
+}
+
+const OFFSET_FORMATS = new Map<string, Intl.DateTimeFormat>();
+
+/** Minutes the timezone is ahead of UTC at an instant. */
+function offsetMinutesAt(ms: number, timezone: string): number {
+  let format = OFFSET_FORMATS.get(timezone);
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    OFFSET_FORMATS.set(timezone, format);
+  }
+  const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
+  const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+  return Math.round((asUtc - Math.floor(ms / 1000) * 1000) / 60_000);
+}
+
+/**
+ * The instant a clinic-local business date begins, as ISO-8601 UTC.
+ *
+ * The day ENDS where the next one begins, so "known by the end of 3 September"
+ * is `startOfLocalDay("2026-09-04", tz)`. Resolved twice so a date whose
+ * midnight falls just after a DST change still lands on the right side of it.
+ */
+export function startOfLocalDay(date: string, timezone: string): string {
+  const naive = Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)));
+  let ms = naive - offsetMinutesAt(naive, timezone) * 60_000;
+  ms = naive - offsetMinutesAt(ms, timezone) * 60_000;
+  return new Date(ms).toISOString();
+}
+
+/** The exclusive end of a clinic-local business date: the start of the next one. */
+export function endOfLocalDay(date: string, timezone: string): string {
+  return startOfLocalDay(addDays(date, 1), timezone);
+}

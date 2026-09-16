@@ -1,9 +1,10 @@
 /**
- * Business Brain — Diagnosis Engine: entity-context port (DEFINITION ONLY)
+ * Business Brain — Diagnosis Engine: entity-context port
  *
- * This file contains no implementation and has no call sites, by design. It exists
- * so the boundary is designed before it is needed, and so the shape is justified
- * by demonstrated need rather than by speculation.
+ * Implemented by `lib/business-brain/diagnosis-context.ts` and, as a superset, by
+ * the clinic ledger adapter (`lib/business-brain/clinic-ledger.ts`, see
+ * `business-brain/ledger/clinic-ledger-port.ts`). The service calls the methods
+ * the run's discriminators ask for.
  *
  * Every method below is derived from a `requires_entity_data` discriminator that
  * the shipped matchers actually produce — see `support/discriminators.ts`, whose
@@ -27,13 +28,18 @@
  * - BOUNDED. Every method takes a `limit`, because a diagnosis needs a
  *   representative sample to discriminate, not an unbounded export.
  *
- * The implementation belongs to the next phase. When it lands it will live behind
- * this interface, outside `engines/diagnosis/**`, because the lint boundary in
- * `eslint.config.mjs` forbids this directory from importing a repository — and
- * that boundary must keep passing after this file exists.
+ * The implementation lives outside `engines/diagnosis/**`, because the lint
+ * boundary in `eslint.config.mjs` forbids this directory from importing a
+ * repository or a database client.
+ *
+ * `listRecallContactAttempts` was removed in the ledger tranche. It could only
+ * ever return null — OraMedha records no per-follow-up contact attempt or outcome
+ * — so it justified nothing, and its discriminator is now catalogued honestly as
+ * `requires_data_capture`.
  */
 
 import type { MetricUnit } from "../../../domain";
+import type { CancellationSide, NoShowBasis, PerformedAtBasis } from "../../../ledger/record-evidence";
 
 /** Inclusive date window, "YYYY-MM-DD" bounds. */
 export interface EntityWindow {
@@ -65,10 +71,34 @@ export interface CancellationEvent {
   /** Hours between the cancellation and the scheduled start; null for a no-show. */
   readonly noticeHours: number | null;
   readonly outcome: "cancelled" | "no_show";
-  /** Treatment type booked into the slot, when one was recorded. */
+  /**
+   * Type of a treatment recorded AGAINST the lost appointment itself, or null.
+   *
+   * Not "the treatment booked into the slot": appointments record no booked
+   * treatment type, and planned work is recorded against the visit that planned
+   * it, not the one booked to deliver it. For a cancelled or missed appointment
+   * this is therefore usually null, and a resolver must not call a type
+   * concentration from the few rows that carry one.
+   */
   readonly treatmentType: string | null;
   /** Whether another appointment subsequently occupied the slot. */
   readonly slotRefilled: boolean;
+  /**
+   * For a cancellation: whether the patient or the clinic cancelled, or unknown
+   * (see `ledger/record-evidence.ts`). Absent on a no-show.
+   */
+  readonly side?: CancellationSide;
+  /**
+   * For a no-show: whether a person recorded it or the nightly job inferred it
+   * from a visit nobody closed. Absent on a cancellation.
+   */
+  readonly noShowBasis?: NoShowBasis;
+  /**
+   * The scheduled start's hour in the CLINIC's timezone, "HH:00". Supplied by the
+   * adapter, which knows the timezone: the ISO start is a UTC instant, and its
+   * hour digits are not the clinic's hour anywhere but UTC.
+   */
+  readonly localHour: string;
 }
 
 /**
@@ -128,8 +158,15 @@ export interface AppointmentArrivalRow {
   readonly appointmentId: string;
   readonly date: string;
   readonly scheduledStart: string;
-  /** ISO-8601 arrival, or null when no arrival was recorded. */
+  /**
+   * ISO-8601 arrival, or null when no arrival was recorded. A queue visit that
+   * was clicked through — completed within a minute of "check-in" with no call-in
+   * — has no recorded arrival either: its check-in time is when a button was
+   * pressed, not when a patient walked in.
+   */
   readonly arrivedAt: string | null;
+  /** The arrival's hour in the clinic's timezone, "HH:00", or null without an arrival. */
+  readonly arrivalLocalHour: string | null;
   /** Minutes early (negative) or late (positive); null without an arrival. */
   readonly arrivalDeltaMinutes: number | null;
   /** ISO-8601 moment the patient was seen, when recorded. */
@@ -153,23 +190,6 @@ export interface AppointmentArrivalRow {
 }
 
 /**
- * One contact attempt against an overdue follow-up.
- * Serves: recall_contact_attempts.
- */
-export interface RecallContactAttemptRow {
-  readonly followUpId: string;
-  readonly patientId: string;
-  /** "YYYY-MM-DD" the follow-up became due. */
-  readonly dueOn: string;
-  readonly ageDays: number;
-  /** Contact attempts recorded against this follow-up. */
-  readonly attempts: number;
-  /** ISO-8601 of the most recent attempt, or null when none was recorded. */
-  readonly lastAttemptAt: string | null;
-  readonly lastOutcome: "reached" | "not_reached" | "no_attempt";
-}
-
-/**
  * One treatment completed in the window, with what it billed.
  * Serves: completed_treatment_mix.
  */
@@ -177,6 +197,12 @@ export interface CompletedTreatmentRow {
   readonly treatmentId: string;
   readonly patientId: string;
   readonly date: string;
+  /**
+   * What `date` is: the treatment's own performed_at, or — when none was
+   * entered — the moment its completion was recorded, which is a recording time
+   * and not necessarily when the work was done.
+   */
+  readonly dateBasis?: PerformedAtBasis;
   readonly treatmentType: string;
   readonly billedValue: MeasuredAmount;
   readonly collectedValue: MeasuredAmount;
@@ -251,16 +277,6 @@ export interface DiagnosisContextPort {
   listAppointmentArrivals(
     window: EntityWindow,
   ): Promise<readonly AppointmentArrivalRow[] | null>;
-
-  /**
-   * Contact attempts recorded against follow-ups overdue in the window.
-   *
-   * Discriminates recalls never attempted from recalls attempted without
-   * reaching the patient.
-   */
-  listRecallContactAttempts(
-    window: EntityWindow,
-  ): Promise<readonly RecallContactAttemptRow[] | null>;
 
   /**
    * Treatments completed in the window with billed and collected value.

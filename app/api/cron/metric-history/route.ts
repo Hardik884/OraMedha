@@ -7,6 +7,7 @@ import { getTodayInTimezone } from "@/lib/utils";
 import { addDays } from "@/business-brain";
 import { SupabaseMetricHistoryStore } from "@/lib/business-brain/metric-history-store";
 import { persistMetricDay } from "@/lib/business-brain/persist-metrics";
+import { ensureClinicMemoryBuild } from "@/lib/business-brain/clinic-memory";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
 
 /**
@@ -49,6 +50,30 @@ interface ClinicOutcome {
   readonly date: string;
   readonly status: "recorded" | "already_recorded" | "failed";
   readonly error?: string;
+  /**
+   * Clinic memory for the same completed day, built once the day is on record.
+   * Reported separately: a memory failure never marks the metric day failed.
+   */
+  readonly memory?: "built" | "already_built" | "failed" | "skipped";
+}
+
+/**
+ * Derive and record clinic memory for a completed day, once. Runs in this job —
+ * never at dashboard load — because a build reads up to a year of stored
+ * evidence; the dashboard then reads one row. Never throws.
+ */
+async function buildMemory(
+  db: ReturnType<typeof createAdminClient>,
+  clinicId: string,
+  date: string,
+  timezone: string,
+): Promise<ClinicOutcome["memory"]> {
+  try {
+    return await ensureClinicMemoryBuild(db as never, clinicId, date, timezone, new Date().toISOString());
+  } catch (error) {
+    console.error("[cron/metric-history] memory", { clinicId, date, error: error instanceof Error ? error.message : String(error) });
+    return "failed";
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -88,12 +113,13 @@ export async function POST(request: NextRequest) {
         // cheap: after the first success each hour costs one indexed lookup.
         const existing = await store.readMetricDays(clinicId, date, date);
         if (existing.length > 0) {
-          results.push({ clinicId, date, status: "already_recorded" });
+          results.push({ clinicId, date, status: "already_recorded", memory: await buildMemory(db, clinicId, date, timezone) });
           continue;
         }
 
         await persistMetricDay(clinicId, date, db as never);
-        results.push({ clinicId, date, status: "recorded" });
+        // The day's readings are now evidence; memory for it is built from them.
+        results.push({ clinicId, date, status: "recorded", memory: await buildMemory(db, clinicId, date, timezone) });
       } catch (error) {
         // One clinic's failure must not stop the others. The outcome is reported
         // rather than thrown so a caller reading the response can see exactly

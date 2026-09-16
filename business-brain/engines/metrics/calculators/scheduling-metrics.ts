@@ -12,7 +12,7 @@
  */
 
 import type { Metric } from "../../../domain";
-import type { ClinicDataSnapshot } from "../../../repositories";
+import type { ClinicDataSnapshot, VisitDurationSnapshot } from "../../../repositories";
 import { MetricKey, buildMetric } from "../metric-ids";
 import { median, statusRate } from "../support/windows";
 
@@ -137,4 +137,98 @@ export function bookingLeadTimeDays(s: ClinicDataSnapshot): Metric | null {
     s.date,
     s.asOf,
   );
+}
+
+/**
+ * Visits in the trailing window whose real length was actually recorded.
+ *
+ * A visit counts only when BOTH ends of the interval exist — the moment staff
+ * called the patient in and the moment they marked them finished. A visit
+ * missing either end is dropped rather than treated as on-time: an unrecorded
+ * length is not a length of zero, and quietly counting it as accurate would make
+ * a clinic that forgets to close its queue entries look like a clinic that books
+ * perfectly.
+ *
+ * Exists as a metric in its own right so the evaluator can judge the sample.
+ * WITHHELD when the repository supplied no durations at all — an absent read and
+ * a clinic that measured nothing are different facts, and only the second is a
+ * real zero.
+ */
+export function measuredVisits30d(s: ClinicDataSnapshot): Metric | null {
+  const visits = s.trailingVisitDurations;
+  if (visits === undefined) return null;
+  const measured = visits.filter((v) => usableLength(v) !== null).length;
+  return buildMetric(
+    MetricKey.SCHEDULING_MEASURED_VISITS_30D,
+    measured,
+    s.clinicId,
+    s.date,
+    s.asOf,
+  );
+}
+
+/**
+ * By what share the time appointments TAKE exceeds the time they are BOOKED for,
+ * across the trailing window (%). Positive means they overrun.
+ *
+ * The one measurement in the engine that needs two ledgers at once: the
+ * appointment book says what the clinic planned, the queue says what happened.
+ * Either alone is silent on whether a clinic books realistically, which is why no
+ * amount of scheduling data and no amount of check-in data can substitute.
+ *
+ * ## Totals, not a mean of ratios
+ *
+ * `(Σ actual − Σ booked) / Σ booked`. A per-visit mean would let the shortest
+ * appointments dominate: a 10-minute check running 5 minutes long is +50% and
+ * costs the day 5 minutes, while an hour-long case running 5 minutes long is +8%
+ * and costs exactly the same 5 minutes. The day is made of minutes, so minutes
+ * are what the ratio is built from.
+ *
+ * ## What it is NOT
+ *
+ * Not a judgement on any individual appointment, any treatment type or any
+ * clinician — it cannot be, because it aggregates. It says the clinic's booking
+ * template is systematically short (or long), and nothing about who or what.
+ *
+ * WITHHELD when the repository supplied no durations, when none has a usable
+ * length, or when the booked total is zero (no denominator). Never zero in any of
+ * those cases: a reported 0% is the claim "this clinic books accurately", which
+ * is exactly what an absent measurement cannot support.
+ */
+export function appointmentOverrun30d(s: ClinicDataSnapshot): Metric | null {
+  const visits = s.trailingVisitDurations;
+  if (visits === undefined) return null;
+
+  let bookedTotal = 0;
+  let actualTotal = 0;
+  for (const visit of visits) {
+    const actual = usableLength(visit);
+    if (actual === null) continue;
+    bookedTotal += visit.scheduledMinutes;
+    actualTotal += actual;
+  }
+
+  if (bookedTotal <= 0) return null;
+  const value = Math.round(((actualTotal - bookedTotal) / bookedTotal) * 1000) / 10;
+  return buildMetric(
+    MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D,
+    value,
+    s.clinicId,
+    s.date,
+    s.asOf,
+  );
+}
+
+/**
+ * The visit's measured length, or null when it cannot be used.
+ *
+ * Rejects an unrecorded length, a non-finite one, and a non-positive booked
+ * length — the last because a zero-minute booking gives the ratio no denominator
+ * and would otherwise contribute an unbounded overrun from one bad row.
+ */
+function usableLength(visit: VisitDurationSnapshot): number | null {
+  if (visit.actualMinutes === null) return null;
+  if (!Number.isFinite(visit.actualMinutes) || visit.actualMinutes < 0) return null;
+  if (!Number.isFinite(visit.scheduledMinutes) || visit.scheduledMinutes <= 0) return null;
+  return visit.actualMinutes;
 }

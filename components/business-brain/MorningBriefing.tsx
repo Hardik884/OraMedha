@@ -3,8 +3,10 @@
 import { CheckCircle2 } from "lucide-react";
 import type { ClinicHealth } from "@/lib/business-brain/clinic-health";
 import type { ActionCardView, ProblemView } from "@/lib/business-brain/briefing-view";
+import type { WinView } from "@/lib/business-brain/wins-view";
 import type { ReminderSummary } from "@/lib/messaging/reminder-types";
 import { HealthMeter } from "./HealthMeter";
+import { WinsStrip } from "./WinsStrip";
 import { ProblemCard } from "./ProblemCard";
 import { ActionCard } from "./ActionCard";
 
@@ -12,6 +14,22 @@ interface MorningBriefingProps {
   health: ClinicHealth;
   problems: readonly ProblemView[];
   actions: readonly ActionCardView[];
+  /**
+   * Measured improvements, capped at three by the Achievement Engine.
+   *
+   * Rendered BETWEEN the score and the work, deliberately: a clinic should see
+   * what is going well before it sees what needs doing, and never instead of it.
+   * Empty renders nothing at all — no placeholder, no "no wins today".
+   */
+  wins?: readonly WinView[];
+  /**
+   * Categories already marked done today, resolved server-side.
+   *
+   * Passed through to each action card so the acknowledgement survives a refresh
+   * — which is the whole reason completions are recorded durably rather than in
+   * component state.
+   */
+  completedCategories?: ReadonlySet<string>;
   /** When true, action cards may offer an inline "Contact Patients" button. */
   whatsappEnabled?: boolean;
   /** Per-kind reminder counts from the server, matched onto each card by its messageKind. */
@@ -19,7 +37,14 @@ interface MorningBriefingProps {
 }
 
 /**
- * The whole page below the title: the health score, then two paired columns.
+ * The whole page below the title, in three blocks: the health score, what is
+ * going well, then the two paired columns of problems and actions.
+ *
+ * The order is the product decision. Wins sit above the work so the page opens
+ * with where the clinic stands rather than with a list of demands — and below the
+ * score, because the score is the summary and a win is one line of the detail
+ * behind it. They are never mixed into the problem cards: a card that might be
+ * good news or bad news depending on its colour is a card nobody scans reliably.
  *
  * The score, problems and actions are always the server's live truth. Nothing
  * here removes a problem or its action on interaction — a card leaves only when
@@ -44,6 +69,8 @@ export function MorningBriefing({
   health,
   problems,
   actions,
+  wins = [],
+  completedCategories,
   whatsappEnabled = false,
   reminderSummaries = [],
 }: MorningBriefingProps) {
@@ -59,6 +86,8 @@ export function MorningBriefing({
   return (
     <div className="space-y-6">
       <HealthMeter health={health} coveredCategories={coveredCategories} />
+
+      <WinsStrip wins={wins} />
 
       {allClear ? (
         <div className="bg-surface border border-border rounded-xl px-6 py-10 text-center">
@@ -95,7 +124,11 @@ export function MorningBriefing({
                 <div key={p.id} className="grid grid-cols-1 lg:grid-cols-2 gap-3 lg:gap-6 items-stretch">
                   <ProblemCard problem={p} />
                   {action ? (
-                    <ActionCard action={action} contactSummary={contactSummary} />
+                    <ActionCard
+                      action={action}
+                      contactSummary={contactSummary}
+                      completedToday={completedCategories?.has(action.category) ?? false}
+                    />
                   ) : (
                     <div aria-hidden />
                   )}

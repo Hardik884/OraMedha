@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SignalType } from "../../../domain";
 import type { ExecutionContext } from "../../../types";
 import { MetricKey } from "../../metrics/metric-ids";
+import { EVALUATORS } from "../evaluators/registry";
 import { DentGrowSignalEngine } from "../signal-engine";
 import {
   CLINIC_ID,
@@ -24,6 +25,16 @@ const context: ExecutionContext = {
 
 const engine = new DentGrowSignalEngine();
 
+/**
+ * Evaluators that cannot reach a verdict without a prior period.
+ *
+ * outstanding_increasing, returning_volume_dropping, queue_building_up. Stated as
+ * a named constant rather than a bare 3 so a reader knows which rules it counts,
+ * and derived against EVALUATORS.length so adding a same-day rule never silently
+ * changes what this asserts.
+ */
+const TREND_EVALUATORS = 3;
+
 describe("DentGrowSignalEngine", () => {
   it("wraps signals in an EngineResult using context.startedAt as the clock", () => {
     const result = engine.run(
@@ -38,11 +49,17 @@ describe("DentGrowSignalEngine", () => {
   });
 
   it("reports input coverage, not 1.0, when nothing was emitted", () => {
-    // Complete current-period metrics, no prior period: the 17 same-day
-    // evaluators reach a verdict, the 3 trend evaluators cannot. 17/20.
+    // Complete current-period metrics, no prior period: every same-day evaluator
+    // reaches a verdict, the 3 trend evaluators cannot.
+    //
+    // Derived from EVALUATORS rather than written as a literal. The literal was
+    // 17/20 = 0.85 and silently became wrong the moment the registry grew, which
+    // told us nothing about the engine and cost a test failure to notice.
     const result = engine.run({ metrics: metrics(HEALTHY_CLINIC), date: DATE }, context);
     expect(result.data).toEqual([]);
-    expect(result.confidence).toBe(0.85);
+    expect(result.confidence).toBe(
+      Math.round(((EVALUATORS.length - TREND_EVALUATORS) / EVALUATORS.length) * 100) / 100,
+    );
 
     // Nothing to evaluate at all must not report full confidence.
     const blind = engine.run({ metrics: [], date: DATE }, context);
@@ -71,9 +88,9 @@ describe("DentGrowSignalEngine", () => {
     const steps = (result.trace ?? []).map((t) => t.step);
     expect(steps[0]).toBe("index-metrics");
     expect(steps[steps.length - 1]).toBe("summarise-run");
-    // 20 evaluators + index-metrics + summarise-run.
-    expect(steps).toHaveLength(22);
-    expect(new Set(steps).size).toBe(22);
+    // One trace per evaluator, plus index-metrics and summarise-run.
+    expect(steps).toHaveLength(EVALUATORS.length + 2);
+    expect(new Set(steps).size).toBe(EVALUATORS.length + 2);
     expect((result.trace ?? []).every((t) => t.engine === "SignalEngine")).toBe(true);
     expect(
       (result.trace ?? []).find((t) => t.step === SignalType.REVENUE_OUTSTANDING_INCREASING)

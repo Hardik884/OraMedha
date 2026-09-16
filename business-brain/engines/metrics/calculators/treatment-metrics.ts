@@ -5,12 +5,13 @@
 import type { Metric } from "../../../domain";
 import type { ClinicDataSnapshot } from "../../../repositories";
 import { METRIC_WINDOWS } from "../config/metric-windows";
+import { localDatePart } from "../../../utils";
 import { completedInWindow } from "../support/windows";
 import { MetricKey, buildMetric } from "../metric-ids";
 
-/** Returns the "YYYY-MM-DD" calendar date portion of an ISO timestamp. */
-function toDatePart(iso: string): string {
-  return iso.slice(0, 10);
+/** The clinic-local business date of an ISO timestamp in this snapshot. */
+function toDatePart(iso: string, s: ClinicDataSnapshot): string {
+  return localDatePart(iso, s.timezone);
 }
 
 /**
@@ -40,7 +41,7 @@ function toDatePart(iso: string): string {
  * knowable, so the metric is still produced.
  */
 export function acceptedTreatmentsPendingScheduling(s: ClinicDataSnapshot): Metric | null {
-  const planned = s.treatments.filter((t) => t.status === "planned");
+  const planned = s.treatments.filter((t) => t.status === "planned" && !t.patientDeleted);
   if (planned.some((t) => t.isScheduled === null)) {
     return null;
   }
@@ -57,7 +58,7 @@ export function acceptedTreatmentsPendingScheduling(s: ClinicDataSnapshot): Metr
 /** Treatments completed today — `completed` treatments performed on the target date. */
 export function treatmentsCompletedToday(s: ClinicDataSnapshot): Metric {
   const value = s.treatments.filter(
-    (t) => t.status === "completed" && t.performedAt !== null && toDatePart(t.performedAt) === s.date,
+    (t) => t.status === "completed" && t.performedAt !== null && toDatePart(t.performedAt, s) === s.date,
   ).length;
   return buildMetric(MetricKey.TREATMENT_COMPLETED_TODAY, value, s.clinicId, s.date, s.asOf);
 }

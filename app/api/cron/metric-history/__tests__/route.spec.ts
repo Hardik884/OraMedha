@@ -129,4 +129,11 @@ describe.skipIf(!LOCAL_UP)("recording", () => {
     // This is what makes an hourly schedule affordable.
     expect(body.results.every((r) => r.status === "already_recorded")).toBe(true);
   });
+
+  it("builds clinic memory for the recorded day once, and skips it on the next run", async () => {
+    await POST(post({ authorization: `Bearer ${SECRET}` }) as never);
+    const res = await POST(post({ authorization: `Bearer ${SECRET}` }) as never);
+    const body = (await res.json()) as { results: { memory?: string }[] };
+    expect(body.results.every((r) => r.memory === "already_built")).toBe(true);
+  });
 });

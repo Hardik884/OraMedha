@@ -41,6 +41,11 @@ const EXEMPT: Record<string, string> = {
     "that a consent was given and later withdrawn, which is the only thing it is for.",
   treatment_history:
     "Append-only audit of treatment edits. Same reasoning.",
+  patient_state_history:
+    "Append-only, trigger-written versions of the record's existence, deletion and " +
+    "payment plan (migration 20260917100000) — no name, contact or clinical field. " +
+    "The soft delete itself is captured as a new version by trigger; erasing the " +
+    "versions would let a deletion rewrite what the clinic's records said before it.",
   phi_access_log:
     "The record of who READ this patient's data. Removing it on deletion would " +
     "mean a deletion could erase the evidence of prior access — precisely " +
@@ -146,13 +151,14 @@ describe("patient deletion cascade", () => {
   });
 
   it("never hard-deletes a clinical record", () => {
-    // Soft delete is the rule; the two hard deletes are queue entries (live
-    // operational state, no soft-delete column) and reminder/portal-link rows.
+    // Soft delete is the rule; the hard deletes are reminder and portal-link
+    // rows. Queue entries are soft-removed (`removed_at`) since 20260918100100,
+    // so the check-in stays as evidence.
     const hardDeleted = [...body.matchAll(/\.from\(\s*["'`](\w+)["'`]\s*\)[\s\S]{0,200}?\.delete\(/g)]
       .map((m) => m[1]);
 
     expect(hardDeleted.sort()).toEqual(
-      ["patient_portal_links", "queue_entries", "reminder_logs"].sort()
+      ["patient_portal_links", "reminder_logs"].sort()
     );
   });
 

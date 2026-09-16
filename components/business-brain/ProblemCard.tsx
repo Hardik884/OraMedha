@@ -49,6 +49,23 @@ const SEVERITY_TEXT: Record<string, string> = {
 };
 
 /**
+ * How long the problem has been going on, beside how big it is.
+ *
+ * A separate scale from severity on purpose: a small problem getting worse and a
+ * large one receding are different messages, and the chip must not read as a
+ * second opinion on urgency. Hence the muted treatment — a border and a word,
+ * never a filled badge competing with the severity label.
+ *
+ * "Improving" earns the only positive colour on a problem card. It is still a
+ * problem; the direction of travel is simply worth seeing without expanding.
+ */
+const TREND_TONE: Record<string, string> = {
+  worsening: "border-severity-high/40 text-severity-high",
+  improving: "border-success/40 text-success",
+  neutral: "border-border text-text-secondary",
+};
+
+/**
  * One problem, left column. Collapsed it shows only the title, one concrete
  * summary line, and a short plain-English explanation — nothing a dentist has to
  * decode. "Show more" reveals how to fix it and why we think it, and nothing
@@ -101,6 +118,16 @@ export function ProblemCard({ problem }: { problem: ProblemView }) {
             >
               {SEVERITY_LABEL[problem.severity] ?? SEVERITY_LABEL.info}
             </span>
+            {problem.trend && (
+              <span
+                className={cn(
+                  "text-[10px] font-medium rounded-full border px-1.5 py-px leading-4",
+                  TREND_TONE[problem.trend.tone] ?? TREND_TONE.neutral,
+                )}
+              >
+                {problem.trend.label}
+              </span>
+            )}
           </div>
           <div className="flex items-start justify-between gap-4">
             <h3 className="text-[15px] font-semibold text-text-primary leading-snug">{problem.title}</h3>
@@ -145,6 +172,14 @@ export function ProblemCard({ problem }: { problem: ProblemView }) {
                   <div>
                     <p className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-1">Why we think this</p>
                     <p className="text-sm text-text-body leading-relaxed">{problem.whyWeThink}</p>
+                  </div>
+                )}
+                {/* The sentence behind the chip. On the card face there is only
+                    room for two words; this is what those two words mean. */}
+                {problem.trend && (
+                  <div>
+                    <p className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-1">How long this has been going on</p>
+                    <p className="text-sm text-text-body leading-relaxed">{problem.trend.detail}</p>
                   </div>
                 )}
                 {/* Snooze — the one place the dentist can tell the briefing it

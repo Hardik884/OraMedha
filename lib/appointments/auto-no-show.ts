@@ -87,13 +87,16 @@ export async function autoMarkNoShowForClinic(
   // entry (check-in is what creates one, and it moves status off `scheduled`
   // in the same action), so this is expected to be a no-op in practice. It
   // exists so a no-show is never left showing as waiting/in_progress on a
-  // live queue board if that invariant is ever violated some other way.
+  // live queue board if that invariant is ever violated some other way. The
+  // entry is removed from the live queue, never marked completed: nothing was
+  // completed, and a completion stamp here would be an invented visit end.
   if (transitionedIds.length > 0) {
     await db
       .from("queue_entries")
-      .update({ status: "completed", completed_at: now })
+      .update({ removed_at: now })
       .eq("clinic_id", clinicId)
       .in("appointment_id", transitionedIds)
+      .is("removed_at", null)
       .in("status", ["waiting", "in_progress"]);
   }
 

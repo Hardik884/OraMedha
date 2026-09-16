@@ -68,8 +68,19 @@ export class DentGrowMetricsEngine extends MetricsEngine {
    * some individual calculations fail; never throws for a single bad metric.
    */
   async calculateMetrics(clinicId: string, date: string): Promise<Metric[]> {
+    return (await this.measureDay(clinicId, date)).metrics;
+  }
+
+  /**
+   * Calculate a day's metrics AND report how the records behind them were read,
+   * so a stored reading can say whether it knew anything the day did not.
+   */
+  async measureDay(
+    clinicId: string,
+    date: string,
+  ): Promise<{ metrics: Metric[]; knowledge: ClinicDataSnapshot["knowledge"]; timezone: string | undefined }> {
     const snapshot = await this.repository.getClinicSnapshot(clinicId, date);
-    return calculateFromSnapshot(snapshot, this.log);
+    return { metrics: calculateFromSnapshot(snapshot, this.log), knowledge: snapshot.knowledge, timezone: snapshot.timezone };
   }
 
   /**

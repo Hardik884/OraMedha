@@ -317,6 +317,17 @@ export function buildDiagnosis(
       severity: severity.severity,
       confidence: confidence.confidence,
       persistence: persistence.persistence,
+      // Copied, not recomputed: classifyPersistence above already derived every
+      // one of these. Carried as a typed field so a projection can say "third
+      // day running" without reaching into the persistence evidence note's
+      // untyped `data` bag to find the number.
+      persistenceDetail: {
+        consecutiveDays: persistence.consecutiveDays,
+        priorFiredDays: persistence.firedDates.length,
+        unknownDays: persistence.unknownDates.length,
+        historyDaysSupplied: persistence.suppliedDays,
+        cappedByUnknown: persistence.cappedByUnknown,
+      },
       signalIds: draft.contributing.map((signal) => signal.id),
       metricIds,
       hypotheses,

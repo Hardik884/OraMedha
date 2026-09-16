@@ -119,7 +119,7 @@ export const DISCRIMINATORS = {
     portMethod: null,
   },
 
-  // ---- requires entity-level data (Phase 5B) ------------------------------
+  // ---- requires entity-level data (served by the ledger / context port) ----
   CANCELLATION_TIMING: {
     slug: "cancellation_timing",
     description:
@@ -130,14 +130,14 @@ export const DISCRIMINATORS = {
   CANCELLATION_SLOT_CLUSTERING: {
     slug: "cancellation_slot_clustering",
     description:
-      "The distribution of cancelled and missed appointments across time-of-day slots and treatment types: it separates attrition concentrated in a subset of slots from attrition spread evenly.",
+      "The distribution of cancelled and missed appointments across time-of-day slots: it separates attrition concentrated in a subset of slots from attrition spread evenly. Treatment type is only a secondary lens and usually absent: an appointment records no booked treatment type, so a type is known only where a treatment was recorded against the lost appointment itself, and type concentration is not called unless enough lost appointments carry one.",
     availability: Availability.REQUIRES_ENTITY_DATA,
     portMethod: "listCancellationEvents",
   },
   SLOT_REFILL_OUTCOME: {
     slug: "slot_refill_outcome",
     description:
-      "Whether each cancelled slot was subsequently filled by another appointment on the same day: it separates lost capacity from recovered capacity.",
+      "Whether each cancelled slot is now occupied by another live appointment at the same start time with the same dentist: it separates lost capacity from recovered capacity. A slot refilled at a shifted time is not matched, so this UNDER-reports recovery.",
     availability: Availability.REQUIRES_ENTITY_DATA,
     portMethod: "listCancellationEvents",
   },
@@ -176,13 +176,6 @@ export const DISCRIMINATORS = {
     availability: Availability.REQUIRES_ENTITY_DATA,
     portMethod: "listAppointmentArrivals",
   },
-  RECALL_CONTACT_ATTEMPTS: {
-    slug: "recall_contact_attempts",
-    description:
-      "Contact attempts recorded against each overdue follow-up, with outcome: it separates recalls never attempted from recalls attempted and not reaching the patient.",
-    availability: Availability.REQUIRES_ENTITY_DATA,
-    portMethod: "listRecallContactAttempts",
-  },
   COMPLETED_TREATMENT_MIX: {
     slug: "completed_treatment_mix",
     description:
@@ -191,18 +184,36 @@ export const DISCRIMINATORS = {
     portMethod: "listCompletedTreatments",
   },
 
-  // ---- requires a new metric ----------------------------------------------
+  // ---- requires data capture ----------------------------------------------
+  //
+  // Audited against the schema in the ledger tranche. Each description says
+  // exactly what IS recorded and what is not, because "not recorded" and
+  // "partially recorded" bias a reading in different directions.
   REMINDER_DELIVERY_LOG: {
     slug: "reminder_delivery_log",
     description:
-      "Whether an appointment reminder was dispatched and delivered for each affected appointment. NOT RECORDED: OraMedha sends no reminders and keeps no dispatch log, so a reminder that was never sent and one that was sent and ignored are indistinguishable. Needs a communications log keyed to the appointment.",
+      "Whether an appointment reminder was dispatched and delivered for each affected appointment. PARTIALLY RECORDED: `reminder_logs` records that a staff member confirmed sending a patient a message of a given kind, but it is keyed to the patient rather than the appointment, and records no delivery, read or reply — so a reminder that was sent and ignored and one that never arrived are indistinguishable, and a call made outside the send list leaves no row. Needs a communications record keyed to the appointment, with delivery status.",
+    availability: Availability.REQUIRES_DATA_CAPTURE,
+    portMethod: null,
+  },
+  RECALL_CONTACT_ATTEMPTS: {
+    slug: "recall_contact_attempts",
+    description:
+      "Contact attempts recorded against each overdue follow-up, with outcome: it separates recalls never attempted from recalls attempted and not reaching the patient. PARTIALLY RECORDED: `reminder_logs` holds a staff-confirmed send per patient and message kind, but not per follow-up, and nothing records whether the patient was reached. Absence of a send is not evidence no attempt was made (a phone call leaves no row), and a send cannot say whether it reached anyone — so neither hypothesis can be settled. Previously catalogued as entity data served by a port method that could only ever return null.",
+    availability: Availability.REQUIRES_DATA_CAPTURE,
+    portMethod: null,
+  },
+  CHARGE_RECONCILIATION: {
+    slug: "charge_reconciliation",
+    description:
+      "Work delivered matched against what was charged for it. NOT RECORDED AS SUCH: in OraMedha the treatment row IS the charge, so work that was done and never written up leaves no row at all and is invisible to `outstanding_invoice_ageing` however that ageing reads. The ledger can see two narrower proxies — an attended appointment with no treatment recorded against it, and a completed treatment with a zero total charge — but neither proves unbilled work: a review visit legitimately records nothing. Needs a record of work performed that is independent of the charge.",
     availability: Availability.REQUIRES_DATA_CAPTURE,
     portMethod: null,
   },
   BOOKING_CHANNEL_ACTIVITY: {
     slug: "booking_channel_activity",
     description:
-      "Booking requests received and declined per channel, including calls not converted to appointments. PARTIALLY RECORDED: `appointments.source` gives the channel for bookings that were made, but an enquiry that never became an appointment leaves no row at all — and the unconverted side is the half that separates open slots nobody asked for from open slots never offered.",
+      "Booking requests received and declined per channel, including calls not converted to appointments. PARTIALLY RECORDED: `appointments.source` gives the channel for bookings that were made (a visit the system creates from a follow-up is recorded as `other`), but an enquiry that never became an appointment leaves no row at all — and the unconverted side is the half that separates open slots nobody asked for from open slots never offered.",
     availability: Availability.REQUIRES_DATA_CAPTURE,
     portMethod: null,
   },
@@ -230,7 +241,7 @@ export const DISCRIMINATORS = {
   PATIENT_ACQUISITION_SOURCE: {
     slug: "patient_acquisition_source",
     description:
-      "Referral source and enquiry volume per channel for new patients. PARTIALLY RECORDED: `appointments.source` gives the channel each new patient arrived through, but enquiries that never became appointments are not recorded — and without them, fewer enquiries reaching the clinic cannot be separated from enquiries arriving and not converting.",
+      "Referral source and enquiry volume per channel for new patients. PARTIALLY RECORDED: `appointments.source` gives the channel each new patient's appointment was booked through (not a referral source), but enquiries that never became appointments are not recorded — and without them, fewer enquiries reaching the clinic cannot be separated from enquiries arriving and not converting.",
     availability: Availability.REQUIRES_DATA_CAPTURE,
     portMethod: null,
   },
@@ -244,7 +255,7 @@ export const DISCRIMINATORS = {
   TREATMENT_COST_BARRIER: {
     slug: "treatment_cost_barrier",
     description:
-      "Quoted value per unbooked plan alongside payment-plan availability and uptake. PARTIALLY RECORDED: quoted values are available and already surfaced by `listPendingTreatments`, but OraMedha has no concept of a payment plan, so a plan deferred over cost cannot be separated from one deferred for another reason.",
+      "Quoted value per unbooked plan alongside payment-plan availability and uptake. PARTIALLY RECORDED: quoted values are available from `listPendingTreatments`, and `patients.payment_plan_until` records that a patient has an agreed payment plan — but not what it covers, and nothing records WHY planned work was deferred, so a plan deferred over cost cannot be separated from one deferred for another reason.",
     availability: Availability.REQUIRES_DATA_CAPTURE,
     portMethod: null,
   },

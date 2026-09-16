@@ -28,6 +28,28 @@ const PURE_ENGINE_FILES = [
   "business-brain/engines/signals/**/*.ts",
   "business-brain/engines/diagnosis/**/*.ts",
   "business-brain/engines/action/**/*.ts",
+  // The ledger graph walks relational facts an adapter already fetched. It is the
+  // module most tempting to "just query" from, so it gets the same boundary.
+  "business-brain/ledger/**/*.ts",
+  // Opportunities pair recorded surplus with recorded demand. Nothing here may
+  // read a database, call a model or reach the network to "find" more demand.
+  "business-brain/engines/opportunity/**/*.ts",
+  // The prioritiser ranks what producers already found. It must never fetch more.
+  "business-brain/engines/findings/**/*.ts",
+  // Trajectories are measured from history the run already holds. No reads, no
+  // clock, no model — and nothing that could quietly become a forecast.
+  "business-brain/engines/trajectory/**/*.ts",
+  "business-brain/engines/root-cause/**/*.ts",
+  "business-brain/engines/learning/**/*.ts",
+  "business-brain/engines/outcome/**/*.ts",
+  // Clinic memory is derived from stored evidence. It may never read a database,
+  // a clock or a model: a memory that queried for itself could not be rebuilt.
+  "business-brain/memory/**/*.ts",
+  // Point-in-time history, provenance and the training contract decide what the
+  // past knew. A module that could read a clock or a database could not.
+  "business-brain/history/**/*.ts",
+  "business-brain/provenance/**/*.ts",
+  "business-brain/training/**/*.ts",
 ];
 
 const FORBIDDEN_IMPORT_PATTERNS = [

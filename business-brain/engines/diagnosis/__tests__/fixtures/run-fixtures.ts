@@ -93,6 +93,20 @@ export const HEALTHY: MetricValues = {
   // reports as lower decidability — a fixture gap reading as a weaker run.
   [MetricKey.CAPACITY_BOOKED_NEXT_7D]: 72,
   [MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D]: 0,
+  // The window metrics, present for the same reason CAPACITY_BOOKED_NEXT_7D is:
+  // every rule that can reach a verdict without a prior period must be able to on
+  // this baseline, or its matcher reads as undecidable everywhere and a fixture
+  // gap shows up as a weaker run. Each value sits comfortably inside its limit.
+  [MetricKey.PATIENTS_REACTIVATION_CANDIDATES]: 8,
+  [MetricKey.SCHEDULING_CANCELLATION_RATE_30D]: 4,
+  [MetricKey.SCHEDULING_NO_SHOW_RATE_30D]: 3,
+  [MetricKey.SCHEDULING_BOOKING_LEAD_TIME_DAYS]: 5,
+  [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: 4,
+  [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: 64,
+  [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 71,
+  [MetricKey.REVENUE_COLLECTION_RATE_30D]: 94,
+  [MetricKey.REVENUE_PRODUCTION_30D]: 480_000,
+  [MetricKey.REVENUE_COLLECTED_30D]: 451_000,
 };
 
 /** Idle chairs, thin book, and a large accepted-treatment backlog. */
@@ -266,6 +280,58 @@ export const FORWARD_SCHEDULE_GAP: MetricValues = {
 export const REPEAT_NON_ATTENDANCE: MetricValues = {
   ...HEALTHY,
   [MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D]: 3,
+};
+
+/**
+ * A patient base that has quietly emptied, with a clean recall list.
+ *
+ * The whole point of the scenario is what is NOT here: follow-ups stay within
+ * their limit and returning volume holds, so neither retention signal fires and
+ * dormant_patient_base is the only pattern that can see these patients at all.
+ */
+export const DORMANT_PATIENT_BASE: MetricValues = {
+  ...HEALTHY,
+  [MetricKey.PATIENTS_REACTIVATION_CANDIDATES]: 140,
+};
+
+/**
+ * Appointments running well over their booked lengths, on a calm day.
+ *
+ * The queue metrics stay healthy deliberately: with a queue today the finding
+ * belongs to throughput_congestion as its service-time cause, and the matcher
+ * stands down. This is the absorbed case — the clinic runs late and nobody waits
+ * in a measurable way.
+ */
+export const CHRONIC_OVERRUN: MetricValues = {
+  ...HEALTHY,
+  [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: 38,
+  [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: 71,
+};
+
+/**
+ * A month collecting well under what was produced, with every day looking fine.
+ *
+ * Today's collection stays healthy on purpose: the daily collection-lagging rule
+ * must NOT fire, or collection_gap claims the story and this matcher stands down.
+ * That is exactly the case the pattern exists for — a shortfall spread so evenly
+ * that no single day shows it.
+ */
+export const PRODUCTION_COLLECTION_GAP: MetricValues = {
+  ...HEALTHY,
+  [MetricKey.REVENUE_COLLECTION_RATE_30D]: 61,
+  [MetricKey.REVENUE_PRODUCTION_30D]: 520_000,
+  [MetricKey.REVENUE_COLLECTED_30D]: 317_000,
+};
+
+/**
+ * Chair time going unused across the window while today looks ordinary.
+ *
+ * Today's utilization stays healthy so the daily rule does not fire: the point is
+ * that the month is the only timescale on which this clinic's problem is visible.
+ */
+export const SUSTAINED_IDLE_CAPACITY: MetricValues = {
+  ...HEALTHY,
+  [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 28,
 };
 
 /**

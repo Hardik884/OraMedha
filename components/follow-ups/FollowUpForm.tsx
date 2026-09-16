@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "sonner";
 import { useState, useTransition, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
@@ -366,6 +367,8 @@ export function FollowUpForm({
       }
 
       setFormSuccess(followUpId ? "Follow-up updated." : "Follow-up created.");
+      const bookingNotice = followUpId ? undefined : (result.data as { bookingNotice?: string } | null)?.bookingNotice;
+      if (bookingNotice) toast.warning(bookingNotice);
 
       // Invalidate only the follow-ups cache.
       queryClient.invalidateQueries({ queryKey: queryKeys.followUps.all });

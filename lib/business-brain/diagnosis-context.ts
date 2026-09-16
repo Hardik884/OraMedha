@@ -3,24 +3,42 @@
  *
  * The Diagnosis Engine reasons over daily aggregates, which is enough to notice
  * that something is wrong but often not enough to say WHICH of several
- * explanations fits. Ten of its twenty-seven discriminators are catalogued as
- * `requires_entity_data`, and this is the data they require: individual
- * cancellations, individual unpaid balances, individual overdue recalls.
+ * explanations fits. Its `requires_entity_data` discriminators need exactly this:
+ * individual cancellations, individual unpaid balances, individual visits.
  *
  * Same split as the other adapters — the port lives in `business-brain/` and
  * knows nothing about Postgres; this is the only place these tables are read.
  *
  * ## What this deployment can and cannot answer
  *
- * Six of the seven methods are answerable from DentGrow's schema. One is not,
- * and it returns `null` rather than an empty array, because `[]` would claim the
- * clinic has no overdue recalls rather than admitting nothing records the
- * answer. See `listRecallContactAttempts`.
+ * All six methods are answerable from DentGrow's schema. A seventh,
+ * `listRecallContactAttempts`, was removed in the ledger tranche: it could only
+ * ever return `null`, because nothing records a contact attempt against a
+ * follow-up, and its discriminator is now catalogued as data capture.
+ *
+ * `SupabaseClinicLedger` extends this class with the general relational reads.
  *
  * Two of the six rest on documented approximations, noted at each method. Both
  * are the same shape as the approximation already accepted for `isScheduled`:
  * the direction of the error is known and stated, rather than the reading being
  * presented as exact.
+ *
+ * ## Whole windows or nothing
+ *
+ * Each method answers about its WHOLE window or refuses. When more rows exist
+ * than `window.limit`, it throws an `EntityWindowTooLargeError` rather than
+ * answering from the first N — an earliest-first (or newest-first) sample makes
+ * a timing, ageing or concentration reading look complete while describing part
+ * of the window. The service treats a refusal as "could not answer", which
+ * leaves the discriminator undetermined: honest, and exactly what it was before
+ * entity resolution existed. Every follow-up read (history, refills, prior
+ * attendance, collections) is paged whole, under the PostgREST row cap.
+ *
+ * ## Clinic-local time
+ *
+ * Every date and hour handed to the engine is in the clinic's timezone. The
+ * timestamps PostgREST returns are UTC instants; their date and hour digits are
+ * the clinic's only when the clinic is in UTC.
  *
  * ## Read-only
  *
@@ -40,9 +58,16 @@ import type {
   NoShowHistoryRow,
   OutstandingBalanceRow,
   PendingTreatmentRow,
-  RecallContactAttemptRow,
 } from "@/business-brain";
-import { MetricUnit } from "@/business-brain";
+import {
+  MetricUnit,
+  arrivalRecorded,
+  canonicalTreatmentType,
+  cancellationSide,
+  groupableTreatmentType,
+  noShowBasis,
+  treatmentPerformedAt,
+} from "@/business-brain";
 import type { Database } from "@/types/database.types";
 import { getUtcBoundariesForLocalDate } from "@/lib/utils";
 import { treatmentTotalCharge } from "@/lib/billing/balance";
@@ -51,15 +76,19 @@ import {
   type PayoutPaymentLike,
   type PayoutTreatmentLike,
 } from "@/lib/billing/payout";
+import { readAll, readUpTo, type PageQuery } from "./paged-read";
 
-/** Narrow `unknown` PostgREST payloads to the row shape a query selected. */
-function rows<T>(data: unknown): T[] {
-  return (data ?? []) as T[];
-}
+/** Ids per `in (...)` list: long lists put the whole query in the URL. */
+const ID_CHUNK = 100;
+/** Most rows a whole follow-up read may return before it is refused. */
+const MAX_FOLLOW_UP_ROWS = 250_000;
 
-/** The "YYYY-MM-DD" part of an ISO timestamp. */
-function datePart(iso: string): string {
-  return iso.slice(0, 10);
+/** A window with more rows than its limit: answered about none of it rather than part of it. */
+export class EntityWindowTooLargeError extends Error {
+  constructor(label: string, limit: number) {
+    super(`${label}: more than ${limit} rows in the window; not answered from part of it.`);
+    this.name = "EntityWindowTooLargeError";
+  }
 }
 
 /** Whole days between two "YYYY-MM-DD" dates, never negative. */
@@ -70,6 +99,12 @@ function ageInDays(from: string, to: string): number {
 
 function currency(value: number): { value: number; unit: MetricUnit } {
   return { value, unit: MetricUnit.CURRENCY };
+}
+
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 /**
@@ -89,17 +124,48 @@ function bounds(window: EntityWindow, timezone: string): { start: string; end: s
 }
 
 export class SupabaseDiagnosisContext implements DiagnosisContextPort {
-  private readonly db: SupabaseClient<Database>;
-  private readonly timezone: string;
+  protected readonly db: SupabaseClient<Database>;
+  protected readonly timezone: string;
+  private readonly dateFormat: Intl.DateTimeFormat;
+  private readonly hourFormat: Intl.DateTimeFormat;
 
   /**
-   * @param timezone Clinic IANA timezone for the business-date window bounds.
-   *   Defaults to "UTC" so callers/tests that don't supply it keep the old
-   *   UTC-midnight boundaries exactly; production passes the real clinic tz.
+   * @param timezone Clinic IANA timezone for the business-date window bounds and
+   *   every date and hour handed to the engine. Defaults to "UTC" so callers and
+   *   tests that don't supply it keep UTC behaviour; production passes the real
+   *   clinic timezone.
    */
   constructor(db: SupabaseClient<Database>, timezone: string = "UTC") {
     this.db = db;
     this.timezone = timezone;
+    this.dateFormat = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+    this.hourFormat = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", hourCycle: "h23" });
+  }
+
+  /** The clinic-local "YYYY-MM-DD" of an instant. */
+  protected localDate(iso: string): string {
+    return this.dateFormat.format(new Date(iso));
+  }
+
+  /** The clinic-local "HH:00" of an instant. */
+  protected localHour(iso: string): string {
+    return `${this.hourFormat.format(new Date(iso)).padStart(2, "0")}:00`;
+  }
+
+  /** The window's rows, whole, or a refusal when there are more than its limit. */
+  private async windowRows<T>(label: string, page: PageQuery, limit: number): Promise<T[]> {
+    const { rows, truncated } = await readUpTo<T>(label, page, limit);
+    if (truncated) throw new EntityWindowTooLargeError(label, limit);
+    return rows;
+  }
+
+  /** An ordered query over ids, chunked and paged whole. */
+  private async byIds<T>(label: string, ids: readonly string[], page: (chunk: string[], from: number, to: number) => ReturnType<PageQuery>): Promise<T[]> {
+    const out: T[] = [];
+    for (const chunk of chunks([...new Set(ids)], ID_CHUNK)) {
+      out.push(...(await readAll<T>(label, (from, to) => page(chunk, from, to), MAX_FOLLOW_UP_ROWS)));
+    }
+    return out;
   }
 
   /**
@@ -118,9 +184,9 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    * diagnosis-context outstanding/collected mismatch).
    *
    * Loads EVERY billable treatment and payment the given patients have as of
-   * `asOfDate` — not just the ones inside the caller's page or window — because
-   * allocation is oldest-first across a patient's WHOLE ledger; allocating
-   * against a partial treatment set could credit the wrong treatment.
+   * `asOfDate` — paged whole, because allocation is oldest-first across a
+   * patient's WHOLE ledger and allocating against a partial set could credit the
+   * wrong treatment.
    */
   private async collectedByTreatment(
     clinicId: string,
@@ -131,43 +197,41 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
     if (patientIds.length === 0) return collected;
 
     const endOfDay = getUtcBoundariesForLocalDate(asOfDate, this.timezone).end;
-    const [treatmentsRes, paymentsRes] = await Promise.all([
-      this.db
-        .from("treatments")
-        .select(
-          "id, patient_id, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at, created_at",
-        )
-        .eq("clinic_id", clinicId)
-        .is("deleted_at", null)
-        .in("status", ["completed", "in_progress"])
-        .in("patient_id", patientIds as string[])
-        .lte("created_at", endOfDay),
-      this.db
-        .from("payments")
-        .select("patient_id, treatment_id, amount")
-        .eq("clinic_id", clinicId)
-        .is("deleted_at", null)
-        .in("patient_id", patientIds as string[])
-        .lte("payment_date", asOfDate),
+    const [treatments, payments] = await Promise.all([
+      this.byIds<PayoutTreatmentLike & { patient_id: string }>("collections (treatments)", patientIds, (chunk, from, to) =>
+        this.db
+          .from("treatments")
+          .select("id, patient_id, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at, created_at")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .in("status", ["completed", "in_progress"])
+          .in("patient_id", chunk)
+          .lte("created_at", endOfDay)
+          .order("id", { ascending: true })
+          .range(from, to),
+      ),
+      this.byIds<PayoutPaymentLike & { patient_id: string | null }>("collections (payments)", patientIds, (chunk, from, to) =>
+        this.db
+          .from("payments")
+          .select("id, patient_id, treatment_id, amount")
+          .eq("clinic_id", clinicId)
+          .is("deleted_at", null)
+          .in("patient_id", chunk)
+          .lte("payment_date", asOfDate)
+          .order("id", { ascending: true })
+          .range(from, to),
+      ),
     ]);
-    if (treatmentsRes.error) {
-      throw new Error(`collections (treatments): ${treatmentsRes.error.message}`);
-    }
-    if (paymentsRes.error) {
-      throw new Error(`collections (payments): ${paymentsRes.error.message}`);
-    }
 
     const treatmentsByPatient = new Map<string, (PayoutTreatmentLike & { patient_id: string })[]>();
-    for (const t of rows<
-      PayoutTreatmentLike & { patient_id: string }
-    >(treatmentsRes.data)) {
+    for (const t of treatments) {
       const list = treatmentsByPatient.get(t.patient_id) ?? [];
       list.push(t);
       treatmentsByPatient.set(t.patient_id, list);
     }
 
     const paymentsByPatient = new Map<string, PayoutPaymentLike[]>();
-    for (const p of rows<PayoutPaymentLike & { patient_id: string | null }>(paymentsRes.data)) {
+    for (const p of payments) {
       if (!p.patient_id) continue;
       const list = paymentsByPatient.get(p.patient_id) ?? [];
       list.push(p);
@@ -204,84 +268,115 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    */
   async listCancellationEvents(window: EntityWindow): Promise<readonly CancellationEvent[]> {
     const { start, end } = bounds(window, this.timezone);
-    const { data, error } = await this.db
-      .from("appointments")
-      .select("id, patient_id, dentist_id, scheduled_at, status")
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .in("status", ["cancelled", "no_show"])
-      .gte("scheduled_at", start)
-      .lte("scheduled_at", end)
-      .order("scheduled_at", { ascending: true })
-      .limit(window.limit);
-    if (error) throw new Error(`cancellation events: ${error.message}`);
-
-    const lost = rows<{
-      id: string;
-      patient_id: string;
-      dentist_id: string;
-      scheduled_at: string;
-      status: string;
-    }>(data);
+    const lost = await this.windowRows<{ id: string; patient_id: string; dentist_id: string; scheduled_at: string; status: string }>(
+      "cancellation events",
+      (from, to) =>
+        this.db
+          .from("appointments")
+          .select("id, patient_id, dentist_id, scheduled_at, status")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .in("status", ["cancelled", "no_show"])
+          .gte("scheduled_at", start)
+          .lte("scheduled_at", end)
+          .order("scheduled_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
     if (lost.length === 0) return [];
 
     const ids = lost.map((a) => a.id);
-
-    const [historyResult, treatmentResult, refillResult] = await Promise.all([
-      this.db
-        .from("appointment_history")
-        .select("appointment_id, action, new_value, timestamp")
-        .in("appointment_id", ids)
-        .order("timestamp", { ascending: true }),
-      this.db
-        .from("treatments")
-        .select("appointment_id, treatment_type")
-        .eq("clinic_id", window.clinicId)
-        .is("deleted_at", null)
-        .in("appointment_id", ids),
+    const [history, treatmentRows, refills, closures] = await Promise.all([
+      this.byIds<{ id: string; appointment_id: string; action: string; new_value: unknown; timestamp: string; performed_by: string | null; performed_by_role: string | null }>(
+        "cancellation history",
+        ids,
+        (chunk, from, to) =>
+          this.db
+            .from("appointment_history")
+            .select("id, appointment_id, action, new_value, timestamp, performed_by, performed_by_role")
+            .in("appointment_id", chunk)
+            .order("timestamp", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to),
+      ),
+      this.byIds<{ id: string; appointment_id: string | null; treatment_type: string }>("cancellation treatments", ids, (chunk, from, to) =>
+        this.db
+          .from("treatments")
+          .select("id, appointment_id, treatment_type")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .in("appointment_id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to),
+      ),
       // Anything still live in the same slot, for the same dentist. If one
       // exists, the capacity was recovered and the cancellation cost nothing.
-      this.db
-        .from("appointments")
-        .select("dentist_id, scheduled_at, status")
-        .eq("clinic_id", window.clinicId)
-        .is("deleted_at", null)
-        .not("status", "in", "(cancelled,no_show)")
-        .gte("scheduled_at", start)
-        .lte("scheduled_at", end),
+      // Read whole: a capped read made refilled slots look lost.
+      readAll<{ dentist_id: string; scheduled_at: string }>(
+        "slot refill",
+        (from, to) =>
+          this.db
+            .from("appointments")
+            .select("dentist_id, scheduled_at")
+            .eq("clinic_id", window.clinicId)
+            .is("deleted_at", null)
+            .not("status", "in", "(cancelled,no_show)")
+            .gte("scheduled_at", start)
+            .lte("scheduled_at", end)
+            .order("id", { ascending: true })
+            .range(from, to),
+        MAX_FOLLOW_UP_ROWS,
+      ),
+      // Days the clinic had marked closed: a staff cancellation on one is the
+      // clinic's, not the patient's.
+      readAll<{ date: string }>(
+        "cancellation closures",
+        (from, to) =>
+          this.db
+            .from("unavailable_dates")
+            .select("date")
+            .eq("clinic_id", window.clinicId)
+            .gte("date", window.from)
+            .lte("date", window.to)
+            .order("date", { ascending: true })
+            .range(from, to),
+        MAX_FOLLOW_UP_ROWS,
+      ),
     ]);
-    if (historyResult.error) throw new Error(`cancellation history: ${historyResult.error.message}`);
-    if (treatmentResult.error) throw new Error(`cancellation treatments: ${treatmentResult.error.message}`);
-    if (refillResult.error) throw new Error(`slot refill: ${refillResult.error.message}`);
+    const closedDays = new Set(closures.map((c) => c.date));
 
     // Earliest recorded cancellation per appointment: a record reopened and
-    // re-cancelled should be dated from when the clinic first lost the slot.
+    // re-cancelled should be dated from when the clinic first lost the slot —
+    // and the side is read from that same row.
     const cancelledAt = new Map<string, string>();
-    for (const h of rows<{
-      appointment_id: string;
-      action: string;
-      new_value: unknown;
-      timestamp: string;
-    }>(historyResult.data)) {
+    const cancelledByRole = new Map<string, string | null>();
+    const statusChanges = new Map<string, { statusAfter: string | null; at: string; byPerson: boolean | null }[]>();
+    for (const h of history) {
       const status = (h.new_value as { status?: string } | null)?.status;
+      const changes = statusChanges.get(h.appointment_id) ?? [];
+      changes.push({ statusAfter: status ?? null, at: h.timestamp, byPerson: h.performed_by !== null });
+      statusChanges.set(h.appointment_id, changes);
       if (status !== "cancelled" && h.action !== "cancelled") continue;
-      if (!cancelledAt.has(h.appointment_id)) cancelledAt.set(h.appointment_id, h.timestamp);
-    }
-
-    const treatmentType = new Map<string, string>();
-    for (const t of rows<{ appointment_id: string | null; treatment_type: string }>(
-      treatmentResult.data,
-    )) {
-      if (t.appointment_id && !treatmentType.has(t.appointment_id)) {
-        treatmentType.set(t.appointment_id, t.treatment_type);
+      if (!cancelledAt.has(h.appointment_id)) {
+        cancelledAt.set(h.appointment_id, h.timestamp);
+        cancelledByRole.set(h.appointment_id, h.performed_by_role);
       }
     }
 
-    const filledSlots = new Set(
-      rows<{ dentist_id: string; scheduled_at: string }>(refillResult.data).map(
-        (a) => `${a.dentist_id}|${a.scheduled_at}`,
-      ),
-    );
+    // First recorded treatment type per appointment, by id order so the choice
+    // is stable. Spellings of one type are one type; a consultation-only record
+    // names no treatment.
+    const treatmentType = new Map<string, string>();
+    for (const t of treatmentRows) {
+      const type = groupableTreatmentType(t.treatment_type);
+      if (t.appointment_id && type !== null && !treatmentType.has(t.appointment_id)) {
+        treatmentType.set(t.appointment_id, type);
+      }
+    }
+
+    // Instants compared by value: the same moment can be spelled two ways.
+    const filledSlots = new Set(refills.map((a) => `${a.dentist_id}|${Date.parse(a.scheduled_at)}`));
 
     return lost.map((a) => {
       const cancelled = a.status === "cancelled" ? (cancelledAt.get(a.id) ?? null) : null;
@@ -296,13 +391,22 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
             );
       return {
         appointmentId: a.id,
-        date: datePart(a.scheduled_at),
+        date: this.localDate(a.scheduled_at),
         scheduledStart: a.scheduled_at,
+        localHour: this.localHour(a.scheduled_at),
         cancelledAt: cancelled,
         noticeHours,
         outcome: a.status === "no_show" ? ("no_show" as const) : ("cancelled" as const),
         treatmentType: treatmentType.get(a.id) ?? null,
-        slotRefilled: filledSlots.has(`${a.dentist_id}|${a.scheduled_at}`),
+        slotRefilled: filledSlots.has(`${a.dentist_id}|${Date.parse(a.scheduled_at)}`),
+        ...(a.status === "no_show"
+          ? { noShowBasis: noShowBasis(statusChanges.get(a.id) ?? []) }
+          : {
+              side: cancellationSide({
+                actorRole: cancelledByRole.get(a.id) ?? null,
+                onClosedDay: closedDays.has(this.localDate(a.scheduled_at)),
+              }),
+            }),
       };
     });
   }
@@ -317,52 +421,61 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    */
   async listNoShowHistory(window: EntityWindow): Promise<readonly NoShowHistoryRow[]> {
     const { start, end } = bounds(window, this.timezone);
-    const { data, error } = await this.db
-      .from("appointments")
-      .select("id, patient_id, scheduled_at")
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .eq("status", "no_show")
-      .gte("scheduled_at", start)
-      .lte("scheduled_at", end)
-      .order("scheduled_at", { ascending: true })
-      .limit(window.limit);
-    if (error) throw new Error(`no-show history: ${error.message}`);
-
-    const missed = rows<{ id: string; patient_id: string; scheduled_at: string }>(data);
+    const missed = await this.windowRows<{ id: string; patient_id: string; scheduled_at: string }>(
+      "no-show history",
+      (from, to) =>
+        this.db
+          .from("appointments")
+          .select("id, patient_id, scheduled_at")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .eq("status", "no_show")
+          .gte("scheduled_at", start)
+          .lte("scheduled_at", end)
+          .order("scheduled_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
     if (missed.length === 0) return [];
 
-    const patientIds = [...new Set(missed.map((m) => m.patient_id))];
-    const { data: priorData, error: priorError } = await this.db
-      .from("appointments")
-      .select("patient_id, scheduled_at, status")
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .in("patient_id", patientIds)
-      .in("status", ["completed", "no_show"])
-      .order("scheduled_at", { ascending: true });
-    if (priorError) throw new Error(`no-show prior history: ${priorError.message}`);
+    const prior = await this.byIds<{ patient_id: string; scheduled_at: string; status: string }>(
+      "no-show prior history",
+      missed.map((m) => m.patient_id),
+      (chunk, from, to) =>
+        this.db
+          .from("appointments")
+          .select("patient_id, scheduled_at, status")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .in("patient_id", chunk)
+          .in("status", ["completed", "no_show"])
+          .order("scheduled_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+    );
 
-    const byPatient = new Map<string, { scheduled_at: string; status: string }[]>();
-    for (const a of rows<{ patient_id: string; scheduled_at: string; status: string }>(priorData)) {
+    const byPatient = new Map<string, { scheduledMs: number; status: string; scheduled_at: string }[]>();
+    for (const a of prior) {
       const list = byPatient.get(a.patient_id) ?? [];
-      list.push({ scheduled_at: a.scheduled_at, status: a.status });
+      list.push({ scheduledMs: Date.parse(a.scheduled_at), status: a.status, scheduled_at: a.scheduled_at });
       byPatient.set(a.patient_id, list);
     }
 
     return missed.map((m) => {
-      const history = (byPatient.get(m.patient_id) ?? []).filter(
-        (a) => a.scheduled_at < m.scheduled_at,
-      );
+      const missedMs = Date.parse(m.scheduled_at);
+      const history = (byPatient.get(m.patient_id) ?? [])
+        .filter((a) => a.scheduledMs < missedMs)
+        .sort((a, b) => a.scheduledMs - b.scheduledMs);
       const attended = history.filter((a) => a.status === "completed");
       return {
         patientId: m.patient_id,
         appointmentId: m.id,
-        date: datePart(m.scheduled_at),
+        date: this.localDate(m.scheduled_at),
         priorAttended: attended.length,
         priorMissed: history.length - attended.length,
         lastAttendedDate:
-          attended.length > 0 ? datePart(attended[attended.length - 1].scheduled_at) : null,
+          attended.length > 0 ? this.localDate(attended[attended.length - 1].scheduled_at) : null,
       };
     });
   }
@@ -379,62 +492,68 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    * is a recorded date, not a record that the patient agreed to anything.
    *
    * "Unscheduled" is resolved at the PATIENT level — does this patient have any
-   * upcoming visit — because no treatment-to-appointment link exists. This is
+   * upcoming visit — because nothing links a planned treatment to the future
+   * visit booked to deliver it (`treatments.appointment_id` is the visit the plan
+   * was RECORDED at, not a booking). This is
    * the same approximation the `isScheduled` snapshot field already documents,
    * and it errs the same way: it UNDER-reports. Everything returned is genuinely
    * unbooked; some genuinely unbooked work is missed because the patient happens
    * to have an unrelated appointment.
    *
-   * Ordered NEWEST first: the `limit` cap should drop the OLDEST candidates, not
-   * the most recent — a plan sitting unaddressed for years is far more likely to
-   * have already been resolved, cancelled off-record, or forgotten than one from
-   * last week, so keeping the newest under the cap surfaces the genuinely acute
-   * backlog (audit: row-limit truncation bias).
+   * The whole planned book or nothing: an ageing distribution read from only the
+   * newest plans would understate how old the backlog is.
    */
   async listPendingTreatments(window: EntityWindow): Promise<readonly PendingTreatmentRow[]> {
     const endOfWindow = getUtcBoundariesForLocalDate(window.to, this.timezone).end;
-    const { data, error } = await this.db
-      .from("treatments")
-      .select("id, patient_id, treatment_type, cost, created_at")
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .eq("status", "planned")
-      .lte("created_at", endOfWindow)
-      .order("created_at", { ascending: false })
-      .limit(window.limit);
-    if (error) throw new Error(`pending treatments: ${error.message}`);
-
-    const planned = rows<{
-      id: string;
-      patient_id: string;
-      treatment_type: string;
-      cost: number | string | null;
-      created_at: string;
-    }>(data);
+    const planned = await this.windowRows<{ id: string; patient_id: string; treatment_type: string; cost: number | string | null; created_at: string }>(
+      "pending treatments",
+      (from, to) =>
+        this.db
+          .from("treatments")
+          .select("id, patient_id, treatment_type, cost, created_at")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .eq("status", "planned")
+          .lte("created_at", endOfWindow)
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
     if (planned.length === 0) return [];
 
-    const { data: bookedData, error: bookedError } = await this.db
-      .from("appointments")
-      .select("patient_id")
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .in("patient_id", [...new Set(planned.map((t) => t.patient_id))])
-      .in("status", ["scheduled", "checked_in", "in_progress"])
-      .gt("scheduled_at", endOfWindow);
-    if (bookedError) throw new Error(`pending treatments (booked): ${bookedError.message}`);
-
-    const booked = new Set(rows<{ patient_id: string }>(bookedData).map((a) => a.patient_id));
+    const bookedRows = await this.byIds<{ patient_id: string }>("pending treatments (booked)", planned.map((t) => t.patient_id), (chunk, from, to) =>
+      this.db
+        .from("appointments")
+        .select("patient_id")
+        .eq("clinic_id", window.clinicId)
+        .is("deleted_at", null)
+        .in("patient_id", chunk)
+        .in("status", ["scheduled", "checked_in", "in_progress"])
+        .gt("scheduled_at", endOfWindow)
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+    const booked = new Set(bookedRows.map((a) => a.patient_id));
 
     return planned
       .filter((t) => !booked.has(t.patient_id))
-      .map((t) => ({
-        treatmentId: t.id,
-        patientId: t.patient_id,
-        acceptedOn: datePart(t.created_at),
-        ageDays: ageInDays(datePart(t.created_at), window.to),
-        treatmentType: t.treatment_type,
-        quotedValue: currency(Number(t.cost ?? 0)),
-      }));
+      .flatMap((t) => {
+        // A planned consultation charge is not treatment work awaiting a visit.
+        const treatmentType = groupableTreatmentType(t.treatment_type);
+        if (treatmentType === null) return [];
+        const acceptedOn = this.localDate(t.created_at);
+        return [
+          {
+            treatmentId: t.id,
+            patientId: t.patient_id,
+            acceptedOn,
+            ageDays: ageInDays(acceptedOn, window.to),
+            treatmentType,
+            quotedValue: currency(Number(t.cost ?? 0)),
+          },
+        ];
+      });
   }
 
   /**
@@ -456,35 +575,29 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    * disagreeing about what a patient owes is worse than either definition being
    * wrong (audit: diagnosis-context outstanding formula).
    *
-   * Ordered NEWEST first: the `limit` cap should drop the OLDEST candidates —
-   * the ones most likely already settled — not the most recent, which are the
-   * ones most likely still genuinely owed (audit: row-limit truncation bias).
+   * The whole billable book or nothing: ageing read from only the newest
+   * treatments would understate how old the receivables are.
    *
    * Fully-paid treatments are omitted — an outstanding balance of zero is not
    * outstanding.
    */
   async listOutstandingBalances(window: EntityWindow): Promise<readonly OutstandingBalanceRow[]> {
     const endOfWindow = getUtcBoundariesForLocalDate(window.to, this.timezone).end;
-    const { data, error } = await this.db
-      .from("treatments")
-      .select(
-        "id, patient_id, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at, created_at",
-      )
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .in("status", ["completed", "in_progress"])
-      .lte("created_at", endOfWindow)
-      .order("created_at", { ascending: false })
-      .limit(window.limit);
-    if (error) throw new Error(`outstanding balances: ${error.message}`);
-
-    const billable = rows<
-      PayoutTreatmentLike & {
-        patient_id: string;
-        performed_at: string | null;
-        created_at: string;
-      }
-    >(data);
+    const billable = await this.windowRows<PayoutTreatmentLike & { patient_id: string; performed_at: string | null; created_at: string }>(
+      "outstanding balances",
+      (from, to) =>
+        this.db
+          .from("treatments")
+          .select("id, patient_id, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at, created_at")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .in("status", ["completed", "in_progress"])
+          .lte("created_at", endOfWindow)
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
     if (billable.length === 0) return [];
 
     const patientIds = [...new Set(billable.map((t) => t.patient_id))];
@@ -497,7 +610,7 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
         const outstanding = charge - amountPaid;
         // Dated from when the work was done, falling back to when the record was
         // raised for work still in progress.
-        const raisedOn = datePart(t.performed_at ?? t.created_at);
+        const raisedOn = this.localDate(t.performed_at ?? t.created_at);
         return {
           invoiceId: t.id,
           patientId: t.patient_id,
@@ -522,53 +635,59 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    */
   async listAppointmentArrivals(window: EntityWindow): Promise<readonly AppointmentArrivalRow[]> {
     const { start, end } = bounds(window, this.timezone);
-    const { data, error } = await this.db
-      .from("appointments")
-      .select("id, scheduled_at, duration_minutes")
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .not("status", "in", "(cancelled)")
-      .gte("scheduled_at", start)
-      .lte("scheduled_at", end)
-      .order("scheduled_at", { ascending: true })
-      .limit(window.limit);
-    if (error) throw new Error(`appointment arrivals: ${error.message}`);
-
-    const appointments = rows<{
-      id: string;
-      scheduled_at: string;
-      duration_minutes: number;
-    }>(data);
+    const appointments = await this.windowRows<{ id: string; scheduled_at: string; duration_minutes: number }>(
+      "appointment arrivals",
+      (from, to) =>
+        this.db
+          .from("appointments")
+          .select("id, scheduled_at, duration_minutes")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .not("status", "in", "(cancelled)")
+          .gte("scheduled_at", start)
+          .lte("scheduled_at", end)
+          .order("scheduled_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
     if (appointments.length === 0) return [];
 
-    const { data: queueData, error: queueError } = await this.db
-      .from("queue_entries")
-      .select("appointment_id, checked_in_at, called_at, completed_at")
-      .eq("clinic_id", window.clinicId)
-      .in("appointment_id", appointments.map((a) => a.id));
-    if (queueError) throw new Error(`appointment arrivals (queue): ${queueError.message}`);
+    const queue = await this.byIds<{ appointment_id: string; checked_in_at: string; called_at: string | null; completed_at: string | null }>(
+      "appointment arrivals (queue)",
+      appointments.map((a) => a.id),
+      (chunk, from, to) =>
+        this.db
+          .from("queue_entries")
+          .select("appointment_id, checked_in_at, called_at, completed_at")
+          .eq("clinic_id", window.clinicId)
+          .in("appointment_id", chunk)
+          .order("checked_in_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to),
+    );
 
-    const arrivals = new Map<
-      string,
-      { checked_in_at: string; called_at: string | null; completed_at: string | null }
-    >();
-    for (const q of rows<{
-      appointment_id: string;
-      checked_in_at: string;
-      called_at: string | null;
-      completed_at: string | null;
-    }>(queueData)) {
-      arrivals.set(q.appointment_id, q);
+    // First check-in wins, matching the metrics join: a re-queued patient arrived
+    // when they first arrived.
+    const arrivals = new Map<string, { checked_in_at: string; called_at: string | null; completed_at: string | null }>();
+    for (const q of queue) {
+      if (!arrivals.has(q.appointment_id)) arrivals.set(q.appointment_id, q);
     }
 
     return appointments.map((a) => {
       const entry = arrivals.get(a.id);
-      const arrivedAt = entry?.checked_in_at ?? null;
+      // A visit clicked through to completion within a minute of its "check-in",
+      // never called in, records no arrival: that timestamp is a button press.
+      const arrived =
+        entry !== undefined &&
+        arrivalRecorded({ checkedInAt: entry.checked_in_at, calledAt: entry.called_at, completedAt: entry.completed_at });
+      const arrivedAt = arrived ? entry.checked_in_at : null;
       return {
         appointmentId: a.id,
-        date: datePart(a.scheduled_at),
+        date: this.localDate(a.scheduled_at),
         scheduledStart: a.scheduled_at,
         arrivedAt,
+        arrivalLocalHour: arrivedAt === null ? null : this.localHour(arrivedAt),
         // Positive is late, negative is early.
         arrivalDeltaMinutes:
           arrivedAt === null
@@ -579,43 +698,15 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
         scheduledMinutes: a.duration_minutes,
         // Seen to finished. Null unless BOTH ends were recorded — an appointment
         // still in the chair, or one whose queue entry was never closed, has no
-        // duration, and inventing one would fabricate the measurement.
-        actualMinutes:
-          entry?.called_at && entry.completed_at
-            ? Math.max(
-                0,
-                Math.round(
-                  (Date.parse(entry.completed_at) - Date.parse(entry.called_at)) / 60_000,
-                ),
-              )
-            : null,
+        // duration, and inventing one would fabricate the measurement. A negative
+        // interval is bad data and is not clamped to a zero-minute visit.
+        actualMinutes: (() => {
+          if (!entry?.called_at || !entry.completed_at) return null;
+          const minutes = Math.round((Date.parse(entry.completed_at) - Date.parse(entry.called_at)) / 60_000);
+          return minutes < 0 ? null : minutes;
+        })(),
       };
     });
-  }
-
-  /**
-   * NOT ANSWERABLE by this deployment — returns `null`, never `[]`.
-   *
-   * The discriminator this serves separates "the recall was never attempted"
-   * from "it was attempted and the patient could not be reached". DentGrow
-   * records neither. `follow_ups` has a due date, a status and a
-   * `confirmation_status`, but nothing counts contact attempts or timestamps the
-   * last one, and no communications log exists.
-   *
-   * Returning an empty list would assert that no attempts were made, which is
-   * precisely one of the two answers the discriminator is trying to choose
-   * between — it would resolve the question by accident, in the direction that
-   * blames the clinic. `null` leaves the hypothesis `undetermined`, which is the
-   * honest outcome and what the Diagnosis Engine is built to handle.
-   *
-   * Closing this needs a table recording contact attempts against a follow-up
-   * (channel, moment, outcome). That is a product decision about what staff are
-   * asked to record, not something an adapter can infer.
-   */
-  async listRecallContactAttempts(
-    _window: EntityWindow,
-  ): Promise<readonly RecallContactAttemptRow[] | null> {
-    return null;
   }
 
   /**
@@ -636,40 +727,99 @@ export class SupabaseDiagnosisContext implements DiagnosisContextPort {
    */
   async listCompletedTreatments(window: EntityWindow): Promise<readonly CompletedTreatmentRow[]> {
     const { start, end } = bounds(window, this.timezone);
-    const { data, error } = await this.db
-      .from("treatments")
-      .select(
-        "id, patient_id, treatment_type, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at",
-      )
-      .eq("clinic_id", window.clinicId)
-      .is("deleted_at", null)
-      .eq("status", "completed")
-      .not("performed_at", "is", null)
-      .gte("performed_at", start)
-      .lte("performed_at", end)
-      .order("performed_at", { ascending: true })
-      .limit(window.limit);
-    if (error) throw new Error(`completed treatments: ${error.message}`);
-
-    const completed = rows<
-      PayoutTreatmentLike & {
-        patient_id: string;
-        treatment_type: string;
-        performed_at: string;
-      }
-    >(data);
+    type CompletedRow = PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string | null };
+    const columns = "id, patient_id, treatment_type, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at";
+    const [performed, undated] = await Promise.all([
+      this.windowRows<CompletedRow>(
+        "completed treatments",
+        (from, to) =>
+          this.db
+            .from("treatments")
+            .select(columns)
+            .eq("clinic_id", window.clinicId)
+            .is("deleted_at", null)
+            .eq("status", "completed")
+            .not("performed_at", "is", null)
+            .gte("performed_at", start)
+            .lte("performed_at", end)
+            .order("performed_at", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to),
+        window.limit,
+      ),
+      // Completed with no performed_at: dated by when the completion was
+      // RECORDED — an observed state-history version, never a baseline written
+      // when history capture began, which would date old work to that day.
+      this.undatedCompletions(window, start, end),
+    ]);
+    const completed = [
+      ...performed.map((t) => ({ row: t, dated: treatmentPerformedAt({ performedAt: t.performed_at, completionRecordedAt: null }) })),
+      ...undated,
+    ].filter((c) => c.dated.at !== null);
     if (completed.length === 0) return [];
 
-    const patientIds = [...new Set(completed.map((t) => t.patient_id))];
+    const patientIds = [...new Set(completed.map((c) => c.row.patient_id))];
     const collected = await this.collectedByTreatment(window.clinicId, patientIds, window.to);
 
-    return completed.map((t) => ({
+    return completed.map(({ row: t, dated }) => ({
       treatmentId: t.id,
       patientId: t.patient_id,
-      date: datePart(t.performed_at),
-      treatmentType: t.treatment_type,
+      date: this.localDate(dated.at as string),
+      dateBasis: dated.basis,
+      // Consultations stay in: this is what was billed, and a cheap consultation
+      // is exactly the case mix this row exists to show. Spellings are folded.
+      treatmentType: canonicalTreatmentType(t.treatment_type),
       billedValue: currency(treatmentTotalCharge(t)),
       collectedValue: currency(collected.get(t.id) ?? 0),
     }));
+  }
+
+  /** Completed treatments with no performed_at whose completion was recorded inside the window. */
+  private async undatedCompletions(
+    window: EntityWindow,
+    start: string,
+    end: string,
+  ): Promise<Array<{ row: PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string | null }; dated: ReturnType<typeof treatmentPerformedAt> }>> {
+    const marks = await this.windowRows<{ treatment_id: string; recorded_at: string }>(
+      "completed treatments (recorded completions)",
+      (from, to) =>
+        this.db
+          .from("treatment_status_history")
+          .select("treatment_id, recorded_at")
+          .eq("clinic_id", window.clinicId)
+          .eq("provenance", "observed")
+          .eq("new_status", "completed")
+          .is("performed_at", null)
+          .lte("recorded_at", end)
+          .order("recorded_at", { ascending: true })
+          .order("treatment_id", { ascending: true })
+          .range(from, to),
+      window.limit,
+    );
+    if (marks.length === 0) return [];
+    // The first recorded completion per treatment — read from before the window
+    // too, so a treatment completed earlier, reopened and completed again inside
+    // the window is dated from the first time and stays out of this window.
+    const firstMark = new Map<string, string>();
+    for (const m of marks) if (!firstMark.has(m.treatment_id)) firstMark.set(m.treatment_id, m.recorded_at);
+    for (const [id, at] of firstMark) if (Date.parse(at) < Date.parse(start)) firstMark.delete(id);
+    if (firstMark.size === 0) return [];
+
+    const rows = await this.byIds<PayoutTreatmentLike & { patient_id: string; treatment_type: string; performed_at: string | null }>(
+      "completed treatments (undated)",
+      [...firstMark.keys()],
+      (chunk, from, to) =>
+        this.db
+          .from("treatments")
+          .select("id, patient_id, treatment_type, cost, status, opd_charged, opd_fee, xray_taken, xray_cost, performed_at")
+          .eq("clinic_id", window.clinicId)
+          .is("deleted_at", null)
+          .eq("status", "completed")
+          .is("performed_at", null)
+          .in("id", chunk)
+          .order("id", { ascending: true })
+          .range(from, to),
+    );
+    return rows.map((t) => ({ row: t, dated: treatmentPerformedAt({ performedAt: null, completionRecordedAt: firstMark.get(t.id) ?? null }) }));
   }
 }

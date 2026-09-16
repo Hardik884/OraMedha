@@ -19,6 +19,7 @@ import type {
   PaymentSnapshot,
   QueueEntrySnapshot,
   TreatmentSnapshot,
+  VisitDurationSnapshot,
 } from "../../../../repositories";
 
 export const CLINIC = "clinic_test";
@@ -104,6 +105,23 @@ export function rosterEntry(over: Partial<PatientRosterEntry> = {}): PatientRost
   };
 }
 
+/**
+ * One attended visit with its booked and delivered lengths.
+ *
+ * Defaults to a visit that ran exactly to time, so a test that cares about
+ * overrun states only the overrun and a test that does not is unaffected by it.
+ */
+export function visitDuration(
+  over: Partial<VisitDurationSnapshot> = {},
+): VisitDurationSnapshot {
+  return {
+    appointmentId: nextId("appt"),
+    scheduledMinutes: 30,
+    actualMinutes: 30,
+    ...over,
+  };
+}
+
 export function scheduleWindow(over: Partial<ScheduleWindow> = {}): ScheduleWindow {
   return {
     from: "2026-06-29",
@@ -140,6 +158,13 @@ export function measurableSnapshot(): ClinicDataSnapshot {
     // is measured — 0, legitimately — instead of withheld on the one snapshot
     // this suite asserts produces every declared key.
     patientsOnPaymentPlan: new Set(),
+    // Present, and with a measurable length, so both overrun metrics produce a
+    // value on the one snapshot this suite asserts yields every declared key. A
+    // punctual visit gives 0% overrun — a real measurement, not a withheld one.
+    trailingVisitDurations: [visitDuration()],
+    // A called-in patient, so the average wait is a measurement rather than
+    // withheld.
+    queueToday: [queueEntry({ checkedInAt: `${DATE}T10:00:00.000Z`, startedAt: `${DATE}T10:15:00.000Z` })],
   });
 }
 

@@ -663,6 +663,30 @@ body {
   animation: scorePop 3.2s ease forwards;
 }
 
+/* ── Smooth disclosure ─────────────────────────────────────────────────────── */
+/* A panel that animates its OWN height open and closed, so an expanding card
+   pushes the page rather than fading in on top of it. Grid rows rather than
+   max-height: the panel's natural height is never guessed, so long and short
+   contents both animate correctly. Where the browser cannot interpolate the
+   rows, the panel simply appears — the disclosure still works. */
+.disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+.disclosure[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+.disclosure > * {
+  overflow: hidden;
+  min-height: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .disclosure {
+    transition: none;
+  }
+}
+
 /* ── Skeleton shimmer ──────────────────────────────────────────────────────── */
 @keyframes shimmer {
   0% { background-position: -200% 0; }

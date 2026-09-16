@@ -67,17 +67,19 @@ function diagnosis(
 
 /** A cancellation with the given notice, on the given hour. */
 function cancellation(over: Partial<CancellationEvent> = {}): CancellationEvent {
-  return {
+  const event = {
     appointmentId: `a-${Math.random()}`,
     date: "2026-04-02",
     scheduledStart: "2026-04-02T09:00:00.000Z",
     cancelledAt: "2026-03-31T09:00:00.000Z", // 48h notice
     noticeHours: 48,
-    outcome: "cancelled",
+    outcome: "cancelled" as const,
     treatmentType: "Cleaning",
     slotRefilled: false,
     ...over,
   };
+  // A UTC clinic: the local hour is the instant's own hour.
+  return { localHour: `${event.scheduledStart.slice(11, 13)}:00`, ...event };
 }
 
 const ADVANCE = "cancellation_dominant";

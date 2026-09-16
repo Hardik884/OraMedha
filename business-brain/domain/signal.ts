@@ -33,6 +33,15 @@ export const SignalType = {
   REVENUE_HIGH_OUTSTANDING: "revenue.high_outstanding",
   REVENUE_OUTSTANDING_INCREASING: "revenue.outstanding_increasing",
   REVENUE_COLLECTION_LAGGING_COMPLETIONS: "revenue.collection_lagging_completions",
+  /**
+   * Money collected as a share of work produced, over the trailing window.
+   *
+   * The structural version of `collection_lagging_completions`, which can only
+   * look at one day and therefore cannot tell a late afternoon from a standing
+   * habit. Production against collection is the fundamental pair in practice
+   * management and this is the only rule that reads it.
+   */
+  REVENUE_COLLECTION_RATE_LOW: "revenue.collection_rate_low",
   // Scheduling
   SCHEDULING_HIGH_CANCELLATION_RATE: "scheduling.high_cancellation_rate",
   SCHEDULING_HIGH_NO_SHOW_RATE: "scheduling.high_no_show_rate",
@@ -48,15 +57,56 @@ export const SignalType = {
    * its rate threshold and still have three people missing repeatedly.
    */
   SCHEDULING_REPEAT_NON_ATTENDANCE: "scheduling.repeat_non_attendance",
+  /**
+   * Appointments taking materially longer than the time booked for them across
+   * the trailing window. Measured from what the clinic already records — the
+   * booked duration against the queue's called-to-completed interval — so it
+   * needs nothing new from staff.
+   */
+  SCHEDULING_APPOINTMENTS_OVERRUNNING: "scheduling.appointments_overrunning",
+  /**
+   * Cancellations and no-shows as a share of the trailing window, rather than of
+   * one day.
+   *
+   * The daily rules judge two cancellations out of four as a crisis, which at a
+   * small clinic happens most weeks. This is the benchmarkable version — industry
+   * no-show runs around 10% — and the only one a clinic can compare itself to.
+   */
+  SCHEDULING_SUSTAINED_ATTRITION: "scheduling.sustained_attrition",
+  /**
+   * Median days patients wait between booking and being seen.
+   *
+   * Reads as demand pressure, not as a service failure: a lengthening lead time
+   * means people want appointments the clinic cannot offer soon. Deliberately NOT
+   * a standalone finding — it strengthens the capacity-ceiling reading, because on
+   * its own a long lead time is equally consistent with patients choosing a date
+   * that suits them.
+   */
+  SCHEDULING_LONG_BOOKING_LEAD_TIME: "scheduling.long_booking_lead_time",
   // Retention / acquisition
   ACQUISITION_LOW_NEW_PATIENTS: "acquisition.low_new_patients",
   RETENTION_RETURNING_VOLUME_DROPPING: "retention.returning_volume_dropping",
   RETENTION_FOLLOWUP_BACKLOG: "retention.followup_backlog",
+  /**
+   * Patients seen at least once, not seen for a recall interval, with nothing
+   * booked. A LEVEL rather than a rate, and it only ever grows until somebody
+   * works it — which is why its severity is floored, the same way the follow-up
+   * backlog's is.
+   */
+  RETENTION_LAPSED_PATIENT_BASE: "retention.lapsed_patient_base",
   // Operational
   OPERATIONAL_LONG_WAITING_TIME: "operational.long_waiting_time",
   OPERATIONAL_QUEUE_BACKLOG: "operational.queue_backlog",
   OPERATIONAL_QUEUE_BUILDING_UP: "operational.queue_building_up",
   OPERATIONAL_LOW_CHAIR_UTILIZATION: "operational.low_chair_utilization",
+  /**
+   * Chair utilization over the trailing window, rather than on one date.
+   *
+   * A quiet Tuesday is weather; a month at 34% is the business. The daily rule
+   * fires on both and cannot distinguish them, which is precisely how a dashboard
+   * teaches a dentist to stop reading it.
+   */
+  OPERATIONAL_SUSTAINED_LOW_UTILIZATION: "operational.sustained_low_utilization",
   OPERATIONAL_NEAR_FULL_CAPACITY: "operational.near_full_capacity",
   // Clinical
   CLINICAL_LARGE_PENDING_TREATMENT_VALUE: "clinical.large_pending_treatment_value",

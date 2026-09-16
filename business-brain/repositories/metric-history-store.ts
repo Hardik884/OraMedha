@@ -19,6 +19,8 @@
  * what was measured; recompute what was concluded.
  */
 
+import type { MetricReadingProvenance } from "../provenance/metric-provenance";
+
 /** One measured metric on one day. */
 export interface StoredMetric {
   /** The engine's MetricKey, e.g. "revenue.outstanding". */
@@ -26,6 +28,14 @@ export interface StoredMetric {
   readonly value: number;
   /** The snapshot moment the measurement was taken at, ISO-8601. */
   readonly measuredAt: string;
+  /**
+   * How the reading came to exist. Absent on write means unknown; a store never
+   * guesses a better provenance than it was given. See migration 20260917100100.
+   */
+  readonly provenance?: MetricReadingProvenance["provenance"];
+  readonly producedAt?: string;
+  readonly knowledgeAsOf?: string;
+  readonly unversionedInputs?: readonly string[];
 }
 
 /** Every metric measured for one clinic on one business date. */

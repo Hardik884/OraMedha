@@ -59,6 +59,52 @@ export const DiagnosisPattern = {
    * context port is wired up.
    */
   REPEAT_NON_ATTENDANCE: "repeat_non_attendance",
+  /**
+   * A patient base that has gone quiet: people seen at least once, not seen for
+   * a recall interval, with nothing booked.
+   *
+   * Guarded against BOTH retention signals, which is what keeps it from being a
+   * third card about the same patients. When returning volume has fallen, the
+   * sharper story is patient_base_erosion / recall_process_failure. When the
+   * clinic already has an overdue recall backlog, that list is the clinic's own,
+   * more specific record of who to call and recall_backlog owns it. This fires
+   * only in the case neither covers — a clinic whose recall list looks clean
+   * because nobody ever put these patients on it.
+   */
+  DORMANT_PATIENT_BASE: "dormant_patient_base",
+  /**
+   * Appointments taking materially longer than the time booked for them, across
+   * the trailing window.
+   *
+   * A structural fact about how the clinic books, not an event on one day —
+   * which is why it is measured over the window and why it is reported even on a
+   * day nobody waited. Guarded against the queue signals: when patients DID
+   * queue today, throughput_congestion owns the finding and already carries
+   * `service_time_variance` as a settleable cause, so reporting both would tell
+   * one story twice.
+   */
+  CHRONIC_APPOINTMENT_OVERRUN: "chronic_appointment_overrun",
+  /**
+   * A month collecting less than was delivered, without any single day breaching
+   * the same-day collection check.
+   *
+   * Guarded against that daily signal: when it fired, collection_gap has the
+   * sharper story with its own persistence classification. What is left is the
+   * clinic that passes every daily check while losing a fifth of its production —
+   * invisible to a LEVEL (outstanding) and to a DAY (collection_gap) alike.
+   */
+  PRODUCTION_COLLECTION_GAP: "production_collection_gap",
+  /**
+   * Chair time going unused across the window rather than on one date.
+   *
+   * Needs NO guard, and that is a property of the Constraint Engine rather than
+   * an oversight: this and demand_supply_mismatch both map to CAPACITY, so a
+   * clinic that is quiet today and quiet this month gets one card carrying both
+   * findings at the worse severity, never two competing headlines. The two are
+   * genuinely different claims — one about a date, one about a habit — and the
+   * collapse is exactly what that engine exists for.
+   */
+  SUSTAINED_IDLE_CAPACITY: "sustained_idle_capacity",
   UNCLUSTERED_SIGNAL: "unclustered_signal",
 } as const;
 
@@ -111,6 +157,44 @@ export interface Hypothesis {
   readonly requiredData: readonly string[];
 }
 
+/**
+ * How a finding has behaved across the supplied history window.
+ *
+ * ADDITIVE, and deliberately narrow. The full assessment — every fired date,
+ * every unknown date, the breach trend — is already recorded in the diagnosis's
+ * `persistence` evidence note, which is the right home for an audit trail. But a
+ * projection that wants to tell a dentist "third day running" had to reach into
+ * that note's untyped `data` bag to find the number, which is both fragile and a
+ * layering mistake: the view should read typed domain fields, not parse evidence.
+ *
+ * So this carries exactly the counts a reader needs, typed, and nothing else. It
+ * duplicates no logic — {@link classifyPersistence} computes all of it already
+ * and the builder copies it across.
+ */
+export interface PersistenceDetail {
+  /**
+   * Consecutive days the finding has held, TODAY INCLUDED. Always at least 1.
+   *
+   * An unknown day breaks the chain rather than extending it: a day whose
+   * evaluator could not run cannot be claimed as a day the problem persisted.
+   */
+  readonly consecutiveDays: number;
+  /** Prior days in the window on which at least one contributing signal fired. */
+  readonly priorFiredDays: number;
+  /** Days in the window whose state could not be determined. */
+  readonly unknownDays: number;
+  /** History days actually supplied, gaps excluded. */
+  readonly historyDaysSupplied: number;
+  /**
+   * True when unknown days prevented a sustained / worsening / improving call.
+   *
+   * Load-bearing for the view: the classification was capped by missing data
+   * rather than by the clinic's behaviour, so presenting it as "on and off" would
+   * state something about the clinic that was really a statement about the data.
+   */
+  readonly cappedByUnknown: boolean;
+}
+
 /** A measurement that would separate two or more hypotheses. */
 export interface Discriminator {
   /** Stable id, `<diagnosisId>#d.<slug>`. */
@@ -154,6 +238,14 @@ export interface Diagnosis {
    */
   readonly confidence: Confidence;
   readonly persistence: Persistence;
+  /**
+   * The counts behind {@link persistence}, for a projection that wants to say
+   * "third day running" rather than only "sustained".
+   *
+   * Optional because a Diagnosis built without a history window has no window to
+   * describe. Absent means "not classified", never "one day".
+   */
+  readonly persistenceDetail?: PersistenceDetail;
   /** Ids of the signals that contributed to this pattern. */
   readonly signalIds: readonly string[];
   readonly metricIds: readonly string[];

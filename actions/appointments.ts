@@ -19,11 +19,7 @@ import {
   type AppointmentHistory,
   type UpdateAppointmentClinicalInput,
 } from "@/types";
-import {
-  getAvailableSlots as computeSlots,
-  type AvailabilityRule as SlotRule,
-  type OccupiedSlot,
-} from "@/lib/scheduling/slots";
+import { checkBookingSlot } from "@/lib/scheduling/booking-validation";
 import { zonedDateToUTC, getTodayInTimezone, getUtcBoundariesForLocalDate } from "@/lib/utils";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -32,6 +28,8 @@ import {
 } from "@/lib/staff/dentist-directory";
 import { writeAppointmentHistory } from "@/lib/appointments/history";
 import { completeAppointmentCascade } from "@/lib/appointments/complete";
+import { DIRECT_COMPLETION_FROM, isCorrectableNoShow, type HistoryRowLike } from "@/lib/appointments/visit-completion";
+import { recordCallIn } from "@/lib/queue/call-in";
 import { PATIENT_APPOINTMENT_SELECT } from "@/lib/appointments/patient-safe-columns";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
 import { APPOINTMENT_SELECT } from "@/lib/appointments/data-api-columns";
@@ -183,163 +181,22 @@ export async function createAppointment(
       return { data: null, error: "Patient not found." };
     }
 
-    // ── Validate slot against availability rules ───────────────────────────
-    const requestedDate = parsed.data.scheduled_at.split("T")[0];
-
-    // Fetch all needed clinic settings in a single query upfront.
-    // Previously: fetched timezone first, then clinic_hours in a second call
-    // if no availability rules existed — two separate round-trips.
-    const { data: settingsData } = await db
-      .from("clinic_settings")
-      .select("timezone, clinic_hours, average_appointment_duration")
-      .eq("clinic_id", resolvedClinicId)
-      .maybeSingle();
-    const clinicTimezone = (settingsData as { timezone?: string } | null)?.timezone ?? "Asia/Kolkata";
-
-    // ── Convert local slot string to UTC now that we have the timezone ─────
-    // Slots from getAvailableSlots() are "YYYY-MM-DDTHH:MM:00" — wall-clock
-    // local time with no timezone offset. PostgreSQL's timestamptz column
-    // interprets a bare datetime string as UTC, which would cause a +5:30
-    // shift for Asia/Kolkata clinics. Convert here before any DB comparison.
-    const scheduledAtUtc = zonedDateToUTC(parsed.data.scheduled_at, clinicTimezone).toISOString();
-
-    // ── Double-booking check (unique index: dentist_id + scheduled_at) ─────
-    // Compare against the UTC value that will actually be stored.
-    const { data: existingSlot } = await db
-      .from("appointments")
-      .select("id")
-      .eq("dentist_id", dentistId)
-      .eq("scheduled_at", scheduledAtUtc)
-      .is("deleted_at", null)
-      .not("status", "in", '("cancelled","no_show")')
-      .maybeSingle();
-
-    if (existingSlot) {
-      return {
-        data: null,
-        error: "This time slot is already booked. Please choose another.",
-      };
-    }
-    // ── Past-date rejection (server-side guard) ────────────────────────────
-    // Compute today in the clinic's local timezone to avoid UTC midnight shift.
-    const todayInTz = new Intl.DateTimeFormat("en-CA", {
-      timeZone: clinicTimezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date());
-
-    // Staff (dentist/receptionist) may enter historical appointments without
-    // restriction — this supports migration from paper records and prior
-    // software. Portal patients remain restricted to today or later so they
-    // cannot self-book in the past.
-    if (profile.role === "patient" && requestedDate < todayInTz) {
-      return { data: null, error: "Cannot create an appointment in the past." };
-    }
-
-    // ── DOW: use timezone-aware calculation ───────────────────────────────
-    // new Date("YYYY-MM-DD").getDay() is midnight UTC → wrong DOW for tz behind UTC.
-    const noonLocal = new Date(`${requestedDate}T12:00:00`);
-    const dowStr = new Intl.DateTimeFormat("en-US", {
-      timeZone: clinicTimezone,
-      weekday: "short",
-    }).format(noonLocal);
-    const dowMap: Record<string, number> = {
-      Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-    };
-    const requestedDow = dowMap[dowStr] ?? noonLocal.getDay();
-
-    // ── Build slot rules — mirror getAvailableSlots priority order ────────
-    // Priority 1: explicit availability_rules (legacy / override path)
-    // Priority 2: clinic_hours from clinic_settings (primary path going forward)
-    // If neither exists → "No availability configured for that day."
-    const { data: rules } = await db
-      .from("availability_rules")
-      .select("start_time, end_time, slot_duration_minutes")
-      .eq("clinic_id", resolvedClinicId)
-      .eq("day_of_week", requestedDow)
-      .eq("is_active", true);
-
-    let slotRules: SlotRule[];
-
-    if (rules && rules.length > 0) {
-      // Explicit availability rules exist — use them
-      slotRules = (rules as { start_time: string; end_time: string; slot_duration_minutes: number }[]).map((r) => ({
-        startTime: r.start_time.slice(0, 5),
-        endTime: r.end_time.slice(0, 5),
-        slotDurationMinutes: r.slot_duration_minutes,
-      }));
-    } else {
-      // No explicit rules — fall back to clinic_hours (already fetched above).
-      const clinicHours = (settingsData as { clinic_hours?: Record<string, { open: string | null; close: string | null; is_open: boolean }> } | null)?.clinic_hours ?? null;
-      const defaultSlotDuration = (settingsData as { average_appointment_duration?: number } | null)?.average_appointment_duration ?? 30;
-
-      if (!clinicHours) {
-        return {
-          data: null,
-          error: "No availability configured for that day. Please choose another date.",
-        };
-      }
-
-      // Map DOW integer → day name for clinic_hours lookup
-      const DOW_TO_DAY_NAME: Record<number, string> = {
-        0: "sunday", 1: "monday", 2: "tuesday", 3: "wednesday",
-        4: "thursday", 5: "friday", 6: "saturday",
-      };
-      const dayName = DOW_TO_DAY_NAME[requestedDow];
-      const dayHours = dayName ? clinicHours[dayName] : null;
-
-      if (!dayHours || !dayHours.is_open || !dayHours.open || !dayHours.close) {
-        return {
-          data: null,
-          error: "No availability configured for that day. Please choose another date.",
-        };
-      }
-
-      slotRules = [{
-        startTime: dayHours.open.slice(0, 5),
-        endTime: dayHours.close.slice(0, 5),
-        slotDurationMinutes: defaultSlotDuration,
-      }];
-    }
-
-    // Fetch occupied slots for validation (with durations)
-    // Use UTC boundaries for the clinic's local date so that the gte/lte
-    // comparison against the timestamptz column is correct.
-    const { start: occupiedStart, end: occupiedEnd } =
-      getUtcBoundariesForLocalDate(requestedDate, clinicTimezone);
-    const { data: occupied } = await db
-      .from("appointments")
-      .select("scheduled_at, duration_minutes")
-      .eq("dentist_id", dentistId)
-      .gte("scheduled_at", occupiedStart)
-      .lte("scheduled_at", occupiedEnd)
-      .is("deleted_at", null)
-      .not("status", "in", '("cancelled","no_show")');
-
-    const occupiedSlots: OccupiedSlot[] = (occupied ?? []).map((o: { scheduled_at: string; duration_minutes: number }) => ({
-      scheduledAt: o.scheduled_at,
-      durationMinutes: o.duration_minutes ?? 30,
-    }));
-
-    const requestedDuration = parsed.data.duration_minutes ?? 30;
-    const availableSlots = computeSlots(requestedDate, slotRules, occupiedSlots, clinicTimezone, requestedDuration);
-
-    // Normalise the requested slot to match the format returned by computeSlots
-    const requestedSlotNorm = parsed.data.scheduled_at.slice(0, 16) + ":00"; // YYYY-MM-DDTHH:MM:00
-    const isAvailable = availableSlots.some(
-      (s) => s.slice(0, 16) === requestedSlotNorm.slice(0, 16)
-    );
-
-    if (!isAvailable) {
-      return {
-        data: null,
-        error: "Selected time slot is not available. Please choose from the available slots.",
-      };
-    }
-
-    // ── Convert local slot string to UTC before inserting ──────────────────
-    // (Already computed above as scheduledAtUtc — see UTC conversion note.)
+    // ── Validate the slot ──────────────────────────────────────────────────
+    // The one availability check every booking path uses: clinic hours, the
+    // whole appointment fitting, holidays and consultancy blocks, the dentist's
+    // other appointments (read server-side, so a portal patient's booking is
+    // checked against everyone's visits, not only their own), past-date rules
+    // and the clinic's timezone. See lib/scheduling/booking-validation.ts.
+    const slotCheck = await checkBookingSlot(db, createAdminClient(), {
+      clinicId: resolvedClinicId,
+      dentistId,
+      localSlot: parsed.data.scheduled_at,
+      durationMinutes: parsed.data.duration_minutes ?? 30,
+      patientFacing: profile.role === "patient",
+      now: new Date(),
+    });
+    if (!slotCheck.ok) return { data: null, error: slotCheck.error };
+    const scheduledAtUtc = slotCheck.scheduledAtUtc;
 
     // ── Insert appointment ─────────────────────────────────────────────────
     // For patient portal bookings: use the admin (service-role) client to
@@ -456,9 +313,25 @@ export async function updateAppointmentStatus(
     const currentStatus = currentAppt.status as AppointmentStatus;
     const newStatus = parsed.data.new_status as AppointmentStatus;
 
-    // Validate transition
+    // Validate transition. Two completions beyond the lifecycle map, both the
+    // dentist's and both recorded truthfully (see lib/appointments/visit-completion.ts):
+    //   - a visit completed with no recorded arrival goes straight to completed,
+    //     rather than inventing a check-in and a call-in on the way;
+    //   - a no-show the nightly job inferred may be corrected within its window.
     const validNext = VALID_APPOINTMENT_TRANSITIONS[currentStatus];
-    if (!validNext.includes(newStatus)) {
+    let allowed = validNext.includes(newStatus);
+    if (!allowed && newStatus === "completed" && profile.role === "dentist") {
+      if (DIRECT_COMPLETION_FROM.includes(currentStatus)) {
+        allowed = true;
+      } else if (currentStatus === "no_show") {
+        const { data: historyRows } = await db
+          .from("appointment_history")
+          .select("action, new_value, performed_by, timestamp")
+          .eq("appointment_id", parsed.data.appointment_id);
+        allowed = isCorrectableNoShow(currentStatus, (historyRows ?? []) as HistoryRowLike[], new Date().toISOString());
+      }
+    }
+    if (!allowed) {
       return {
         data: null,
         error: `Cannot transition from "${currentStatus}" to "${newStatus}".`,
@@ -522,16 +395,31 @@ export async function updateAppointmentStatus(
     // left as a stale waiting/in_progress queue row (which would block the
     // queue and skew "patients ahead").
     if (newStatus === "cancelled" || newStatus === "no_show") {
+      // Removed from the live queue, not erased: the check-in happened, and a
+      // patient who waited and then left is evidence the waiting figures need.
       const { error: queueDelErr } = await db
         .from("queue_entries")
-        .delete()
+        .update({ removed_at: new Date().toISOString() })
         .eq("appointment_id", parsed.data.appointment_id)
         .eq("clinic_id", profile.clinic_id)
+        .is("removed_at", null)
         .in("status", ["waiting", "in_progress"]);
       if (queueDelErr) {
         console.error("[updateAppointmentStatus] queue cleanup failed:", queueDelErr);
       }
       revalidatePath(`/${profile.role}/queue`);
+    }
+
+    // ── On in_progress: record the call-in on the patient's real queue entry ──
+    // Starting a visit from the appointment list is the same event as calling
+    // the patient in from the queue, and it used to leave the queue row
+    // "waiting" with no call-in time — so waiting figures counted a patient in
+    // the chair as still waiting. Only a row that exists is touched (no queue
+    // row is invented for a patient nobody checked in), and a call-in already
+    // recorded is never overwritten.
+    if (newStatus === "in_progress") {
+      const callIn = await recordCallIn(db, profile.clinic_id, parsed.data.appointment_id, new Date().toISOString());
+      if (callIn.error) console.error("[updateAppointmentStatus → in_progress] queue call-in failed:", callIn.error);
     }
 
     // ── On checked_in: create queue_entries row ────────────────────────────
@@ -565,6 +453,7 @@ export async function updateAppointmentStatus(
           .select("position")
           .eq("clinic_id", profile.clinic_id)
           .eq("queue_date", qDate)
+          .is("removed_at", null)
           .order("position", { ascending: false })
           .limit(1)
           .maybeSingle();
@@ -640,24 +529,49 @@ export async function rescheduleAppointment(
     const { db, profile } = await resolveSession();
     if (!profile) return { data: null, error: "Unauthorized" };
 
-    if (profile.role !== "dentist" && profile.role !== "receptionist") {
+    if (profile.role !== "dentist" && profile.role !== "receptionist" && profile.role !== "patient") {
       return { data: null, error: "Forbidden" };
     }
+    const isPatient = profile.role === "patient";
+    if (isPatient && !isPatientBookingEnabled()) {
+      return {
+        data: null,
+        error: "Online appointment booking is temporarily unavailable. Please contact your clinic.",
+      };
+    }
 
-    // Fetch appointment and verify clinic ownership
-    const { data: current } = await db
+    // ── Resolve the appointment the caller may move ────────────────────────
+    // Staff: any appointment in their clinic. A portal patient: only their own,
+    // resolved through the portal link server-side.
+    let linkedPatientId: string | null = null;
+    if (isPatient) {
+      const { data: linkData } = await db
+        .from("patient_portal_links")
+        .select("patient_id")
+        .eq("user_id", profile.id)
+        .maybeSingle();
+      linkedPatientId = (linkData as { patient_id: string } | null)?.patient_id ?? null;
+      if (!linkedPatientId) return { data: null, error: "Portal account not linked." };
+    }
+
+    const lookup = createAdminClient()
       .from("appointments")
-      .select(APPOINTMENT_SELECT)
+      .select("id, clinic_id, patient_id, dentist_id, status, scheduled_at, duration_minutes")
       .eq("id", parsed.data.appointment_id)
-      .eq("clinic_id", profile.clinic_id)
-      .is("deleted_at", null)
-      .single();
+      .is("deleted_at", null);
+    const { data: current } = await (isPatient
+      ? lookup.eq("patient_id", linkedPatientId as string)
+      : lookup.eq("clinic_id", profile.clinic_id)
+    ).maybeSingle();
 
     if (!current) {
       return { data: null, error: "Appointment not found." };
     }
 
-    const currentAppt = current as Appointment;
+    const currentAppt = current as Pick<
+      Appointment,
+      "id" | "clinic_id" | "patient_id" | "dentist_id" | "status" | "scheduled_at" | "duration_minutes"
+    >;
 
     // Can only reschedule non-terminal appointments
     if (["completed", "cancelled", "no_show"].includes(currentAppt.status)) {
@@ -667,122 +581,59 @@ export async function rescheduleAppointment(
       };
     }
 
-    const newDate = parsed.data.new_scheduled_at.split("T")[0];
-
-    // Fetch all needed clinic settings in a single query — previously fetched
-    // timezone first, then clinic_hours in a second call as a fallback.
-    const { data: settingsData } = await db
-      .from("clinic_settings")
-      .select("timezone, clinic_hours, average_appointment_duration")
-      .eq("clinic_id", profile.clinic_id)
-      .maybeSingle();
-    const clinicTimezone = (settingsData as { timezone?: string } | null)?.timezone ?? "Asia/Kolkata";
-
-    // ── Convert local slot string to UTC ───────────────────────────────────
-    // Slots from getAvailableSlots() are wall-clock local strings with no
-    // offset. Convert to UTC before storing to prevent the +5:30 shift.
-    const newScheduledAtUtc = zonedDateToUTC(parsed.data.new_scheduled_at, clinicTimezone).toISOString();
-
-    // ── Past-date handling ─────────────────────────────────────────────────
-    // Reschedule is a staff-only action. Any historical date is permitted so
-    // clinics can correct records or reflect visits that actually occurred on
-    // an earlier day. Slot conflict, DOW and clinic-hours rules below still
-    // apply to guard integrity.
-
-    // ── DOW: use timezone-aware calculation ───────────────────────────────
-    const noonLocal = new Date(`${newDate}T12:00:00`);
-    const dowStr = new Intl.DateTimeFormat("en-US", {
-      timeZone: clinicTimezone,
-      weekday: "short",
-    }).format(noonLocal);
-    const dowMap: Record<string, number> = {
-      Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-    };
-    const newDow = dowMap[dowStr] ?? noonLocal.getDay();
-
-    // ── Validate new slot availability — mirror getAvailableSlots priority order ──
-    const { data: reschedRules } = await db
-      .from("availability_rules")
-      .select("start_time, end_time, slot_duration_minutes")
-      .eq("clinic_id", profile.clinic_id)
-      .eq("day_of_week", newDow)
-      .eq("is_active", true);
-
-    let slotRules: SlotRule[];
-
-    if (reschedRules && reschedRules.length > 0) {
-      slotRules = (reschedRules as { start_time: string; end_time: string; slot_duration_minutes: number }[]).map((r) => ({
-        startTime: r.start_time.slice(0, 5),
-        endTime: r.end_time.slice(0, 5),
-        slotDurationMinutes: r.slot_duration_minutes,
-      }));
-    } else {
-      // Fall back to clinic_hours — already fetched above in settingsData.
-      const clinicHours = (settingsData as { clinic_hours?: Record<string, { open: string | null; close: string | null; is_open: boolean }> } | null)?.clinic_hours ?? null;
-      const defaultSlotDuration = (settingsData as { average_appointment_duration?: number } | null)?.average_appointment_duration ?? 30;
-
-      const DOW_TO_DAY_NAME: Record<number, string> = {
-        0: "sunday", 1: "monday", 2: "tuesday", 3: "wednesday",
-        4: "thursday", 5: "friday", 6: "saturday",
-      };
-      const dayName = DOW_TO_DAY_NAME[newDow];
-      const dayHours = dayName && clinicHours ? clinicHours[dayName] : null;
-
-      if (!dayHours || !dayHours.is_open || !dayHours.open || !dayHours.close) {
-        return { data: null, error: "No availability on the selected date." };
-      }
-
-      slotRules = [{
-        startTime: dayHours.open.slice(0, 5),
-        endTime: dayHours.close.slice(0, 5),
-        slotDurationMinutes: defaultSlotDuration,
-      }];
-    }
-
-    // Occupied slots for new date (exclude the appointment being rescheduled) — with durations
-    // Use UTC boundaries for the clinic's local date so the timestamptz comparison is correct.
-    const { start: reschedStart, end: reschedEnd } =
-      getUtcBoundariesForLocalDate(newDate, clinicTimezone);
-    const { data: occupied } = await db
-      .from("appointments")
-      .select("scheduled_at, duration_minutes")
-      .eq("dentist_id", currentAppt.dentist_id)
-      .neq("id", parsed.data.appointment_id)
-      .gte("scheduled_at", reschedStart)
-      .lte("scheduled_at", reschedEnd)
-      .is("deleted_at", null)
-      .not("status", "in", '("cancelled","no_show")');
-
-    const occupiedSlots: OccupiedSlot[] = (occupied ?? []).map((o: { scheduled_at: string; duration_minutes: number }) => ({
-      scheduledAt: o.scheduled_at,
-      durationMinutes: o.duration_minutes ?? 30,
-    }));
-
-    const rescheduleDuration = currentAppt.duration_minutes ?? 30;
-    const available = computeSlots(newDate, slotRules, occupiedSlots, clinicTimezone, rescheduleDuration);
-    const isAvailable = available.some(
-      (s) => s.slice(0, 16) === parsed.data.new_scheduled_at.slice(0, 16)
-    );
-
-    if (!isAvailable) {
+    // A portal patient moves only their own upcoming, not-yet-arrived visit.
+    if (isPatient && (currentAppt.status !== "scheduled" || Date.parse(currentAppt.scheduled_at) <= Date.now())) {
       return {
         data: null,
-        error: "Selected time slot is not available.",
+        error: "You can only reschedule an upcoming scheduled appointment. Please contact the clinic.",
       };
     }
+
+    // ── A patient in today's queue is not moved from under the queue ──────
+    const { data: liveEntry } = await createAdminClient()
+      .from("queue_entries")
+      .select("id")
+      .eq("appointment_id", currentAppt.id)
+      .eq("clinic_id", currentAppt.clinic_id)
+      .is("removed_at", null)
+      .in("status", ["waiting", "in_progress"])
+      .limit(1);
+    if ((liveEntry ?? []).length > 0) {
+      return { data: null, error: "Patient is in today's queue — remove them first" };
+    }
+
+    // ── Validate the new slot — the same check every booking path uses ─────
+    // Staff may move a visit to a past date (record corrections); a patient may
+    // not. The appointment being moved does not conflict with itself.
+    const slotCheck = await checkBookingSlot(db, createAdminClient(), {
+      clinicId: currentAppt.clinic_id,
+      dentistId: currentAppt.dentist_id,
+      localSlot: parsed.data.new_scheduled_at,
+      durationMinutes: currentAppt.duration_minutes ?? 30,
+      excludeAppointmentId: currentAppt.id,
+      patientFacing: isPatient,
+      now: new Date(),
+    });
+    if (!slotCheck.ok) return { data: null, error: slotCheck.error };
+    const newScheduledAtUtc = slotCheck.scheduledAtUtc;
 
     const oldScheduledAt = currentAppt.scheduled_at;
 
-    const { data: updated, error: updateErr } = await db
+    // A portal patient holds no UPDATE on scheduled_at (the portal policy pins
+    // every column but the cancellation), so their move is written server-side,
+    // scoped to their own still-scheduled appointment.
+    const updateQuery = (isPatient ? createAdminClient() : db)
       .from("appointments")
       .update({
         scheduled_at: newScheduledAtUtc,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", parsed.data.appointment_id)
-      .eq("clinic_id", profile.clinic_id)
-      .select(APPOINTMENT_SELECT)
-      .single();
+      .eq("id", currentAppt.id)
+      .eq("clinic_id", currentAppt.clinic_id);
+    const { data: updated, error: updateErr } = await (isPatient
+      ? updateQuery.eq("patient_id", linkedPatientId).eq("status", "scheduled").select(PATIENT_APPOINTMENT_SELECT)
+      : updateQuery.select(APPOINTMENT_SELECT)
+    ).single();
 
     if (updateErr || !updated) {
       console.error("[rescheduleAppointment] update:", updateErr);
@@ -790,15 +641,19 @@ export async function rescheduleAppointment(
     }
 
     await writeHistory({
-      appointment_id: parsed.data.appointment_id,
+      appointment_id: currentAppt.id,
       action: "rescheduled",
       old_value: { scheduled_at: oldScheduledAt },
       new_value: { scheduled_at: newScheduledAtUtc },
       performed_by: profile.id,
     });
 
-    revalidatePath(`/${profile.role}/appointments`);
-    revalidatePath(`/${profile.role}/appointments/${parsed.data.appointment_id}`);
+    if (isPatient) {
+      revalidatePath("/portal/appointments");
+    } else {
+      revalidatePath(`/${profile.role}/appointments`);
+      revalidatePath(`/${profile.role}/appointments/${currentAppt.id}`);
+    }
 
     return { data: updated as Appointment, error: null };
   } catch (err) {
@@ -932,11 +787,13 @@ export async function cancelAppointment(
       // ── Remove any active queue entry for this appointment ──────────────
       // Cancelling a checked-in patient must drop them from today's queue so
       // the queue never contains cancelled patients and metrics stay correct.
+      // Removed from the live queue, not erased — see updateAppointmentStatus.
       const { error: queueDelErr } = await db
         .from("queue_entries")
-        .delete()
+        .update({ removed_at: new Date().toISOString() })
         .eq("appointment_id", appointmentId)
         .eq("clinic_id", profile.clinic_id)
+        .is("removed_at", null)
         .in("status", ["waiting", "in_progress"]);
       if (queueDelErr) {
         console.error("[cancelAppointment] queue cleanup failed:", queueDelErr);

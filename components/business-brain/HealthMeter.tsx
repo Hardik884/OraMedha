@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ArrowDown, ArrowUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ClinicHealth, HealthBand } from "@/lib/business-brain/clinic-health";
 
@@ -46,6 +46,27 @@ interface HealthMeterProps {
    * silent than wrongly marking a covered item as untracked.
    */
   coveredCategories?: ReadonlySet<string>;
+}
+
+/**
+ * The one line under the band, stating what the score is made of.
+ *
+ * Two-sided, so a clinic that is genuinely doing well reads as doing well rather
+ * than merely as having nothing wrong. "Nothing is holding your score back" was
+ * the only positive sentence the v1 score could produce, and it is the weakest
+ * possible one.
+ */
+function standing(health: ClinicHealth): string {
+  const downs = health.deductions.length;
+  const ups = health.credits.length;
+
+  if (downs === 0 && ups === 0) return "Nothing is holding your score back today.";
+  if (downs === 0) {
+    return `${ups} thing${ups === 1 ? "" : "s"} going better than usual for your clinic.`;
+  }
+  const bringing = `${downs} thing${downs === 1 ? "" : "s"} bringing it down`;
+  if (ups === 0) return `${bringing}.`;
+  return `${bringing}, ${ups} going better than usual.`;
 }
 
 /**
@@ -106,15 +127,37 @@ export function HealthMeter({ health, delta, coveredCategories }: HealthMeterPro
           <div className={cn("text-xl font-semibold mt-0.5", bandColorClass)}>
             {health.bandLabel}
           </div>
-          <div className="text-sm text-text-secondary mt-0.5">
-            {health.deductions.length === 0
-              ? "Nothing is holding your score back today."
-              : `${health.deductions.length} thing${health.deductions.length === 1 ? "" : "s"} bringing it down.`}
-          </div>
+          <div className="text-sm text-text-secondary mt-0.5">{standing(health)}</div>
         </div>
 
-        {/* Score-change toast */}
-        {delta && (
+        {/* The movement, not a toast. Derived by recomputing the score from an
+            earlier day's stored metrics — so it is the same rubric on both
+            sides, and there is no stored score able to drift from the data. */}
+        {health.delta && health.delta.points !== 0 && (
+          <div className="ml-auto text-right shrink-0">
+            <div
+              className={cn(
+                "flex items-center justify-end gap-1 text-lg font-semibold tabular-nums",
+                health.delta.points > 0 ? "text-success" : "text-warning",
+              )}
+            >
+              {health.delta.points > 0 ? (
+                <ArrowUp className="h-4 w-4" aria-hidden />
+              ) : (
+                <ArrowDown className="h-4 w-4" aria-hidden />
+              )}
+              {Math.abs(health.delta.points)}
+            </div>
+            <div className="text-[11px] text-text-secondary mt-0.5">
+              vs {health.delta.daysAgo} days ago
+            </div>
+          </div>
+        )}
+
+        {/* Score-change toast. Suppressed when a persistent movement is already
+            shown in the same corner: two "your score changed" messages in one
+            place is one too many, and they would overlap. */}
+        {delta && !health.delta && (
           <div className="absolute right-6 top-4 animate-score-pop text-right">
             <div className={cn("text-sm font-semibold", BAND_COLOR.excellent)}>
               +{delta.points} Health
@@ -125,7 +168,7 @@ export function HealthMeter({ health, delta, coveredCategories }: HealthMeterPro
       </div>
 
       {/* Breakdown — the score is never a lone number */}
-      {health.deductions.length > 0 && (
+      {(health.deductions.length > 0 || health.credits.length > 0) && (
         <>
           <button
             type="button"
@@ -163,7 +206,49 @@ export function HealthMeter({ health, delta, coveredCategories }: HealthMeterPro
                     </li>
                   );
                 })}
+                {/* The credit side of the same ledger, in the same list and the
+                    same units, so the arithmetic on screen adds up to the number
+                    in the ring. Every credit is a live measurement beaten against
+                    this clinic's own normal range — never a reward for ticking
+                    something off, which would make the score gameable. */}
+                {health.credits.map((c) => (
+                  <li key={c.factor} className="flex items-baseline justify-between gap-4">
+                    <span className="text-sm text-text-body">{c.detail}</span>
+                    <span className="text-sm font-medium text-success tabular-nums shrink-0">
+                      +{c.points}
+                    </span>
+                  </li>
+                ))}
               </ul>
+
+              {/* What moved, and which part of the clinic moved it. Only the
+                  dimensions that actually changed: listing six rows of "no
+                  change" is noise, and a dimension nobody could measure is
+                  excluded upstream rather than shown as unchanged. */}
+              {health.delta && health.delta.contributors.length > 0 && (
+                <div className="mt-4 pt-3 border-t border-surface-muted">
+                  <p className="text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">
+                    What changed since {health.delta.daysAgo} days ago
+                  </p>
+                  <ul className="space-y-1.5">
+                    {health.delta.contributors.map((c) => (
+                      <li key={c.dimension} className="flex items-baseline justify-between gap-4">
+                        <span className="text-sm text-text-body">{c.label}</span>
+                        <span
+                          className={cn(
+                            "text-sm font-medium tabular-nums shrink-0",
+                            c.points > 0 ? "text-success" : "text-warning",
+                          )}
+                        >
+                          {c.points > 0 ? "+" : "−"}
+                          {Math.abs(c.points)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {coveredCategories !== undefined &&
                 health.deductions.some((d) => !coveredCategories.has(d.category)) && (
                   <p className="text-xs text-text-secondary mt-3 leading-relaxed">

@@ -30,10 +30,20 @@ export interface ConfidenceAssessment {
   readonly deductions: readonly string[];
 }
 
-/** The date portion a metric actually describes. */
+/**
+ * The business date a metric describes.
+ *
+ * Read from the metric's id (`<key>:<clinic>:<date>`), which the Metrics Engine
+ * stamps with the clinic-local business date. It used to be the date part of
+ * `timestamp` — a UTC instant — which differs from the business date whenever the
+ * clinic is not in UTC: an Asia/Kolkata run before 05:30 local, or any history
+ * day re-derived for a clinic west of UTC, marked every metric as describing
+ * another period and docked every signal's confidence for it.
+ */
 export function metricDatePart(metric: Metric): string {
-  const source = metric.period?.start ?? metric.timestamp;
-  return source.slice(0, 10);
+  if (metric.period?.start !== undefined) return metric.period.start.slice(0, 10);
+  const fromId = metric.id.slice(metric.id.lastIndexOf(":") + 1);
+  return /^\d{4}-\d{2}-\d{2}$/.test(fromId) ? fromId : metric.timestamp.slice(0, 10);
 }
 
 /** How many of these metrics describe a period other than `date`. */
