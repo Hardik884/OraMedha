@@ -103,6 +103,9 @@ export const HEALTHY: MetricValues = {
   [MetricKey.SCHEDULING_BOOKING_LEAD_TIME_DAYS]: 5,
   [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: 4,
   [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: 64,
+  // The denominator behind both attendance rates, above the 20 the
+  // sustained-attrition rule needs before a share of the book is a rate.
+  [MetricKey.SCHEDULING_APPOINTMENTS_30D]: 120,
   [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 71,
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: 94,
   [MetricKey.REVENUE_PRODUCTION_30D]: 480_000,

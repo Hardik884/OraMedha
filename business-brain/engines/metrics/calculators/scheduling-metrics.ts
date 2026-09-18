@@ -84,6 +84,31 @@ export function repeatNonAttenders30d(s: ClinicDataSnapshot): Metric | null {
   );
 }
 
+/**
+ * Appointments in the trailing window — the denominator of both attendance
+ * rates, kept as a fact of its own.
+ *
+ * WITHHELD when the window is absent, because that is "nobody looked". An EMPTY
+ * window legitimately reads 0: the clinic was asked and booked nothing, which is
+ * a real and reportable answer, and the rates above are the ones that go missing
+ * for want of a denominator.
+ *
+ * Deliberately the same count `statusRate` divides by, read from the same array,
+ * so the denominator a rate was computed from and the denominator reported
+ * beside it cannot drift apart.
+ */
+export function appointments30d(s: ClinicDataSnapshot): Metric | null {
+  const window = s.trailingWindow;
+  if (window === undefined) return null;
+  return buildMetric(
+    MetricKey.SCHEDULING_APPOINTMENTS_30D,
+    window.appointments.length,
+    s.clinicId,
+    s.date,
+    s.asOf,
+  );
+}
+
 /** No-show rate over the trailing window. Withheld on the same conditions. */
 export function noShowRate30d(s: ClinicDataSnapshot): Metric | null {
   const window = s.trailingWindow;

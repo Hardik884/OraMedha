@@ -8,6 +8,7 @@
 
 import type { Metric } from "../../../domain";
 import { buildMetric, MetricKey } from "../../metrics/metric-ids";
+import { rateBasisFor } from "../../metrics/metric-bounds";
 import { addDays } from "../../../utils";
 import type { TrajectoryInput } from "../trajectory-engine";
 
@@ -24,20 +25,40 @@ export const flat = (value: number, days: number): number[] => Array.from({ leng
 export const ramp = (from: number, to: number, days: number): number[] =>
   Array.from({ length: days }, (_, i) => Math.round((from + ((to - from) * i) / Math.max(1, days - 1)) * 100) / 100);
 
+/**
+ * Appointments behind each day's rate, unless a test says otherwise.
+ *
+ * CANCELLATIONS is a rate, and a rate never travels without its denominator in
+ * production: the Baseline Engine behind the reference range drops days too
+ * small to carry one. Supplying an ample denominator by default keeps every
+ * scenario here about the TRAJECTORY, which is what it is testing.
+ */
+export const AMPLE_SAMPLE = 90;
+
 export function daily(
   values: readonly (number | null)[],
   key: MetricKey = CANCELLATIONS,
   clinicId: string = CLINIC,
   date: string = DATE,
+  /** Denominator per day, in the same order. Defaults to an ample one. */
+  samples?: readonly (number | null)[],
 ): Pick<TrajectoryInput, "current" | "history"> {
+  const basis = rateBasisFor(key);
   const history: { date: string; metrics: Metric[] }[] = [];
   let current: Metric[] = [];
   values.forEach((value, i) => {
     const day = addDays(date, i - (values.length - 1));
     if (value === null) return;
-    const metric = buildMetric(key, value, clinicId, day, `${day}T12:00:00.000Z`);
-    if (day === date) current = [metric];
-    else history.push({ date: day, metrics: [metric] });
+    const asOf = `${day}T12:00:00.000Z`;
+    const sample = samples === undefined ? AMPLE_SAMPLE : samples[i];
+    const metrics = [
+      buildMetric(key, value, clinicId, day, asOf),
+      ...(basis === undefined || sample === null || sample === undefined
+        ? []
+        : [buildMetric(basis.denominatorKey, sample, clinicId, day, asOf)]),
+    ];
+    if (day === date) current = metrics;
+    else history.push({ date: day, metrics });
   });
   return { current, history };
 }

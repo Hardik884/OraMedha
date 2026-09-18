@@ -44,6 +44,10 @@ import {
 const REQUIRED = [
   MetricKey.SCHEDULING_CANCELLATION_RATE_30D,
   MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+  // The denominator both rates were divided by. Required rather than optional:
+  // without it this rule cannot tell 1-of-3 from 30-of-90, and a rule that
+  // cannot tell them apart should say it could not run.
+  MetricKey.SCHEDULING_APPOINTMENTS_30D,
 ] as const;
 
 export const sustainedAttritionEvaluator: SignalEvaluator = {
@@ -61,7 +65,18 @@ export const sustainedAttritionEvaluator: SignalEvaluator = {
     // are shares of the same whole and add without double-counting. An appointment
     // carries exactly one status, so none can fall into both.
     const combined = Math.round((cancellation + noShow) * 10) / 10;
+    const booked = required.metrics.value(MetricKey.SCHEDULING_APPOINTMENTS_30D);
     const { appointments } = ctx.config;
+
+    // The guard the daily rules have had all along. A 30-day window was assumed
+    // to be a large denominator; at five appointments a week it is thirty, and
+    // two cancellations clear the limit between them.
+    if (booked < appointments.minimumWindowAppointments) {
+      return {
+        kind: "no_signal",
+        reason: `Only ${booked} appointment(s) booked across the window, below the ${appointments.minimumWindowAppointments} needed before a share of them is a rate rather than arithmetic.`,
+      };
+    }
 
     if (combined <= appointments.sustainedAttritionRate) {
       return {
@@ -74,7 +89,7 @@ export const sustainedAttritionEvaluator: SignalEvaluator = {
       type: SignalType.SCHEDULING_SUSTAINED_ATTRITION,
       category: SignalCategory.SCHEDULING,
       title: "A sustained share of the book being lost",
-      description: `Over the last 30 days ${combined}% of booked appointments were cancelled or missed — ${cancellation}% cancelled and ${noShow}% not attended — against a limit of ${appointments.sustainedAttritionRate}%.`,
+      description: `Over the last 30 days ${combined}% of ${booked} booked appointments were cancelled or missed — ${cancellation}% cancelled and ${noShow}% not attended — against a limit of ${appointments.sustainedAttritionRate}%.`,
       observed: {
         label: "Appointments lost (30 days)",
         value: combined,
@@ -93,7 +108,9 @@ export const sustainedAttritionEvaluator: SignalEvaluator = {
           unit: MetricUnit.PERCENTAGE,
         },
         { label: "No-show rate (30 days)", value: noShow, unit: MetricUnit.PERCENTAGE },
+        { label: "Appointments booked (30 days)", value: booked, unit: MetricUnit.COUNT },
       ],
+      denominator: booked,
       metricsRead: required.metrics.all,
     });
   },

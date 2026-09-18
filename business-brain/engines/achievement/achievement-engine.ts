@@ -9,6 +9,9 @@
  * 1. **Measurable on both sides.** Today's value and a judgeable baseline. A
  *    metric that only started being measured this month has not improved; it has
  *    arrived. A `thin` baseline is explicitly not enough — see `isJudgeable`.
+ *    Nor is a thin SAMPLE: a rate over five appointments a week is moved further
+ *    by one person's flat tyre than by anything the clinic did, and no number of
+ *    days fixes that.
  *
  * 2. **Beyond normal variation.** The value must be outside this clinic's own
  *    band, not merely better than its median. Half of all days are better than
@@ -45,8 +48,11 @@
 import type { Achievement } from "../../domain";
 import {
   BaselineDirection,
+  BaselineWithholdReason,
+  hasEnoughHistory,
+  hasEnoughSampleToday,
   isImprovement,
-  isJudgeable,
+  type BaselineWithholding,
   type MetricBaseline,
 } from "../baseline";
 import { ACHIEVEMENT_SPECS, type AchievementSpec } from "./achievement-catalog";
@@ -55,6 +61,13 @@ import { ACHIEVEMENT_SPECS, type AchievementSpec } from "./achievement-catalog";
 export type AchievementRejection =
   | "no_baseline"
   | "baseline_too_thin"
+  /**
+   * The metric is a rate and too few events sit behind it — today's, or the
+   * history's. Separate from `baseline_too_thin` because the remedy is
+   * different and neither one is the clinic's fault: more days will fix a thin
+   * baseline, and only more appointments will fix a thin sample.
+   */
+  | "sample_too_small"
   | "not_measured_today"
   | "inside_normal_range"
   | "wrong_direction"
@@ -132,8 +145,46 @@ function excursion(baseline: MetricBaseline): number {
  * with no wins produces an empty list plus seven stated reasons — never silence
  * that could be mistaken for the check not running.
  */
+/**
+ * What to say about a catalogued metric that got no baseline at all.
+ *
+ * Without the withholding this is one sentence for two different situations:
+ * a metric nobody has ever measured, and a metric measured faithfully every day
+ * at a clinic too small for the rate to mean anything. The second is not a gap
+ * in the records and should never be reported as one.
+ */
+function describeMissingBaseline(withheld: BaselineWithholding | undefined): {
+  readonly rejection: AchievementRejection;
+  readonly reasoning: string;
+} {
+  if (withheld === undefined) {
+    return {
+      rejection: "no_baseline",
+      reasoning: "No history for this metric, so there is no normal range to compare against.",
+    };
+  }
+  if (withheld.reason === BaselineWithholdReason.SAMPLE_TOO_SMALL) {
+    return {
+      rejection: "sample_too_small",
+      reasoning: `Measured on ${withheld.daysSeen} day(s), but only ${withheld.daysUsable} of them had at least ${withheld.minimumSample ?? 0} ${withheld.sampleNoun ?? "events"} behind the rate — too few for a normal range to mean anything.`,
+    };
+  }
+  return {
+    rejection: "no_baseline",
+    reasoning: `Measured on ${withheld.daysSeen} day(s), too few for a normal range.`,
+  };
+}
+
 export function deriveAchievements(params: {
   readonly baselines: ReadonlyMap<string, MetricBaseline>;
+  /**
+   * Metrics the Baseline Engine saw and withheld, with the reason.
+   *
+   * Optional, and the engine behaves identically without it apart from the
+   * wording of a rejection — which is exactly what the decision trace is read
+   * for, so the caller should pass it.
+   */
+  readonly withheld?: ReadonlyMap<string, BaselineWithholding>;
   readonly clinicId: string;
   readonly date: string;
   readonly now: string;
@@ -148,22 +199,43 @@ export function deriveAchievements(params: {
 
     // Gate 1a — a baseline exists at all.
     if (baseline === undefined) {
+      const withheld = params.withheld?.get(spec.metricKey);
       decisions.push({
         metricKey: spec.metricKey,
         emitted: false,
-        rejection: "no_baseline",
-        reasoning: "No history for this metric, so there is no normal range to compare against.",
+        ...describeMissingBaseline(withheld),
       });
       continue;
     }
 
     // Gate 1b — and it rests on enough history to judge against.
-    if (!isJudgeable(baseline)) {
+    if (!hasEnoughHistory(baseline)) {
       decisions.push({
         metricKey: spec.metricKey,
         emitted: false,
         rejection: "baseline_too_thin",
         reasoning: `Baseline rests on ${baseline.observations} day(s) (${baseline.quality}); too few to call a change unusual.`,
+      });
+      continue;
+    }
+
+    // Gate 1b(ii) — and today's reading has enough events behind it.
+    //
+    // A rate over a handful of appointments moves further on one person's flat
+    // tyre than on anything the clinic changed. The band may be perfectly solid
+    // and this day still unjudgeable against it.
+    if (!hasEnoughSampleToday(baseline)) {
+      const sample = baseline.sample;
+      decisions.push({
+        metricKey: spec.metricKey,
+        emitted: false,
+        rejection: "sample_too_small",
+        reasoning:
+          sample === null
+            ? "Too few events behind today's reading to judge it."
+            : sample.current === null
+              ? `The ${sample.noun} behind this rate were not measured today, so the rate cannot be judged.`
+              : `${sample.current} ${sample.noun} in the window, below the ${sample.minimum} needed before one of them stops moving this rate more than a real change would.`,
       });
       continue;
     }

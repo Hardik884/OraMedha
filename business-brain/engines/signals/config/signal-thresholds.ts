@@ -124,6 +124,19 @@ export interface SignalThresholdConfig {
      */
     readonly sustainedAttritionRate: number;
     /**
+     * Appointments in the trailing window before its rates carry a finding.
+     *
+     * The daily rules have `minimumAppointmentSample` for exactly this reason,
+     * and the window rules were written believing a 30-day denominator was
+     * always large enough. At a clinic booking five a week it is thirty
+     * appointments over the whole window, where one cancellation is 3 points
+     * and two of them clear a 15% limit between them.
+     *
+     * A statistical guard, not a size threshold, so it stays global and
+     * uncalibrated — the same reasoning as `minimumMeasuredVisits`.
+     */
+    readonly minimumWindowAppointments: number;
+    /**
      * Median booking lead time above which demand is read as pressing against
      * capacity (days).
      *
@@ -266,6 +279,12 @@ export const DEFAULT_SIGNAL_THRESHOLDS: SignalThresholdConfig = {
     // separate daily thresholds are 10% and 8%; a month sustaining their rough
     // sum is a policy problem rather than a run of bad luck.
     sustainedAttritionRate: 15,
+    // Twenty. One appointment then moves the combined rate by 5 points, a third
+    // of the 15% limit, so no single cancellation can carry a finding on its
+    // own. Deliberately lower than the 50 a BASELINE asks of the same
+    // denominator: this rule compares against a fixed limit, where the band has
+    // to resolve this clinic's own day-to-day spread.
+    minimumWindowAppointments: 20,
     // Two weeks. Long enough that an urgent patient goes elsewhere, short enough
     // that a genuinely booked-out practice clears it.
     longBookingLeadTimeDays: 14,

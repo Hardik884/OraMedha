@@ -728,6 +728,10 @@ export class BusinessBrain {
     baselines = baselineResult.baselines;
     achievements = deriveAchievements({
       baselines: baselineResult.byKey,
+      // So a metric with no band can say WHICH question failed — no history, or
+      // a clinic too small for the rate to be judged. The two read differently
+      // to a dentist and the decision trace is what carries the distinction.
+      withheld: baselineResult.withheldByKey,
       clinicId,
       date,
       now: startedAt,

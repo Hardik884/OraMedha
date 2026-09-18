@@ -66,6 +66,11 @@ export const HEALTHY_CLINIC: MetricValues = {
   // Above `minimumMeasuredVisits` (10), so the overrun rule judges the rate
   // rather than standing down on sample size.
   [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: 64,
+  // The denominator both attendance rates were divided by. Above
+  // `minimumWindowAppointments` (20), so the sustained-attrition rule judges the
+  // rates rather than standing down on sample size — the same role
+  // SCHEDULING_MEASURED_VISITS_30D plays for the overrun rule.
+  [MetricKey.SCHEDULING_APPOINTMENTS_30D]: 120,
   [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 71,
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: 94,
   // Above `minimumProductionForRateCheck` (125,000), so the collection-rate rule

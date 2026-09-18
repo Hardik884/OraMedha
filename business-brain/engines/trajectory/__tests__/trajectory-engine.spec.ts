@@ -178,6 +178,42 @@ describe("insufficient history and thin samples", () => {
   });
 });
 
+describe("a rate with too little behind it", () => {
+  it("has no reference range at all when the days were too small to carry the rate", () => {
+    // Five appointments a week. Every reading is real; none of them can be a
+    // point in a range, because one cancellation is twenty points.
+    const t = deriveTrajectories({
+      clinicId: CLINIC,
+      date: DATE,
+      ...daily(flat(6, 36), CANCELLATIONS, CLINIC, DATE, flat(5, 36)),
+    }).byKey.get(CANCELLATIONS);
+
+    expect(t?.state).toBe(TrajectoryState.INSUFFICIENT_DATA);
+    // And it says WHICH thing is missing. "Wait for more days" would be advice
+    // this clinic could follow for a year without it becoming true.
+    expect(t?.insufficientReason).toContain("behind the rate");
+    expect(t?.insufficientReason).not.toContain("measured days older than");
+  });
+
+  it("builds the range from the days that could carry it", () => {
+    // Four quiet days in an otherwise ordinary five weeks. Before the rule they
+    // were points in the range; now they are not evidence about the rate.
+    const samples = flat(90, 36);
+    for (const i of [2, 3, 4, 5]) samples[i] = 4;
+    const values = flat(6, 36);
+    for (const i of [2, 3, 4, 5]) values[i] = 50;
+
+    const t = deriveTrajectories({
+      clinicId: CLINIC,
+      date: DATE,
+      ...daily(values, CANCELLATIONS, CLINIC, DATE, samples),
+    }).byKey.get(CANCELLATIONS);
+
+    expect(t?.state).toBe(TrajectoryState.STABLE);
+    expect(t?.reference?.median).toBe(6);
+  });
+});
+
 describe("lifecycle", () => {
   it("marks a warning that has held without change as unchanged", () => {
     const t = cancellations([...flat(6, 15), ...flat(12, 21)]);

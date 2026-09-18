@@ -44,6 +44,7 @@ import {
   appointmentCapacityToday,
 } from "./capacity-metrics";
 import {
+  appointments30d,
   cancellationRate30d,
   noShowRate30d,
   repeatNonAttenders30d,
@@ -71,6 +72,7 @@ export const METRIC_CALCULATORS: readonly MetricCalculator[] = [
   cancelledAppointmentsToday,
   noShowsToday,
   // Scheduling (trailing window)
+  appointments30d,
   cancellationRate30d,
   noShowRate30d,
   repeatNonAttenders30d,

@@ -63,6 +63,10 @@ describe("metric manifest", () => {
         // support for payment plans, never "nobody has one".
         MetricKey.REVENUE_OUTSTANDING_ON_PAYMENT_PLAN,
         MetricKey.SCHEDULING_BOOKING_LEAD_TIME_DAYS,
+        // No trailing window was supplied, so the denominator behind both rates
+        // was never looked at. An empty window would read 0 here — the clinic
+        // booked nothing, which is a measurement — and that is the distinction.
+        MetricKey.SCHEDULING_APPOINTMENTS_30D,
         MetricKey.SCHEDULING_CANCELLATION_RATE_30D,
         // No trailing window means no appointments to have been missed. Zero
         // would claim nobody misses appointments here, which is a different

@@ -23,6 +23,7 @@ import {
   DEFAULT_ACHIEVEMENT_CONFIG,
   deriveAchievements,
 } from "../achievement-engine";
+import { BaselineWithholdReason, type BaselineWithholding } from "../../baseline";
 import { ACHIEVEMENT_SPECS } from "../achievement-catalog";
 
 const CLINIC = "clinic_ach";
@@ -50,6 +51,19 @@ function baseline(over: Partial<MetricBaseline> = {}): MetricBaseline {
     delta: current - median,
     deltaPercent: null,
     observations: 8,
+    // The default is a rate metric, so it carries a denominator in production
+    // too. Sized above the rule, so every test that is not ABOUT the sample
+    // behaves as it did before the rule existed.
+    sample: {
+      key: MetricKey.SCHEDULING_APPOINTMENTS_30D,
+      noun: "appointments",
+      minimum: 50,
+      current: 90,
+      median: 88,
+      sufficientToday: true,
+      daysExcluded: 0,
+    },
+    clamped: false,
     quality: BaselineQuality.ADEQUATE,
     position: current < median - 2.2 ? "below" : current > median + 2.2 ? "above" : "inside",
     consecutiveOutside: 3,
@@ -58,9 +72,13 @@ function baseline(over: Partial<MetricBaseline> = {}): MetricBaseline {
   };
 }
 
-function run(baselines: readonly MetricBaseline[]) {
+function run(
+  baselines: readonly MetricBaseline[],
+  withheld: readonly BaselineWithholding[] = [],
+) {
   return deriveAchievements({
     baselines: new Map(baselines.map((b) => [b.key, b])),
+    withheld: new Map(withheld.map((w) => [w.key, w])),
     clinicId: CLINIC,
     date: DATE,
     now: NOW,
@@ -110,6 +128,64 @@ describe("gate 1 — measurable on both sides", () => {
     const result = run([]);
     expect(result.achievements).toEqual([]);
     expect(rejectionFor(result, MetricKey.SCHEDULING_NO_SHOW_RATE_30D)).toBe("no_baseline");
+  });
+
+  it("refuses a rate with too few appointments behind TODAY, band or no band", () => {
+    // The band may be perfectly solid; this day cannot be compared against it.
+    // Four appointments and one missed reads 25%, and one flat tyre moves it
+    // further than anything the clinic could have changed.
+    const result = run([
+      baseline({
+        current: 25,
+        position: "above",
+        sample: {
+          key: MetricKey.SCHEDULING_APPOINTMENTS_30D,
+          noun: "appointments",
+          minimum: 50,
+          current: 4,
+          median: 80,
+          sufficientToday: false,
+          daysExcluded: 0,
+        },
+      }),
+    ]);
+    expect(result.achievements).toEqual([]);
+    expect(rejectionFor(result, MetricKey.SCHEDULING_NO_SHOW_RATE_30D)).toBe("sample_too_small");
+    // And the sentence says which number was short, so a dentist is not left
+    // guessing what "not enough data" refers to.
+    const decision = result.decisions.find(
+      (d) => d.metricKey === MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+    );
+    expect(decision?.reasoning).toContain("4 appointments");
+    expect(decision?.reasoning).toContain("50");
+  });
+
+  it("distinguishes a clinic too small to judge from one never measured", () => {
+    // Both have no baseline. They are not the same situation, and only one of
+    // them is fixed by waiting.
+    const never = run([]);
+    expect(rejectionFor(never, MetricKey.SCHEDULING_NO_SHOW_RATE_30D)).toBe("no_baseline");
+
+    const tooSmall = run(
+      [],
+      [
+        {
+          key: MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+          reason: BaselineWithholdReason.SAMPLE_TOO_SMALL,
+          daysSeen: 30,
+          daysUsable: 0,
+          minimumSample: 50,
+          sampleNoun: "appointments",
+        },
+      ],
+    );
+    expect(rejectionFor(tooSmall, MetricKey.SCHEDULING_NO_SHOW_RATE_30D)).toBe(
+      "sample_too_small",
+    );
+    const decision = tooSmall.decisions.find(
+      (d) => d.metricKey === MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+    );
+    expect(decision?.reasoning).toContain("30 day(s)");
   });
 
   it("refuses a thin baseline, however good today looks", () => {

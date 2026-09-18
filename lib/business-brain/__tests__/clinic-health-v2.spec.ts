@@ -58,6 +58,10 @@ function beating(key: string, median: number, current: number): MetricBaseline {
     delta: current - median,
     deltaPercent: null,
     observations: 12,
+    // Not a rate as far as this fixture is concerned: the scorer reads position
+    // and quality, never the denominator.
+    sample: null,
+    clamped: false,
     quality: BaselineQuality.ADEQUATE,
     position: current < median - halfWidth ? "below" : current > median + halfWidth ? "above" : "inside",
     consecutiveOutside: 3,

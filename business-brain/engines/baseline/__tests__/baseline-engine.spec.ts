@@ -21,8 +21,11 @@ import { buildMetric, MetricKey } from "../../metrics/metric-ids";
 import {
   BaselineDirection,
   BaselineQuality,
+  BaselineWithholdReason,
   DEFAULT_BASELINE_CONFIG,
   deriveBaselines,
+  hasEnoughHistory,
+  hasEnoughSampleToday,
   isImprovement,
   isJudgeable,
   medianAbsoluteDeviation,
@@ -36,19 +39,54 @@ const CLINIC = "clinic_baseline";
 const DATE = "2026-09-12";
 const KEY = MetricKey.SCHEDULING_NO_SHOW_RATE_30D;
 
+/**
+ * Appointments behind each day's rate, unless a test says otherwise.
+ *
+ * KEY is a rate, and in production it never travels without its denominator. 90
+ * is comfortably past the 50 the rule asks for, so every test that is not ABOUT
+ * the denominator reads exactly as it did before the rule existed.
+ */
+const AMPLE = 90;
+
 /** History days counting back from the day before DATE, oldest first. */
-function history(values: readonly number[], key: string = KEY): BaselineHistoryDay[] {
+function history(
+  values: readonly number[],
+  key: string = KEY,
+  /** Appointments behind each day, in the same order. */
+  denominators?: readonly number[],
+): BaselineHistoryDay[] {
   return values.map((value, i) => {
     const day = `2026-09-${String(12 - values.length + i).padStart(2, "0")}`;
+    const asOf = `${day}T18:00:00.000Z`;
+    const denominator = denominators === undefined ? AMPLE : denominators[i];
     return {
       date: day,
-      metrics: [buildMetric(key as MetricKey, value, CLINIC, day, `${day}T18:00:00.000Z`)],
+      metrics: [
+        buildMetric(key as MetricKey, value, CLINIC, day, asOf),
+        ...(denominator === undefined
+          ? []
+          : [
+              buildMetric(
+                MetricKey.SCHEDULING_APPOINTMENTS_30D,
+                denominator,
+                CLINIC,
+                day,
+                asOf,
+              ),
+            ]),
+      ],
     };
   });
 }
 
-function todayIs(value: number, key: string = KEY) {
-  return [buildMetric(key as MetricKey, value, CLINIC, DATE, `${DATE}T18:00:00.000Z`)];
+function todayIs(value: number, key: string = KEY, denominator: number | null = AMPLE) {
+  const asOf = `${DATE}T18:00:00.000Z`;
+  return [
+    buildMetric(key as MetricKey, value, CLINIC, DATE, asOf),
+    ...(denominator === null
+      ? []
+      : [buildMetric(MetricKey.SCHEDULING_APPOINTMENTS_30D, denominator, CLINIC, DATE, asOf)]),
+  ];
 }
 
 function baselineFor(
@@ -325,6 +363,164 @@ describe("determinism", () => {
     });
     const keys = deriveBaselines({ history: days, current: [] }).baselines.map((b) => b.key);
     expect(keys).toEqual([...keys].sort());
+  });
+});
+
+// ── Denominators, and the bands that ran off the end of the scale ────────────
+
+describe("rates with too little behind them", () => {
+  /**
+   * This is the defect the rule exists for, reproduced.
+   *
+   * Five appointments a week: one missed appointment is twenty points, so the
+   * spread of those swings became the band, and the band ran from below zero to
+   * two thirds of the appointment book. Both ends are wrong — a clinic cannot
+   * miss a negative share of its appointments — and the whole range is an
+   * artefact of the denominator rather than a description of the clinic.
+   */
+  it("excludes days whose denominator was too small to carry a rate", () => {
+    const tiny = [0, 20, 0, 0, 40, 0, 20, 0];
+    const result = deriveBaselines({
+      history: history(tiny, KEY, tiny.map(() => 5)),
+      current: todayIs(20, KEY, 5),
+    });
+
+    expect(result.byKey.get(KEY)).toBeUndefined();
+    const withheld = result.withheldByKey.get(KEY);
+    expect(withheld?.reason).toBe(BaselineWithholdReason.SAMPLE_TOO_SMALL);
+    // Says both halves: it WAS measured, on every one of those days, and none of
+    // them could carry the rate. "No history" would be the wrong sentence.
+    expect(withheld?.daysSeen).toBe(8);
+    expect(withheld?.daysUsable).toBe(0);
+    expect(withheld?.minimumSample).toBe(50);
+  });
+
+  it("builds the band from the days that qualify and ignores the rest", () => {
+    // Six ordinary weeks at 10%, plus two quiet days where one missed
+    // appointment out of four read as 25%. Before the rule those two days
+    // doubled the band; now they are not evidence about the rate at all.
+    const values = [10, 10, 11, 9, 10, 10, 25, 25];
+    const denominators = [90, 88, 91, 87, 92, 90, 4, 4];
+    const baseline = deriveBaselines({
+      history: history(values, KEY, denominators),
+      current: todayIs(10),
+    }).byKey.get(KEY);
+
+    expect(baseline?.observations).toBe(6);
+    expect(baseline?.median).toBe(10);
+    expect(baseline?.sample?.daysExcluded).toBe(2);
+    expect(baseline?.sample?.median).toBe(90);
+  });
+
+  it("keeps the band but refuses to judge TODAY against it on a thin day", () => {
+    const baseline = deriveBaselines({
+      history: history([10, 10, 11, 9, 10, 10]),
+      // Four appointments today, one missed: 25%, and meaningless.
+      current: todayIs(25, KEY, 4),
+    }).byKey.get(KEY);
+
+    // The band is solid. It is this DAY that cannot be compared against it, and
+    // the two questions are answered separately.
+    expect(hasEnoughHistory(baseline!)).toBe(true);
+    expect(hasEnoughSampleToday(baseline!)).toBe(false);
+    expect(isJudgeable(baseline!)).toBe(false);
+    expect(baseline?.sample?.current).toBe(4);
+    expect(baseline?.sample?.minimum).toBe(50);
+    // Still measured, still positioned. Withholding the READING would be a
+    // different and wrong answer: the clinic really did miss one of four.
+    expect(baseline?.current).toBe(25);
+    expect(baseline?.position).toBe("above");
+  });
+
+  it("refuses to judge a day whose denominator was never measured", () => {
+    const baseline = deriveBaselines({
+      history: history([10, 10, 11, 9, 10, 10]),
+      current: todayIs(25, KEY, null),
+    }).byKey.get(KEY);
+
+    expect(baseline?.sample?.current).toBeNull();
+    expect(hasEnoughSampleToday(baseline!)).toBe(false);
+  });
+
+  it("leaves metrics that are not rates alone", () => {
+    // A count of overdue recalls has no denominator that could be thin, so it
+    // must not acquire one by accident.
+    const baseline = deriveBaselines({
+      history: history([4, 5, 4, 6, 4, 5], MetricKey.FOLLOWUPS_OVERDUE, []),
+      current: todayIs(2, MetricKey.FOLLOWUPS_OVERDUE, null),
+    }).byKey.get(MetricKey.FOLLOWUPS_OVERDUE);
+
+    expect(baseline?.sample).toBeNull();
+    expect(isJudgeable(baseline!)).toBe(true);
+  });
+});
+
+describe("bands stay inside the scale", () => {
+  it("never reports a negative share of the appointment book", () => {
+    const baseline = deriveBaselines({
+      history: history([1, 0, 2, 0, 3, 0]),
+      current: todayIs(1),
+    }).byKey.get(KEY);
+
+    expect(baseline?.lower).toBe(0);
+    expect(baseline?.clamped).toBe(true);
+    // Today at 1% sits inside a band the clamp did not distort: the reading is
+    // unchanged, only the impossible end of the range was cut.
+    expect(baseline?.position).toBe("inside");
+  });
+
+  it("never reports more than the whole book being missed", () => {
+    const baseline = deriveBaselines({
+      history: history([96, 97, 98, 97, 96, 99]),
+      current: todayIs(97),
+    }).byKey.get(KEY);
+
+    expect(baseline?.upper).toBe(100);
+    expect(baseline?.clamped).toBe(true);
+  });
+
+  it("floors a count at zero", () => {
+    const baseline = deriveBaselines({
+      history: history([1, 0, 1, 0, 1, 0], MetricKey.FOLLOWUPS_OVERDUE, []),
+      current: todayIs(0, MetricKey.FOLLOWUPS_OVERDUE, null),
+    }).byKey.get(MetricKey.FOLLOWUPS_OVERDUE);
+
+    expect(baseline?.lower).toBe(0);
+  });
+
+  it("leaves a signed percentage signed", () => {
+    // Appointment overrun is a divergence, not a share: finishing early is a
+    // negative reading and clamping it at zero would erase half the metric.
+    const key = MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D;
+    const baseline = deriveBaselines({
+      history: history([-5, -4, -6, -5, -4, -5], key, []).map((day, i) => ({
+        ...day,
+        metrics: [
+          ...day.metrics,
+          buildMetric(
+            MetricKey.SCHEDULING_MEASURED_VISITS_30D,
+            40,
+            CLINIC,
+            day.date,
+            `${day.date}T18:00:00.000Z`,
+          ),
+        ],
+        ...(i === -1 ? {} : {}),
+      })),
+      current: [
+        ...todayIs(-5, key, null),
+        buildMetric(
+          MetricKey.SCHEDULING_MEASURED_VISITS_30D,
+          40,
+          CLINIC,
+          DATE,
+          `${DATE}T18:00:00.000Z`,
+        ),
+      ],
+    }).byKey.get(key);
+
+    expect(baseline?.lower).toBeLessThan(0);
+    expect(baseline?.clamped).toBe(false);
   });
 });
 

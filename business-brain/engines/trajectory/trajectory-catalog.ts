@@ -117,6 +117,7 @@ export const NO_TRAJECTORY: Readonly<Record<string, string>> = {
   [MetricKey.APPOINTMENTS_NO_SHOWS_TODAY]: "a single day's count; the 30-day rate carries the trajectory",
   [MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D]: "a small-sample count where one patient is a large swing",
   [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: "a sample-size guard, not an outcome",
+  [MetricKey.SCHEDULING_APPOINTMENTS_30D]: "a sample-size guard, not an outcome; its own movement is booking volume, which the forward window carries",
   [MetricKey.PATIENTS_NEW_TODAY]: "a single day's count",
   [MetricKey.PATIENTS_RETURNING_TODAY]: "a single day's count; reactivation candidates carry the retention trajectory",
   [MetricKey.REVENUE_COLLECTED_TODAY]: "a single day's total",

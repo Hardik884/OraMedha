@@ -66,9 +66,15 @@ import {
   type TrajectoryWeek,
 } from "../../domain";
 import { addDays, daysBetween } from "../../utils";
-import { BaselineQuality, DEFAULT_BASELINE_CONFIG, deriveBaselines } from "../baseline";
+import {
+  BaselineQuality,
+  BaselineWithholdReason,
+  DEFAULT_BASELINE_CONFIG,
+  deriveBaselines,
+} from "../baseline";
 import { median } from "../metrics/support/windows";
 import { METRIC_DESCRIPTORS, type MetricKey } from "../metrics/metric-ids";
+import { rateBasisFor } from "../metrics/metric-bounds";
 import { TRAJECTORY_CATALOG, type TrajectorySpec } from "./trajectory-catalog";
 
 export interface TrajectoryConfig {
@@ -237,8 +243,9 @@ function trajectoryFor(
   const today = input.current.find((m) => keyOf(m) === spec.metricKey);
   if (today !== undefined && Number.isFinite(today.value)) series.set(input.date, today.value);
 
-  const reference = referenceFor(spec, input, days, config);
-  const evaluate = (asOf: string) => evaluateAt(series, asOf, spec, reference, config);
+  const { reference, unusableReason } = referenceFor(spec, input, days, config);
+  const evaluate = (asOf: string) =>
+    evaluateAt(series, asOf, spec, reference, config, unusableReason);
   const now = evaluate(input.date);
   const lifecycle = lifecycleFor(now, evaluate, input.date, config);
 
@@ -303,31 +310,66 @@ function trajectoryFor(
 }
 
 /** The earlier normal range, from days older than the recent window. */
+/**
+ * The reference range, and — when there is none — why not.
+ *
+ * The reason matters because two very different situations arrive here as the
+ * same `null`: not enough DAYS, and enough days at a clinic too small for the
+ * rate to mean anything. Telling a five-appointment-a-week practice it needs
+ * more days would be advice it can follow for a year without effect.
+ */
+interface ReferenceOutcome {
+  readonly reference: TrajectoryReference | null;
+  readonly unusableReason: string | null;
+}
+
 function referenceFor(
   spec: TrajectorySpec,
   input: TrajectoryInput,
   days: ReadonlyMap<string, readonly Metric[]>,
   config: TrajectoryConfig,
-): TrajectoryReference | null {
+): ReferenceOutcome {
   const windowStart = addDays(input.date, -(config.windowDays - 1));
   const lastReferenceDay = addDays(input.date, -config.recentDays);
+  // A rate travels with its denominator, so the Baseline Engine can drop the
+  // days too small to carry it. Narrowing to the metric alone would hand it a
+  // rate with nothing to judge the sample by — and it would build the band from
+  // exactly the days that should not be in it.
+  const basis = rateBasisFor(spec.metricKey);
+  const keep = new Set<string>([
+    spec.metricKey,
+    ...(basis === undefined ? [] : [basis.denominatorKey as string]),
+  ]);
   const referenceDays = [...days.entries()]
     .filter(([date]) => date >= windowStart && date <= lastReferenceDay)
-    .map(([date, metrics]) => ({ date, metrics: metrics.filter((m) => keyOf(m) === spec.metricKey) }))
-    .filter((d) => d.metrics.length > 0)
+    .map(([date, metrics]) => ({ date, metrics: metrics.filter((m) => keep.has(keyOf(m))) }))
+    .filter((d) => d.metrics.some((m) => keyOf(m) === spec.metricKey))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
-  if (referenceDays.length === 0) return null;
+  if (referenceDays.length === 0) return { reference: null, unusableReason: null };
 
-  const baseline = deriveBaselines({ history: referenceDays, current: [] }).byKey.get(spec.metricKey);
-  if (baseline === undefined || baseline.quality === BaselineQuality.NONE) return null;
+  const derived = deriveBaselines({ history: referenceDays, current: [] });
+  const baseline = derived.byKey.get(spec.metricKey);
+  if (baseline === undefined || baseline.quality === BaselineQuality.NONE) {
+    const withheld = derived.withheldByKey.get(spec.metricKey);
+    return {
+      reference: null,
+      unusableReason:
+        withheld?.reason === BaselineWithholdReason.SAMPLE_TOO_SMALL
+          ? `only ${withheld.daysUsable} of ${withheld.daysSeen} measured day(s) had at least ${withheld.minimumSample ?? 0} ${withheld.sampleNoun ?? "events"} behind the rate, so there is no range this clinic's size can support`
+          : null,
+    };
+  }
   return {
-    from: referenceDays[0].date,
-    to: referenceDays[referenceDays.length - 1].date,
-    median: baseline.median,
-    lower: baseline.lower,
-    upper: baseline.upper,
-    observations: baseline.observations,
-    quality: baseline.quality as TrajectoryReference["quality"],
+    reference: {
+      from: referenceDays[0].date,
+      to: referenceDays[referenceDays.length - 1].date,
+      median: baseline.median,
+      lower: baseline.lower,
+      upper: baseline.upper,
+      observations: baseline.observations,
+      quality: baseline.quality as TrajectoryReference["quality"],
+    },
+    unusableReason: null,
   };
 }
 
@@ -345,6 +387,8 @@ function evaluateAt(
   spec: TrajectorySpec,
   reference: TrajectoryReference | null,
   config: TrajectoryConfig,
+  /** Why there is no reference, when the answer is not simply "too few days". */
+  unusableReason: string | null = null,
 ): Evaluation {
   const windowStart = addDays(asOf, -(config.windowDays - 1));
   const measured: string[] = [];
@@ -405,7 +449,8 @@ function evaluateAt(
 
   if (reference === null || reference.quality === "thin") {
     return insufficient(
-      `fewer than ${DEFAULT_BASELINE_CONFIG.adequateObservations} measured days older than the last ${config.recentDays} to define this clinic's normal range`,
+      unusableReason ??
+        `fewer than ${DEFAULT_BASELINE_CONFIG.adequateObservations} measured days older than the last ${config.recentDays} to define this clinic's normal range`,
     );
   }
   if (current === null) return insufficient("it was not measured today");

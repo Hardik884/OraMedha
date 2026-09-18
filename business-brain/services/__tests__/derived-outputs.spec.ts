@@ -25,6 +25,7 @@ import type {
   StoredMetricDay,
 } from "../../repositories";
 import { BusinessBrain } from "../business-brain-service";
+import { rateBasisFor } from "../../engines/metrics/metric-bounds";
 import { addDays } from "../../utils";
 import type { Logger } from "../../utils";
 
@@ -58,6 +59,14 @@ function snapshotFor(
     source: "walk_in",
   }));
 
+  // The trailing window repeats the day's pattern, so its rate is identical and
+  // its DENOMINATOR is a month's worth rather than a day's. A rate over twenty
+  // appointments is not judged against a band at all (see `metric-bounds.ts`),
+  // and a fixture standing in for thirty days should not read like one day.
+  const windowAppointments = Array.from({ length: 3 }, (_, week) =>
+    appointments.map((a) => ({ ...a, id: `${a.id}-w${week}` })),
+  ).flat();
+
   return {
     clinicId,
     date,
@@ -73,7 +82,7 @@ function snapshotFor(
     trailingWindow: {
       from: addDays(date, -29),
       to: date,
-      appointments,
+      appointments: windowAppointments,
       openChairMinutes: 480 * 30,
     },
   };
@@ -109,19 +118,35 @@ class FakeHistoryStore implements MetricHistoryStore {
   }
 }
 
-/** Stored days carrying one metric at a fixed value. */
+/**
+ * Stored days carrying one metric at a fixed value — plus its denominator, when
+ * the metric is a rate.
+ *
+ * A stored rate without its denominator is a day the Baseline Engine cannot use,
+ * which is correct in production and would make every scenario here a test of
+ * the missing denominator rather than of the band.
+ */
 function storedDays(
   count: number,
   key: string,
   value: number,
   endingBefore = DATE,
+  /** Appointments behind each stored day, ample by default. */
+  sample = 60,
 ): Map<string, StoredMetricDay> {
+  const basis = rateBasisFor(key);
   const days = new Map<string, StoredMetricDay>();
   for (let offset = 1; offset <= count; offset += 1) {
     const date = addDays(endingBefore, -offset);
+    const measuredAt = `${date}T18:00:00.000Z`;
     days.set(date, {
       date,
-      metrics: [{ key, value, measuredAt: `${date}T18:00:00.000Z` }],
+      metrics: [
+        { key, value, measuredAt },
+        ...(basis === undefined
+          ? []
+          : [{ key: basis.denominatorKey as string, value: sample, measuredAt }]),
+      ],
     });
   }
   return days;

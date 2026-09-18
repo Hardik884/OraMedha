@@ -43,6 +43,29 @@
  * are expected to state both — see `docs`-level guidance in the audit and the
  * absolute floors kept in `signal-thresholds.ts`.
  *
+ * ## A band never runs past the ends of the scale
+ *
+ * Bands are clamped into the metric's own domain (`metric-bounds.ts`). The
+ * clinic's normal no-show range read "-0.1% to 66.7%" before this: the lower
+ * edge described a negative share of the appointment book, which is not a low
+ * reading but an impossible one, and a reader who sees one impossible number
+ * stops believing the other.
+ *
+ * Clamping is cosmetic on its own, though — it tidies the symptom. The rule
+ * below is the fix.
+ *
+ * ## A rate is not judged without enough behind it
+ *
+ * A rate arrives with its denominator already divided away, so 1-of-3 and
+ * 30-of-90 are the same 33%. Days whose denominator was too small to carry a
+ * rate are EXCLUDED from the series rather than averaged into it, because it is
+ * exactly those days' swings that widened the band until it meant nothing. When
+ * today's own denominator is too small, the baseline still exists and is still
+ * reported — with `sample.sufficientToday` false, which `isJudgeable` refuses.
+ *
+ * "Too few appointments to judge" is the honest reading of a five-appointment
+ * week, and it is a different statement from "normal".
+ *
  * ## Pure
  *
  * History and current metrics in, baselines out. No clock, no I/O, no randomness.
@@ -53,6 +76,9 @@ import type { Metric } from "../../domain";
 // Reused rather than redefined. A second median in the module is a second place
 // for the definition to drift, and this one is already the engine's.
 import { median } from "../metrics/support/windows";
+// What a metric's values can be, and what its rate was divided by. Both belong
+// to the metric rather than to this engine — see `metric-bounds.ts`.
+import { boundsFor, clampToBounds, rateBasisFor } from "../metrics/metric-bounds";
 
 /**
  * How much history stands behind a baseline.
@@ -87,6 +113,35 @@ export type BaselineDirection =
 
 /** Which side of the normal band a value falls on. */
 export type BandPosition = "above" | "below" | "inside";
+
+/**
+ * The denominator behind a rate, as this baseline actually found it.
+ *
+ * Present only for metrics that are rates over a countable denominator; null
+ * everywhere else, which is most metrics. A count has no denominator to be thin.
+ */
+export interface BaselineSample {
+  /** The metric key holding the denominator, e.g. "scheduling.appointments_30d". */
+  readonly key: string;
+  /** What that denominator counts, for a sentence a clinic reads. */
+  readonly noun: string;
+  /** Events needed behind the rate before a band may be judged against it. */
+  readonly minimum: number;
+  /** Today's denominator, or null when it was not measured today. */
+  readonly current: number | null;
+  /** Typical denominator across the days the band was built from. */
+  readonly median: number;
+  /**
+   * Whether TODAY's reading has enough behind it to be judged against the band.
+   *
+   * False is not a failure of the band — the band may be perfectly solid. It
+   * says this particular day's rate cannot be distinguished from the movement
+   * one appointment would produce.
+   */
+  readonly sufficientToday: boolean;
+  /** History days dropped for too small a denominator. */
+  readonly daysExcluded: number;
+}
 
 /** One metric's normal range, and where today sits in it. */
 export interface MetricBaseline {
@@ -123,6 +178,18 @@ export interface MetricBaseline {
   readonly deltaPercent: number | null;
   /** How many days of history the band rests on. */
   readonly observations: number;
+  /**
+   * The denominator rule this metric is judged under, or null when it is not a
+   * rate over a countable denominator.
+   */
+  readonly sample: BaselineSample | null;
+  /**
+   * Whether either edge of the band was clamped into the metric's own domain.
+   *
+   * Reported rather than done quietly: a clamped edge means the arithmetic ran
+   * past the end of the scale, which is worth a reader knowing.
+   */
+  readonly clamped: boolean;
   readonly quality: BaselineQuality;
   /** Where today sits, or null when today was not measured. */
   readonly position: BandPosition | null;
@@ -206,13 +273,48 @@ export interface BaselineHistoryDay {
   readonly metrics: readonly Metric[];
 }
 
+/** Why a metric seen in history got no baseline. */
+export const BaselineWithholdReason = {
+  /** Fewer days than {@link BaselineConfig.minimumObservations}. */
+  TOO_FEW_OBSERVATIONS: "too_few_observations",
+  /**
+   * Days existed, but too few of them carried a denominator large enough for
+   * the rate to mean anything. A distinct answer from "no history": the clinic
+   * has been measured, it is simply too small for this metric to be judged.
+   */
+  SAMPLE_TOO_SMALL: "sample_too_small",
+} as const;
+
+export type BaselineWithholdReason =
+  (typeof BaselineWithholdReason)[keyof typeof BaselineWithholdReason];
+
+/** One metric seen in history that got no band, and why. */
+export interface BaselineWithholding {
+  readonly key: string;
+  readonly reason: BaselineWithholdReason;
+  /** Days the history carried a value for this metric. */
+  readonly daysSeen: number;
+  /** Days that survived the denominator rule — what the band would have used. */
+  readonly daysUsable: number;
+  /** The denominator rule, when this metric has one. */
+  readonly minimumSample?: number;
+  /** What that denominator counts. */
+  readonly sampleNoun?: string;
+  /** Typical denominator across the days seen, when any were measured. */
+  readonly medianSample?: number;
+}
+
 export interface BaselineResult {
   /** One entry per metric with enough history, sorted by key. */
   readonly baselines: readonly MetricBaseline[];
   /** Lookup by metric key. */
   readonly byKey: ReadonlyMap<string, MetricBaseline>;
-  /** Keys seen in history but withheld for too few observations. */
+  /** Keys seen in history but withheld, sorted. */
   readonly withheldKeys: readonly string[];
+  /** The same withholdings with their reasons, so a caller can say which. */
+  readonly withheld: readonly BaselineWithholding[];
+  /** Lookup by metric key. */
+  readonly withheldByKey: ReadonlyMap<string, BaselineWithholding>;
 }
 
 /** Metric ids are `<key>:<clinicId>:<date>`; the key never contains a colon. */
@@ -277,10 +379,38 @@ export function deriveBaselines(params: {
 
   /** key -> values in calendar order, oldest first. */
   const series = new Map<string, number[]>();
+  /** key -> the denominator behind each kept value, same order. */
+  const sampleSeries = new Map<string, number[]>();
+  /** key -> days seen at all, including those the denominator rule dropped. */
+  const daysSeen = new Map<string, number>();
+
   for (const day of days) {
+    // Each day's own denominators, read before any of its rates, so a rate is
+    // always judged against the sample MEASURED ON THE SAME DAY.
+    const denominators = new Map<string, number>();
+    for (const metric of day.metrics) {
+      if (Number.isFinite(metric.value)) denominators.set(keyOf(metric), metric.value);
+    }
+
     for (const metric of day.metrics) {
       if (!Number.isFinite(metric.value)) continue;
       const key = keyOf(metric);
+      daysSeen.set(key, (daysSeen.get(key) ?? 0) + 1);
+
+      // A rate whose denominator that day was too small — or was never recorded
+      // at all — is dropped from the series. Averaging it in is what produced a
+      // "normal" no-show range running from below zero to two thirds of the
+      // book. An unrecorded denominator is dropped for the same reason it is
+      // never assumed elsewhere in this module: unknown is not a value.
+      const basis = rateBasisFor(key);
+      if (basis !== undefined) {
+        const denominator = denominators.get(basis.denominatorKey);
+        if (denominator === undefined || denominator < basis.minimumToJudge) continue;
+        const samples = sampleSeries.get(key);
+        if (samples) samples.push(denominator);
+        else sampleSeries.set(key, [denominator]);
+      }
+
       const list = series.get(key);
       if (list) list.push(metric.value);
       else series.set(key, [metric.value]);
@@ -294,14 +424,36 @@ export function deriveBaselines(params: {
   }
 
   const baselines: MetricBaseline[] = [];
-  const withheldKeys: string[] = [];
+  const withheld: BaselineWithholding[] = [];
 
-  for (const [key, values] of [...series.entries()].sort(([a], [b]) =>
+  // Keys the denominator rule emptied entirely still have to be reportable: a
+  // metric measured every day at a clinic too small to judge it is a different
+  // answer from one nobody has ever measured, and the decision trace says which.
+  const consideredKeys = [...new Set([...series.keys(), ...daysSeen.keys()])].sort((a, b) =>
     a < b ? -1 : a > b ? 1 : 0,
-  )) {
+  );
+
+  for (const key of consideredKeys) {
+    const values = series.get(key) ?? [];
+    const basis = rateBasisFor(key);
+    const seen = daysSeen.get(key) ?? 0;
     const quality = qualityFor(values.length, config);
     if (quality === BaselineQuality.NONE) {
-      withheldKeys.push(key);
+      const droppedForSample = basis !== undefined && seen > values.length;
+      withheld.push({
+        key,
+        // Says which of the two questions failed. "You have no history" and "you
+        // have history, and too few appointments in it to judge a rate" lead to
+        // different sentences and different remedies.
+        reason: droppedForSample
+          ? BaselineWithholdReason.SAMPLE_TOO_SMALL
+          : BaselineWithholdReason.TOO_FEW_OBSERVATIONS,
+        daysSeen: seen,
+        daysUsable: values.length,
+        ...(basis === undefined
+          ? {}
+          : { minimumSample: basis.minimumToJudge, sampleNoun: basis.noun }),
+      });
       continue;
     }
 
@@ -313,8 +465,12 @@ export function deriveBaselines(params: {
       config.absoluteDeviationFloor,
     );
     const halfWidth = deviation * config.bandMads;
-    const lower = round2(mid - halfWidth);
-    const upper = round2(mid + halfWidth);
+    // Clamped into the metric's own domain. A band edge outside it is not a low
+    // or high reading, it is an impossible one.
+    const rawLower = round2(mid - halfWidth);
+    const rawUpper = round2(mid + halfWidth);
+    const lower = round2(clampToBounds(key, rawLower));
+    const upper = round2(clampToBounds(key, rawUpper));
 
     const current = currentByKey.has(key) ? (currentByKey.get(key) as number) : null;
     const position: BandPosition | null =
@@ -332,6 +488,24 @@ export function deriveBaselines(params: {
       }
     }
 
+    // The denominator as this baseline actually found it. `sufficientToday` is
+    // the gate `isJudgeable` applies; the rest is evidence for the sentence.
+    const sampleValues = sampleSeries.get(key) ?? [];
+    const currentSample =
+      basis === undefined ? null : (currentByKey.get(basis.denominatorKey) ?? null);
+    const sample: BaselineSample | null =
+      basis === undefined
+        ? null
+        : {
+            key: basis.denominatorKey,
+            noun: basis.noun,
+            minimum: basis.minimumToJudge,
+            current: currentSample,
+            median: sampleValues.length === 0 ? 0 : round2(median(sampleValues)),
+            sufficientToday: currentSample !== null && currentSample >= basis.minimumToJudge,
+            daysExcluded: Math.max(0, seen - values.length),
+          };
+
     baselines.push({
       key,
       current,
@@ -344,6 +518,8 @@ export function deriveBaselines(params: {
       deltaPercent:
         current === null || mid === 0 ? null : round2(((current - mid) / Math.abs(mid)) * 100),
       observations: values.length,
+      sample,
+      clamped: lower !== rawLower || upper !== rawUpper,
       quality,
       position,
       consecutiveOutside,
@@ -351,10 +527,13 @@ export function deriveBaselines(params: {
     });
   }
 
+  withheld.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   return {
     baselines,
     byKey: new Map(baselines.map((b) => [b.key, b])),
-    withheldKeys: withheldKeys.sort(),
+    withheldKeys: withheld.map((w) => w.key),
+    withheld,
+    withheldByKey: new Map(withheld.map((w) => [w.key, w])),
   };
 }
 
@@ -364,12 +543,34 @@ export function deriveBaselines(params: {
  *
  * The one predicate every consumer should use instead of comparing quality
  * strings itself, so "how much history is enough" is decided in one place.
+ *
+ * TWO questions, not one, and both must pass: enough DAYS behind the band, and
+ * enough EVENTS behind today's reading. A clinic can have six months of no-show
+ * rates and still not be judgeable on any of them, because five appointments a
+ * week cannot express a rate. {@link hasEnoughHistory} and
+ * {@link hasEnoughSampleToday} separate the two for a caller that needs to say
+ * which failed.
  */
 export function isJudgeable(baseline: MetricBaseline): boolean {
+  return hasEnoughHistory(baseline) && hasEnoughSampleToday(baseline);
+}
+
+/** Enough DAYS behind the band to treat it as this clinic's normal. */
+export function hasEnoughHistory(baseline: MetricBaseline): boolean {
   return (
     baseline.quality === BaselineQuality.ADEQUATE ||
     baseline.quality === BaselineQuality.STRONG
   );
+}
+
+/**
+ * Enough EVENTS behind today's reading for it to be compared against the band.
+ *
+ * Always true for a metric that is not a rate: a count of overdue recalls has no
+ * denominator that could be thin.
+ */
+export function hasEnoughSampleToday(baseline: MetricBaseline): boolean {
+  return baseline.sample === null || baseline.sample.sufficientToday;
 }
 
 /** Whether today's position represents movement in the improving direction. */

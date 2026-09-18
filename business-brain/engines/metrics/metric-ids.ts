@@ -28,6 +28,24 @@ export const MetricKey = {
   SCHEDULING_REPEAT_NON_ATTENDERS_30D: "scheduling.repeat_non_attenders_30d",
   SCHEDULING_BOOKING_LEAD_TIME_DAYS: "scheduling.booking_lead_time_days",
   /**
+   * Appointments in the trailing window — the DENOMINATOR both attendance rates
+   * are computed from.
+   *
+   * Its own metric for the same reason {@link SCHEDULING_MEASURED_VISITS_30D} is
+   * one: a rate cannot be judged without knowing what it was divided by. A 33%
+   * no-show rate over three appointments and over ninety are different claims,
+   * and nothing downstream could tell them apart, because the rate arrives as a
+   * single number with its denominator already divided away.
+   *
+   * This is the fact behind the test clinic's "normal no-show range is -0.1% to
+   * 66.7%": five appointments a week, so one missed appointment moved the rate
+   * twenty points, and the band widened until it described nothing.
+   *
+   * Counts every appointment in the window whatever its status, which is exactly
+   * what `statusRate` divides by — the two must not be able to disagree.
+   */
+  SCHEDULING_APPOINTMENTS_30D: "scheduling.appointments_30d",
+  /**
    * How far the time appointments TAKE diverges from the time they are BOOKED
    * for, across the trailing window (%). Positive means they overrun.
    *
@@ -149,6 +167,12 @@ export const METRIC_DESCRIPTORS: Readonly<Record<MetricKey, MetricDescriptor>> =
     name: "Appointments Running Over Their Booked Time (30 days)",
     category: MetricCategory.SCHEDULING,
     unit: MetricUnit.PERCENTAGE,
+  },
+  [MetricKey.SCHEDULING_APPOINTMENTS_30D]: {
+    key: MetricKey.SCHEDULING_APPOINTMENTS_30D,
+    name: "Appointments Booked (30 days)",
+    category: MetricCategory.SCHEDULING,
+    unit: MetricUnit.COUNT,
   },
   [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: {
     key: MetricKey.SCHEDULING_MEASURED_VISITS_30D,
