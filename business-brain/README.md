@@ -188,10 +188,16 @@ there is no model.
 
 - The briefing runs the whole pipeline on every page load, including the history
   the run measures for itself. It should be precomputed by the scheduled job.
-- Rate baselines are judged without a minimum denominator, so a clinic with a
-  handful of appointments gets a normal range too wide to flag anything.
-- `revenue.collection_rate_30d` compares collections against the same window's
-  production, so paying off old debt can push it past 100%.
+- Both attendance rates go unjudged until six days of denominator have been
+  recorded: stored history predates `scheduling.appointments_30d`, and those days'
+  denominators are genuinely unknown.
+- `revenue.collection_rate_30d` is kept as a cash-flow ratio and is no longer
+  judged or scored. Every judgement now reads
+  `revenue.production_paid_rate_30d`, which follows the work.
+- The unpaid share of a window's work is attributed by the patient's own
+  surviving balance, capped at what the window charged. No payment is matched to
+  a treatment anywhere in OraMedha, so the oldest-charge-first convention is an
+  assumption — a stated one, and the cap keeps older debt out either way.
 - Baselines are one band across all weekdays; weekday and seasonal patterns are
   not modelled, even though memory detects them.
 - Shared core queries the briefing relies on (`getOverdueFollowUps`,

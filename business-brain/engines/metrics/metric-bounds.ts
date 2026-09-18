@@ -86,6 +86,11 @@ const DECLARED_BOUNDS: Readonly<Partial<Record<MetricKey, MetricBounds>>> = {
   [MetricKey.CAPACITY_BOOKED_NEXT_7D]: { min: 0, max: null },
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: { min: 0, max: null },
 
+  // A share of one whole after all: the unpaid part is capped at what was
+  // charged, so this cannot pass 100 however much old debt is cleared. That is
+  // the property the cash-flow ratio above does not have.
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: { min: 0, max: 100 },
+
   // Signed on purpose: a negative overrun is an appointment that finished early.
   // Clamping it at zero would erase half of what the metric measures.
   [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: { min: null, max: null },
@@ -160,6 +165,21 @@ const RATE_BASIS: Readonly<Partial<Record<MetricKey, RateBasis>>> = {
     denominatorKey: MetricKey.SCHEDULING_APPOINTMENTS_30D,
     minimumToJudge: 50,
     noun: "appointments",
+  },
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: {
+    denominatorKey: MetricKey.REVENUE_PRODUCTION_30D,
+    // A month that produced almost nothing gives a rate that is arithmetic
+    // rather than a finding: one unpaid consultation reads as a collapse. The
+    // same floor the collection-rate signal has always used — roughly a month of
+    // minimum daily revenue — because what makes this rate meaningful is the size
+    // of the denominator in money, which is the unit the rate is in.
+    minimumToJudge: 125_000,
+    noun: "of work delivered",
+  },
+  [MetricKey.REVENUE_COLLECTION_RATE_30D]: {
+    denominatorKey: MetricKey.REVENUE_PRODUCTION_30D,
+    minimumToJudge: 125_000,
+    noun: "of work delivered",
   },
   [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: {
     denominatorKey: MetricKey.SCHEDULING_MEASURED_VISITS_30D,

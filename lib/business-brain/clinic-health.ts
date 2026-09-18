@@ -435,13 +435,16 @@ const CREDIT_FACTORS: readonly CreditFactor[] = [
   },
   {
     id: "collection_better_than_usual",
-    metricKey: "revenue.collection_rate_30d",
+    // The work, not the cash: revenue.collection_rate_30d compares this window's
+    // cash against this window's production, so a month clearing old balances
+    // scored as a collection win.
+    metricKey: "revenue.production_paid_rate_30d",
     dimension: ClinicDimension.FINANCIAL_HEALTH,
     direction: BaselineDirection.HIGHER_IS_BETTER,
     points: 4,
-    factor: "Collecting more than usual",
+    factor: "More of your work paid for than usual",
     detail: (current, baseline) =>
-      `Collected ${Math.round(current)}% of what you delivered against your usual ${Math.round(baseline)}%`,
+      `${Math.round(current)}% of the work you delivered has been paid for, against your usual ${Math.round(baseline)}%`,
   },
   {
     id: "utilization_better_than_usual",
@@ -632,7 +635,7 @@ const DIMENSION_METRICS: Readonly<Record<ClinicDimension, readonly string[]>> = 
   [ClinicDimension.PATIENT_FLOW]: ["queue.average_waiting_time", "queue.patients_waiting"],
   [ClinicDimension.FINANCIAL_HEALTH]: [
     "revenue.outstanding",
-    "revenue.collection_rate_30d",
+    "revenue.production_paid_rate_30d",
   ],
   [ClinicDimension.TREATMENT_PIPELINE]: [
     "treatment.accepted_pending_scheduling",

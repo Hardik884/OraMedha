@@ -108,6 +108,12 @@ export const HEALTHY: MetricValues = {
   [MetricKey.SCHEDULING_APPOINTMENTS_30D]: 120,
   [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 71,
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: 94,
+  // Comfortably above `minimumCollectionRate` (85). The rule reads this rather
+  // than the cash-flow ratio above: that one compares this window's cash against
+  // this window's work, so a month clearing old balances hid exactly the
+  // situation the rule exists to catch.
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: 92,
+  [MetricKey.REVENUE_PRODUCTION_UNPAID_30D]: 38_400,
   [MetricKey.REVENUE_PRODUCTION_30D]: 480_000,
   [MetricKey.REVENUE_COLLECTED_30D]: 451_000,
 };
@@ -321,7 +327,11 @@ export const CHRONIC_OVERRUN: MetricValues = {
  */
 export const PRODUCTION_COLLECTION_GAP: MetricValues = {
   ...HEALTHY,
-  [MetricKey.REVENUE_COLLECTION_RATE_30D]: 61,
+  // 61% of the window's own work paid for. The cash-flow ratio is left healthy
+  // on purpose: a clinic clearing old balances while its recent work goes unpaid
+  // reads fine there, which is the case this pattern exists to catch.
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: 61,
+  [MetricKey.REVENUE_PRODUCTION_UNPAID_30D]: 202_800,
   [MetricKey.REVENUE_PRODUCTION_30D]: 520_000,
   [MetricKey.REVENUE_COLLECTED_30D]: 317_000,
 };

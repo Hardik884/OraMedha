@@ -6,12 +6,20 @@
  *
  * ## Production against collection, which nothing else here reads
  *
- * `revenue.collection_rate_30d` has been computed correctly and consumed by
- * nothing. That left the pipeline holding only half of practice management's
- * fundamental pair: it could say how much was owed (`revenue.outstanding`, a
- * LEVEL) and whether today's cash lagged today's treatments
- * (`collection_lagging_completions`, a DAY), but never what share of delivered
- * work actually converts to money over a period long enough to be a habit.
+ * The pipeline held only half of practice management's fundamental pair: it
+ * could say how much was owed (`revenue.outstanding`, a LEVEL) and whether
+ * today's cash lagged today's treatments (`collection_lagging_completions`, a
+ * DAY), but never what share of delivered work actually converts to money over a
+ * period long enough to be a habit.
+ *
+ * ## It reads the WORK, not the cash
+ *
+ * This rule was written against `revenue.collection_rate_30d`, which divides the
+ * window's cash by the window's production — different cohorts of work. A clinic
+ * clearing old balances reads above 100% there, which masked exactly the
+ * situation this rule exists to catch: recent work going unpaid while older debt
+ * comes in. `revenue.production_paid_rate_30d` follows the work delivered in the
+ * window and asks how much of THAT has been paid.
  *
  * The distinction matters because the two have different answers. A clinic with a
  * large outstanding book and a 95% collection rate is growing and carrying
@@ -41,7 +49,7 @@ import {
 } from "../types";
 
 const REQUIRED = [
-  MetricKey.REVENUE_COLLECTION_RATE_30D,
+  MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
   MetricKey.REVENUE_PRODUCTION_30D,
 ] as const;
 const OPTIONAL = [MetricKey.REVENUE_COLLECTED_30D] as const;
@@ -56,7 +64,7 @@ export const collectionRateLowEvaluator: SignalEvaluator = {
     const required = ctx.metrics.require(...REQUIRED);
     if (!required.ok) return skippedForMissing(required.missing);
 
-    const rate = required.metrics.value(MetricKey.REVENUE_COLLECTION_RATE_30D);
+    const rate = required.metrics.value(MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D);
     const production = required.metrics.value(MetricKey.REVENUE_PRODUCTION_30D);
     const { revenue } = ctx.config;
 
@@ -70,7 +78,7 @@ export const collectionRateLowEvaluator: SignalEvaluator = {
     if (rate >= revenue.minimumCollectionRate) {
       return {
         kind: "no_signal",
-        reason: `Collection rate ${rate}% at or above the minimum ${revenue.minimumCollectionRate}%.`,
+        reason: `${rate}% of the window's delivered work has been paid for, at or above the minimum ${revenue.minimumCollectionRate}%.`,
       };
     }
 
@@ -80,8 +88,12 @@ export const collectionRateLowEvaluator: SignalEvaluator = {
       type: SignalType.REVENUE_COLLECTION_RATE_LOW,
       category: SignalCategory.FINANCIAL,
       title: "Collecting less than the clinic produces",
-      description: `Over the last 30 days the clinic collected ${rate}% of the ${formatValue(production, MetricUnit.CURRENCY)} of work it delivered, against a minimum of ${revenue.minimumCollectionRate}%.`,
-      observed: { label: "Collection rate (30 days)", value: rate, unit: MetricUnit.PERCENTAGE },
+      description: `Of the ${formatValue(production, MetricUnit.CURRENCY)} of work delivered in the last 30 days, ${rate}% has been paid for, against a minimum of ${revenue.minimumCollectionRate}%.`,
+      observed: {
+        label: "Delivered work paid for (30 days)",
+        value: rate,
+        unit: MetricUnit.PERCENTAGE,
+      },
       threshold: {
         label: "Minimum collection rate",
         value: revenue.minimumCollectionRate,

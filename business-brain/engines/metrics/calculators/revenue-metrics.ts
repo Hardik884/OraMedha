@@ -61,6 +61,129 @@ function treatmentTotalCharge(t: {
 }
 
 /**
+ * Each patient's own unpaid balance, clamped at zero.
+ *
+ * The one place the clamp is expressed, so the clinic total, the payment-plan
+ * share and the unpaid-production attribution cannot drift apart. A deleted
+ * patient owes nothing the clinic can still collect and is absent entirely.
+ *
+ * Rows without a patientId (hand-built test snapshots) all fall into one bucket,
+ * which reproduces the old clinic-level behaviour.
+ */
+function outstandingByPatient(s: ClinicDataSnapshot): Map<string, number> {
+  const chargedByPatient = new Map<string, number>();
+  const paidByPatient = new Map<string, number>();
+
+  for (const t of s.treatments) {
+    if (t.patientDeleted) continue;
+    const charge = treatmentTotalCharge(t);
+    if (charge === 0) continue;
+    const key = t.patientId ?? "";
+    chargedByPatient.set(key, (chargedByPatient.get(key) ?? 0) + charge);
+  }
+  for (const p of s.payments) {
+    if (p.patientDeleted) continue;
+    const key = p.patientId ?? "";
+    paidByPatient.set(key, (paidByPatient.get(key) ?? 0) + p.amount);
+  }
+
+  const balances = new Map<string, number>();
+  for (const [key, charged] of chargedByPatient) {
+    balances.set(key, Math.max(0, charged - (paidByPatient.get(key) ?? 0)));
+  }
+  return balances;
+}
+
+/**
+ * Value of the work delivered in the trailing window that has not been paid for.
+ *
+ * ## How the attribution works, and what it does NOT assume
+ *
+ * Per patient: the unpaid part of this window's work is their CURRENT balance,
+ * capped at what they were charged in the window. Two facts do the work, and
+ * neither is invented:
+ *
+ *   - a balance that survives is the most recent work, because a payment settles
+ *     the oldest charge first — the convention every ledger in dentistry runs on;
+ *   - it cannot exceed what was charged in the window, so older debt can never
+ *     be counted against recent work, which is the exact defect in
+ *     {@link collectionRate30d}.
+ *
+ * No payment is matched to a treatment. OraMedha does not record that link, and
+ * this metric does not pretend it does. The oldest-first convention is also the
+ * app's own: `lib/billing/payout.ts` allocates a patient's payments across their
+ * treatments in exactly that order, and for an aggregate the two agree —
+ * everything older is settled first, so what can still be unpaid on the window's
+ * work is the surviving balance, capped at what the window charged.
+ *
+ * ## Deleted patients are excluded, here only
+ *
+ * Their delivered work still counts toward production (§5.14a) — it happened.
+ * But it is deliberately outside this measurement: their balance is not
+ * collectable and nothing about its payment can still be acted on, so including
+ * it would report a collection gap no one can close.
+ */
+export function productionUnpaid30d(s: ClinicDataSnapshot): Metric {
+  const balances = outstandingByPatient(s);
+  const chargedInWindow = new Map<string, number>();
+  for (const t of completedInWindow(s, METRIC_WINDOWS.TRAILING_DAYS)) {
+    if (t.patientDeleted) continue;
+    const key = t.patientId ?? "";
+    chargedInWindow.set(key, (chargedInWindow.get(key) ?? 0) + t.cost);
+  }
+
+  let value = 0;
+  for (const [key, charged] of chargedInWindow) {
+    value += Math.min(charged, balances.get(key) ?? 0);
+  }
+  return buildMetric(
+    MetricKey.REVENUE_PRODUCTION_UNPAID_30D,
+    Math.round(value * 100) / 100,
+    s.clinicId,
+    s.date,
+    s.asOf,
+  );
+}
+
+/**
+ * Share of the work delivered in the trailing window that has been paid for.
+ *
+ * The question "collection rate" is always read as, and the one
+ * {@link collectionRate30d} does not answer. See
+ * {@link MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D}.
+ *
+ * WITHHELD when the window's collectable production is zero: a share of nothing
+ * is undefined, and 0% would read as "none of our work gets paid for" when the
+ * truth is "we delivered nothing".
+ */
+export function productionPaidRate30d(s: ClinicDataSnapshot): Metric | null {
+  const balances = outstandingByPatient(s);
+  const chargedInWindow = new Map<string, number>();
+  for (const t of completedInWindow(s, METRIC_WINDOWS.TRAILING_DAYS)) {
+    if (t.patientDeleted) continue;
+    const key = t.patientId ?? "";
+    chargedInWindow.set(key, (chargedInWindow.get(key) ?? 0) + t.cost);
+  }
+
+  let charged = 0;
+  let unpaid = 0;
+  for (const [key, amount] of chargedInWindow) {
+    charged += amount;
+    unpaid += Math.min(amount, balances.get(key) ?? 0);
+  }
+  if (charged <= 0) return null;
+
+  const value = Math.round(((charged - unpaid) / charged) * 1000) / 10;
+  return buildMetric(
+    MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
+    value,
+    s.clinicId,
+    s.date,
+    s.asOf,
+  );
+}
+
+/**
  * Outstanding payments — money the clinic is still owed for delivered work.
  *
  * Charge per treatment = billable cost + OPD fee + X-ray cost (see
@@ -78,27 +201,8 @@ function treatmentTotalCharge(t: {
  * single-patient fixtures and only differs once real per-patient data is present.
  */
 export function outstandingPayments(s: ClinicDataSnapshot): Metric {
-  const chargedByPatient = new Map<string, number>();
-  const paidByPatient = new Map<string, number>();
-
-  for (const t of s.treatments) {
-    // A deleted patient owes nothing the clinic can still collect.
-    if (t.patientDeleted) continue;
-    const charge = treatmentTotalCharge(t);
-    if (charge === 0) continue;
-    const key = t.patientId ?? "";
-    chargedByPatient.set(key, (chargedByPatient.get(key) ?? 0) + charge);
-  }
-  for (const p of s.payments) {
-    if (p.patientDeleted) continue;
-    const key = p.patientId ?? "";
-    paidByPatient.set(key, (paidByPatient.get(key) ?? 0) + p.amount);
-  }
-
   let value = 0;
-  for (const [key, charged] of chargedByPatient) {
-    value += Math.max(0, charged - (paidByPatient.get(key) ?? 0));
-  }
+  for (const balance of outstandingByPatient(s).values()) value += balance;
   return buildMetric(MetricKey.REVENUE_OUTSTANDING, value, s.clinicId, s.date, s.asOf);
 }
 
@@ -133,17 +237,24 @@ export function production30d(s: ClinicDataSnapshot): Metric {
 }
 
 /**
- * Collection rate over the trailing window — cash received as a percentage of
- * work delivered.
+ * Cash received in the trailing window as a percentage of work delivered in it.
  *
- * Near 100% means the clinic converts delivered work into money. A persistent
- * gap is a collections process problem, not a demand problem, and this is the
- * metric that separates the two.
+ * ## This is a CASH-FLOW ratio, and not the clinic's collection rate
+ *
+ * The numerator and the denominator describe different cohorts of work: money
+ * arriving this month may be settling a crown fitted in March, while a filling
+ * placed yesterday is not in either figure. So it answers "is cash keeping pace
+ * with production", which is a real question — and it does NOT answer "how much
+ * of what we deliver gets paid for", which is what a reader assumes.
+ *
+ * The test clinic's normal reading was a median of 115%, because it was steadily
+ * clearing old balances. Nothing was wrong with the arithmetic; the name was
+ * wrong, and {@link productionPaidRate30d} is the metric it was mistaken for.
  *
  * WITHHELD when production is zero: a ratio against nothing is undefined, and
  * reporting 0% would read as "we collected nothing" when the truth is "we
- * delivered nothing". Not capped at 100% — collecting historic dues genuinely
- * can exceed the window's production, and flattening that would hide it.
+ * delivered nothing". Not capped at 100% — clearing historic dues genuinely does
+ * exceed the window's production, and flattening that would hide it.
  */
 export function collectionRate30d(s: ClinicDataSnapshot): Metric | null {
   const days = METRIC_WINDOWS.TRAILING_DAYS;

@@ -73,6 +73,12 @@ export const HEALTHY_CLINIC: MetricValues = {
   [MetricKey.SCHEDULING_APPOINTMENTS_30D]: 120,
   [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: 71,
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: 94,
+  // Comfortably above `minimumCollectionRate` (85). The rule reads this rather
+  // than the cash-flow ratio above: that one compares this window's cash against
+  // this window's work, so a month clearing old balances hid exactly the
+  // situation the rule exists to catch.
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: 92,
+  [MetricKey.REVENUE_PRODUCTION_UNPAID_30D]: 38_400,
   // Above `minimumProductionForRateCheck` (125,000), so the collection-rate rule
   // judges the rate rather than standing down on a thin denominator.
   [MetricKey.REVENUE_PRODUCTION_30D]: 480_000,

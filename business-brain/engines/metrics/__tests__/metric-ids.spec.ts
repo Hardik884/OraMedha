@@ -58,6 +58,11 @@ describe("metric manifest", () => {
         MetricKey.PATIENTS_REACTIVATION_CANDIDATES,
         MetricKey.QUEUE_AVERAGE_WAITING_TIME, // no measured wait: not "nobody waits"
         MetricKey.REVENUE_COLLECTION_RATE_30D,
+        // Nothing was delivered, so the share of it that has been paid for is
+        // undefined rather than 0% — which would read as "none of our work gets
+        // paid for". Its companion revenue.production_unpaid_30d is legitimately
+        // 0 and is NOT withheld: no work delivered means nothing owed for it.
+        MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
         // The empty-clinic-day fixture supplies no patientsOnPaymentPlan set at
         // all, so this is correctly withheld — absent means no repository
         // support for payment plans, never "nobody has one".

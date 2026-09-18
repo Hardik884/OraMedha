@@ -97,7 +97,10 @@ export const productionCollectionGapMatcher: PatternMatcher = {
     const optionalPresent = ctx.signals.present(OPTIONAL);
     const contributing = [lowRate, ...optionalPresent];
 
-    const rate = metricValue(ctx, MetricKey.REVENUE_COLLECTION_RATE_30D);
+    // The share of the window's OWN work that has been paid for — the rate the
+    // signal is triggered on. The cash-flow ratio it used to read counts old
+    // balances being cleared as this month's collection.
+    const rate = metricValue(ctx, MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D);
     const production = metricValue(ctx, MetricKey.REVENUE_PRODUCTION_30D);
     const collected = metricValue(ctx, MetricKey.REVENUE_COLLECTED_30D);
     const outstanding = metricValue(ctx, MetricKey.REVENUE_OUTSTANDING);
@@ -110,9 +113,9 @@ export const productionCollectionGapMatcher: PatternMatcher = {
 
     const arithmetic: EvidenceNote = {
       slug: "revenue.production_vs_collection",
-      description: `Collection rate ${rate ?? "unavailable"}% against the configured minimum ${revenue.minimumCollectionRate}%, on production of ${production ?? "an unavailable amount"} and collections of ${collected ?? "an unavailable amount"} over the window — a shortfall of ${shortfall ?? "an unavailable amount"}. The outstanding balance stands at ${outstanding ?? "an unavailable amount"}. A shortfall larger than the outstanding balance would indicate delivered work that was never charged; a smaller one is consistent with balances still owed. That comparison is stated, not concluded: separating the two needs each completed treatment matched against the charge raised for it, and unbilled work leaves no balance row for an ageing query to find.`,
+      description: `${rate ?? "An unavailable share"}% of the window's delivered work has been paid for, against the configured minimum ${revenue.minimumCollectionRate}%, on production of ${production ?? "an unavailable amount"} and collections of ${collected ?? "an unavailable amount"} over the window — a shortfall of ${shortfall ?? "an unavailable amount"}. The outstanding balance stands at ${outstanding ?? "an unavailable amount"}. A shortfall larger than the outstanding balance would indicate delivered work that was never charged; a smaller one is consistent with balances still owed. That comparison is stated, not concluded: separating the two needs each completed treatment matched against the charge raised for it, and unbilled work leaves no balance row for an ageing query to find.`,
       data: {
-        collectionRate: rate,
+        productionPaidRate: rate,
         minimumCollectionRate: revenue.minimumCollectionRate,
         production,
         collected,

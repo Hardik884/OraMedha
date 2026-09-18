@@ -84,6 +84,8 @@ export const UNVERSIONED_INPUTS_BY_METRIC: Readonly<Record<MetricKey, readonly U
   [MetricKey.REVENUE_PRODUCTION_30D]: [],
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: [],
   [MetricKey.REVENUE_COLLECTED_30D]: [],
+  [MetricKey.REVENUE_PRODUCTION_UNPAID_30D]: [],
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: [],
   [MetricKey.QUEUE_PATIENTS_WAITING]: [UnversionedInput.QUEUE_ENTRIES],
   [MetricKey.QUEUE_AVERAGE_WAITING_TIME]: [UnversionedInput.QUEUE_ENTRIES],
   [MetricKey.FOLLOWUPS_DUE_TODAY]: [],

@@ -26,6 +26,8 @@ import {
   pendingTreatmentValue,
   production30d,
   collectionRate30d,
+  productionUnpaid30d,
+  productionPaidRate30d,
   collected30d,
 } from "./revenue-metrics";
 import { patientsWaiting, averageWaitingTime } from "./queue-metrics";
@@ -90,6 +92,8 @@ export const METRIC_CALCULATORS: readonly MetricCalculator[] = [
   pendingTreatmentValue,
   production30d,
   collectionRate30d,
+  productionUnpaid30d,
+  productionPaidRate30d,
   collected30d,
   // Queue
   patientsWaiting,

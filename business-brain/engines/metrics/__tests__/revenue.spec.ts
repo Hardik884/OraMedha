@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   BILLABLE_TREATMENT_STATUSES,
+  collectionRate30d,
   outstandingOnPaymentPlan,
   outstandingPayments,
   pendingTreatmentValue,
+  productionPaidRate30d,
+  productionUnpaid30d,
   revenueCollectedToday,
 } from "../calculators/revenue-metrics";
 // The canonical billing definition, imported here so the metric is pinned to it
@@ -231,5 +234,101 @@ describe("outstandingOnPaymentPlan", () => {
       patientsOnPaymentPlan: new Set(["A"]),
     });
     expect(valueOf(outstandingOnPaymentPlan, s)).toBe(0);
+  });
+});
+
+// ── Collecting for the work, rather than in the same month as it ─────────────
+
+describe("productionPaidRate30d", () => {
+  /** One patient's window: work delivered, and what they have paid in total. */
+  function patientWindow(charged: number, paidTotal: number, id = "p1") {
+    return {
+      treatments: [treatment({ patientId: id, cost: charged, status: "completed" })],
+      payments: paidTotal === 0 ? [] : [payment({ patientId: id, amount: paidTotal })],
+    };
+  }
+
+  it("is the share of the window's own work that has been paid for", () => {
+    const s = snapshot(patientWindow(10_000, 7_500));
+    expect(valueOf(productionPaidRate30d, s)).toBe(75);
+    expect(valueOf(productionUnpaid30d, s)).toBe(2_500);
+  });
+
+  it("does not count old debt being cleared as this month's collection", () => {
+    // THE defect. This patient owed 40,000 for work done long before the window,
+    // cleared it this month, and also paid for the 10,000 of work delivered
+    // inside the window. Cash in (50,000) against work out (10,000) reads 500%
+    // — which is where a "normal collection rate" of 115% comes from. The work
+    // delivered in the window was paid for in full, which is 100%.
+    const s = snapshot({
+      treatments: [
+        treatment({ patientId: "p1", cost: 40_000, status: "completed", performedAt: "2026-01-04T10:00:00.000Z" }),
+        treatment({ patientId: "p1", cost: 10_000, status: "completed" }),
+      ],
+      payments: [payment({ patientId: "p1", amount: 50_000 })],
+    });
+
+    expect(valueOf(collectionRate30d, s)).toBe(500);
+    expect(valueOf(productionPaidRate30d, s)).toBe(100);
+    expect(valueOf(productionUnpaid30d, s)).toBe(0);
+  });
+
+  it("attributes a surviving balance to the most recent work, capped at it", () => {
+    // Same patient, 40,000 of old work and 10,000 of new, but only 35,000 paid.
+    // 15,000 is still owed; only 10,000 of it can be this window's work, because
+    // that is all the window charged. The other 5,000 is old debt and is not
+    // this month's collection problem.
+    const s = snapshot({
+      treatments: [
+        treatment({ patientId: "p1", cost: 40_000, status: "completed", performedAt: "2026-01-04T10:00:00.000Z" }),
+        treatment({ patientId: "p1", cost: 10_000, status: "completed" }),
+      ],
+      payments: [payment({ patientId: "p1", amount: 35_000 })],
+    });
+
+    expect(valueOf(productionUnpaid30d, s)).toBe(10_000);
+    expect(valueOf(productionPaidRate30d, s)).toBe(0);
+  });
+
+  it("never lets one patient's overpayment cover another's unpaid work", () => {
+    const s = snapshot({
+      treatments: [
+        treatment({ patientId: "p1", cost: 10_000, status: "completed" }),
+        treatment({ patientId: "p2", cost: 10_000, status: "completed" }),
+      ],
+      // p1 paid double; p2 paid nothing.
+      payments: [payment({ patientId: "p1", amount: 20_000 })],
+    });
+
+    expect(valueOf(productionUnpaid30d, s)).toBe(10_000);
+    expect(valueOf(productionPaidRate30d, s)).toBe(50);
+  });
+
+  it("cannot exceed 100%, however much cash arrives", () => {
+    const s = snapshot({
+      treatments: [treatment({ patientId: "p1", cost: 5_000, status: "completed" })],
+      payments: [payment({ patientId: "p1", amount: 500_000 })],
+    });
+    expect(valueOf(productionPaidRate30d, s)).toBe(100);
+  });
+
+  it("is WITHHELD when the window delivered no collectable work", () => {
+    // Not 0%. "None of our work gets paid for" and "we delivered nothing" are
+    // different statements, and only one of them is true here.
+    expect(productionPaidRate30d(snapshot())).toBeNull();
+  });
+
+  it("leaves a deleted patient's work out of the measurement entirely", () => {
+    // Their production still happened and still counts (§5.14a); their balance
+    // is not collectable, so a gap against it is one nobody can close.
+    const s = snapshot({
+      treatments: [
+        treatment({ cost: 8_000, status: "completed", patientDeleted: true }),
+        treatment({ patientId: "p1", cost: 2_000, status: "completed" }),
+      ],
+      payments: [payment({ patientId: "p1", amount: 2_000 })],
+    });
+    expect(valueOf(productionPaidRate30d, s)).toBe(100);
+    expect(valueOf(productionUnpaid30d, s)).toBe(0);
   });
 });

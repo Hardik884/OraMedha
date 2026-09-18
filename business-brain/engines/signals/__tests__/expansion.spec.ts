@@ -141,7 +141,7 @@ describe("revenue.collection_rate_low", () => {
       collectionRateLowEvaluator,
       context({
         ...HEALTHY_CLINIC,
-        [MetricKey.REVENUE_COLLECTION_RATE_30D]: 61,
+        [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: 61,
         [MetricKey.REVENUE_PRODUCTION_30D]: 520_000,
       }),
     );
@@ -156,7 +156,7 @@ describe("revenue.collection_rate_low", () => {
     const outcome = collectionRateLowEvaluator.evaluate(
       context({
         ...HEALTHY_CLINIC,
-        [MetricKey.REVENUE_COLLECTION_RATE_30D]: 30,
+        [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: 30,
         [MetricKey.REVENUE_PRODUCTION_30D]: 4_000,
       }),
     );
@@ -164,11 +164,11 @@ describe("revenue.collection_rate_low", () => {
     expect(outcome.kind === "no_signal" && outcome.reason).toContain("below");
   });
 
-  it("skips when the collection rate could not be computed", () => {
-    // The calculator withholds it against zero production — a rate with no
-    // denominator. Reporting 0% would read as "we collected nothing".
+  it("skips when the rate could not be computed", () => {
+    // The calculator withholds it against zero production — a share of nothing.
+    // Reporting 0% would read as "none of our work gets paid for".
     const values = { ...HEALTHY_CLINIC };
-    delete values[MetricKey.REVENUE_COLLECTION_RATE_30D];
+    delete values[MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D];
     const outcome = collectionRateLowEvaluator.evaluate(context(values));
     expect(outcome.kind).toBe("skipped");
   });

@@ -238,10 +238,11 @@ describe("gate 2 — beyond this clinic's normal variation", () => {
   });
 
   it("reads the improving direction correctly for a higher-is-better metric", () => {
-    // Collection rate rising is a win; the same movement on no-shows would not be.
+    // More of the month's work paid for is a win; the same movement on no-shows
+    // would not be.
     const result = run([
       baseline({
-        key: MetricKey.REVENUE_COLLECTION_RATE_30D,
+        key: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
         median: 74,
         current: 88,
         lower: 70,
@@ -358,7 +359,7 @@ describe("gate 5 — sustained, or labelled as a single day", () => {
     const { achievements } = run([
       baseline({ consecutiveOutside: 1, current: 1, delta: -10 }),
       baseline({
-        key: MetricKey.REVENUE_COLLECTION_RATE_30D,
+        key: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
         median: 74,
         current: 84,
         lower: 70,
@@ -368,7 +369,7 @@ describe("gate 5 — sustained, or labelled as a single day", () => {
         consecutiveOutside: 5,
       }),
     ]);
-    expect(achievements[0]?.metricKey).toBe(MetricKey.REVENUE_COLLECTION_RATE_30D);
+    expect(achievements[0]?.metricKey).toBe(MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D);
     expect(achievements[1]?.sustained).toBe(false);
   });
 });
@@ -391,7 +392,7 @@ describe("the cap", () => {
         position: "below",
       }),
       baseline({
-        key: MetricKey.REVENUE_COLLECTION_RATE_30D,
+        key: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
         median: 70,
         current: 90,
         lower: 66,

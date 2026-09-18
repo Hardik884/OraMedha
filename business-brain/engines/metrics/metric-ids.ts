@@ -89,6 +89,36 @@ export const MetricKey = {
   REVENUE_PRODUCTION_30D: "revenue.production_30d",
   REVENUE_COLLECTION_RATE_30D: "revenue.collection_rate_30d",
   REVENUE_COLLECTED_30D: "revenue.collected_30d",
+  /**
+   * Value of the work DELIVERED in the trailing window that has not been paid
+   * for.
+   *
+   * Follows the work rather than the cash, which is the difference between this
+   * and {@link REVENUE_COLLECTION_RATE_30D}. Money arriving this month may be
+   * settling a crown fitted in March; that is a real and good thing, and it says
+   * nothing about whether this month's work is being collected.
+   *
+   * Attributed by the patient's own balance, capped at what they were charged in
+   * the window: because payments settle the oldest charge first, a balance that
+   * survives is the most recent work. No payment is allocated to an individual
+   * treatment anywhere in OraMedha, and none is invented here.
+   */
+  REVENUE_PRODUCTION_UNPAID_30D: "revenue.production_unpaid_30d",
+  /**
+   * Share of the work delivered in the trailing window that has been paid for.
+   *
+   * The metric {@link REVENUE_COLLECTION_RATE_30D} was believed to be. That one
+   * divides this window's CASH by this window's WORK — two different cohorts —
+   * so a clinic clearing old debt reads above 100%, and one whose recent work is
+   * going unpaid can read healthy while it does. The test clinic's normal
+   * collection rate was a median of 115%.
+   *
+   * Bounded 0..100 by construction, because the unpaid portion is capped at what
+   * was charged. Lags by design: work delivered yesterday and not yet paid counts
+   * as uncollected, so a clinic that reliably collects at thirty days reads
+   * steadily below 100 — and the band it is judged against is its own.
+   */
+  REVENUE_PRODUCTION_PAID_RATE_30D: "revenue.production_paid_rate_30d",
   // Queue
   QUEUE_PATIENTS_WAITING: "queue.patients_waiting",
   QUEUE_AVERAGE_WAITING_TIME: "queue.average_waiting_time",
@@ -234,9 +264,24 @@ export const METRIC_DESCRIPTORS: Readonly<Record<MetricKey, MetricDescriptor>> =
     category: MetricCategory.REVENUE,
     unit: MetricUnit.CURRENCY,
   },
+  [MetricKey.REVENUE_PRODUCTION_UNPAID_30D]: {
+    key: MetricKey.REVENUE_PRODUCTION_UNPAID_30D,
+    name: "Delivered Work Not Yet Paid For (30 days)",
+    category: MetricCategory.REVENUE,
+    unit: MetricUnit.CURRENCY,
+  },
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: {
+    key: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
+    name: "Delivered Work Paid For (30 days)",
+    category: MetricCategory.REVENUE,
+    unit: MetricUnit.PERCENTAGE,
+  },
   [MetricKey.REVENUE_COLLECTION_RATE_30D]: {
     key: MetricKey.REVENUE_COLLECTION_RATE_30D,
-    name: "Collection Rate (30 days)",
+    // Renamed to what it measures. "Collection rate" reads as "how much of our
+    // work gets paid for", and it is not that: it is cash in against work out
+    // over the same window, which exceeds 100% whenever old balances are paid.
+    name: "Cash In Against Work Delivered (30 days)",
     category: MetricCategory.REVENUE,
     unit: MetricUnit.PERCENTAGE,
   },

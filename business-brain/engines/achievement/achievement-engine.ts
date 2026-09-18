@@ -235,7 +235,7 @@ export function deriveAchievements(params: {
             ? "Too few events behind today's reading to judge it."
             : sample.current === null
               ? `The ${sample.noun} behind this rate were not measured today, so the rate cannot be judged.`
-              : `${sample.current} ${sample.noun} in the window, below the ${sample.minimum} needed before one of them stops moving this rate more than a real change would.`,
+              : `${sample.current} ${sample.noun} behind this rate, below the ${sample.minimum} it needs before ordinary variation stops moving it further than a real change would.`,
       });
       continue;
     }

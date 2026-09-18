@@ -51,7 +51,7 @@ describe("the collapsed line", () => {
   it("says up for a metric that improved by rising", () => {
     const [win] = buildWins([
       achievement({
-        metricKey: MetricKey.REVENUE_COLLECTION_RATE_30D,
+        metricKey: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
         dimension: ClinicDimension.FINANCIAL_HEALTH,
         current: 91,
         baseline: 74,
@@ -59,7 +59,7 @@ describe("the collapsed line", () => {
         consecutiveDays: 5,
       }),
     ]);
-    expect(win.title).toBe("Collecting more of what you deliver");
+    expect(win.title).toBe("More of your work paid for");
     expect(win.headline).toBe("Up to 91% from your usual 74% · 5 days running");
   });
 
@@ -129,7 +129,7 @@ describe("the expanded explanation", () => {
     const wins = buildWins([
       achievement(),
       achievement({
-        metricKey: MetricKey.REVENUE_COLLECTION_RATE_30D,
+        metricKey: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
         current: 92,
         baseline: 70,
         delta: 22,

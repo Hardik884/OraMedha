@@ -88,7 +88,10 @@ export const ACHIEVEMENT_SPECS: readonly AchievementSpec[] = [
     alreadyGoodAt: 85,
   },
   {
-    metricKey: MetricKey.REVENUE_COLLECTION_RATE_30D,
+    // The work, not the cash. A month spent clearing old balances used to read
+    // as a collection win here, because cash in over work out passes 100% while
+    // it happens — see metric-ids.
+    metricKey: MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D,
     dimension: ClinicDimension.FINANCIAL_HEALTH,
     direction: BaselineDirection.HIGHER_IS_BETTER,
     minimumDelta: 4,
