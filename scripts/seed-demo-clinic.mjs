@@ -25,9 +25,11 @@
  *     database host first.
  *
  * DETERMINISTIC
- *   One seeded generator, so the same command produces the same clinic every
- *   time. Re-running deletes the demo clinic's generated rows and rebuilds them,
- *   which is why every id below is derived from the seed rather than random.
+ *   One seeded generator, so the same command on the same day produces the same
+ *   clinic. The window is measured from today, so a run tomorrow shifts every
+ *   date by a day — which is the point: the demo clinic stays current.
+ *   --reset removes the generated rows first, so re-running rebuilds rather
+ *   than doubling.
  *
  * USAGE
  *   node scripts/seed-demo-clinic.mjs --confirm                  # local stack
@@ -451,16 +453,27 @@ async function ensureClinic() {
 
   // A dentist to hang the appointments on. Its own auth user, so the profile's
   // foreign key holds and nothing borrows a real account.
+  //
+  // The password comes from DEMO_DENTIST_PASSWORD or the account gets none it
+  // can sign in with. A demo clinic still lives on a real project, so this
+  // script never invents a password someone could guess, and never prints one.
+  const password = process.env.DEMO_DENTIST_PASSWORD;
   const { data: existing } = await db.auth.admin.getUserById(DENTIST_ID);
   if (!existing?.user) {
     const { error } = await db.auth.admin.createUser({
       id: DENTIST_ID,
       email: DENTIST_EMAIL,
-      password: `demo-${Math.random().toString(36).slice(2)}-${Date.now()}`,
+      // Kept well inside bcrypt's 72-byte limit.
+      password: password ?? `unset-${crypto.randomUUID()}`,
       email_confirm: true,
       user_metadata: { full_name: "Dr Demo (sample data)" },
     });
-    if (error && !/already/i.test(error.message)) throw new Error(`demo dentist: ${error.message}`);
+    if (error && !/already/i.test(error.message)) {
+      throw new Error(`demo dentist: ${error.message || JSON.stringify(error)}`);
+    }
+  } else if (password) {
+    const { error } = await db.auth.admin.updateUserById(DENTIST_ID, { password });
+    if (error) throw new Error(`demo dentist password: ${error.message}`);
   }
   const { error: profileErr } = await db
     .from("profiles")
