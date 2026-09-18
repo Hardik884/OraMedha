@@ -513,7 +513,10 @@ async function main() {
   }
 
   console.log(
-    `\nDone. Open /dentist/business-brain as this clinic's dentist.\n` +
+    `\nDone. Sign in as ${DENTIST_EMAIL} and open /dentist/business-brain.\n` +
+      (process.env.DEMO_DENTIST_PASSWORD
+        ? `That account's password was set from DEMO_DENTIST_PASSWORD.\n`
+        : `It has no password it can sign in with — re-run with DEMO_DENTIST_PASSWORD=… to set one.\n`) +
       `The first load measures and stores 35 days of history, so it is slow once, then quick.\n`,
   );
 }
