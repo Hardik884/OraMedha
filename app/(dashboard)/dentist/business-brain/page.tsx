@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { AlertTriangle } from "lucide-react";
 import { resolveSession } from "@/lib/auth/session";
-import { isBusinessBrainEnabled, isWhatsAppEnabled } from "@/lib/feature-flags";
+import { isBusinessBrainEnabled, isDemoClinic, isWhatsAppEnabled } from "@/lib/feature-flags";
 import { runDashboardBrain } from "@/lib/business-brain/dashboard-data";
 import { assessRunHealth } from "@/business-brain";
 import {
@@ -217,6 +217,8 @@ export default async function BusinessBrainPage() {
 
   return (
     <PageShell subtitle={formatDate(date)}>
+      {/* Generated records must never be mistaken for a clinic's own figures. */}
+      {isDemoClinic(profile.clinic_id) && <SampleDataNotice />}
       <MorningBriefing
         health={health}
         problems={problems}
@@ -233,6 +235,25 @@ export default async function BusinessBrainPage() {
           look back, useful but never the headline. */}
       <ReminderOutcomes outcomes={reminderOutcomes} />
     </PageShell>
+  );
+}
+
+/**
+ * Sample data, said plainly and on every load.
+ *
+ * This clinic's records are generated (scripts/seed-demo-clinic.mjs). Every
+ * figure below is real analysis of made-up activity, which is useful for review
+ * and worthless as a clinic fact.
+ */
+function SampleDataNotice() {
+  return (
+    <div className="rounded-xl border border-warning-border bg-warning-bg px-4 py-3">
+      <p className="text-sm font-medium text-warning-strong">Sample data</p>
+      <p className="mt-0.5 text-xs leading-relaxed text-text-body">
+        This clinic&apos;s patients, visits and payments are generated for
+        demonstration. The analysis is real; the clinic is not.
+      </p>
+    </div>
   );
 }
 

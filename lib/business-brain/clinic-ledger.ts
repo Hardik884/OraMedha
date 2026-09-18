@@ -568,133 +568,133 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
       treatmentEventRows,
       completionRows,
     ] = await Promise.all([
-      readWindow<AppointmentRow>(
+      this.readByIds<AppointmentRow>(
         "appointments",
-        (from, to) =>
+        live,
+        (chunk, from, to) =>
           this.db
           .from("appointments")
           .select(APPOINTMENT_COLUMNS)
           .eq("clinic_id", clinicId)
           .is("deleted_at", null)
-          .in("patient_id", live)
+          .in("patient_id", chunk)
           .lte("created_at", asOf)
           .order("scheduled_at", { ascending: true })
           .order("id", { ascending: true })
-          
-            .range(from, to),
+              .range(from, to),
         fetchLimit,
       ),
-      readWindow<TreatmentRow>(
+      this.readByIds<TreatmentRow>(
         "treatments",
-        (from, to) =>
+        live,
+        (chunk, from, to) =>
           this.db
           .from("treatments")
           .select(TREATMENT_COLUMNS)
           .eq("clinic_id", clinicId)
           .is("deleted_at", null)
-          .in("patient_id", live)
+          .in("patient_id", chunk)
           .or(`performed_at.lte.${asOf},created_at.lte.${asOf}`)
           .order("created_at", { ascending: true })
           .order("id", { ascending: true })
-          
-            .range(from, to),
+              .range(from, to),
         fetchLimit,
       ),
-      readWindow<QueueRow>(
+      this.readByIds<QueueRow>(
         "queue_entries",
-        (from, to) =>
+        live,
+        (chunk, from, to) =>
           this.db
           .from("queue_entries")
           .select(QUEUE_COLUMNS)
           .eq("clinic_id", clinicId)
-          .in("patient_id", live)
+          .in("patient_id", chunk)
           .lte("checked_in_at", asOf)
           .order("checked_in_at", { ascending: true })
           .order("id", { ascending: true })
-          
-            .range(from, to),
+              .range(from, to),
         fetchLimit,
       ),
-      readWindow<FollowUpRow>(
+      this.readByIds<FollowUpRow>(
         "follow_ups",
-        (from, to) =>
+        live,
+        (chunk, from, to) =>
           this.db
           .from("follow_ups")
           .select(FOLLOW_UP_COLUMNS)
           .eq("clinic_id", clinicId)
           .is("deleted_at", null)
-          .in("patient_id", live)
+          .in("patient_id", chunk)
           .lte("created_at", asOf)
           .order("due_date", { ascending: true })
           .order("id", { ascending: true })
-          
-            .range(from, to),
+              .range(from, to),
         fetchLimit,
       ),
-      readWindow<PaymentRow>(
+      this.readByIds<PaymentRow>(
         "payments",
-        (from, to) =>
+        live,
+        (chunk, from, to) =>
           this.db
           .from("payments")
           .select(PAYMENT_COLUMNS)
           .eq("clinic_id", clinicId)
           .is("deleted_at", null)
-          .in("patient_id", live)
+          .in("patient_id", chunk)
           .lte("payment_date", asOfDate)
           .order("payment_date", { ascending: true })
           .order("id", { ascending: true })
-          
-            .range(from, to),
+              .range(from, to),
         fetchLimit,
       ),
       this.unlessWithheld(LedgerFactKind.REMINDER_SEND, () =>
-        readWindow<ReminderRow>(
+        this.readByIds<ReminderRow>(
           "reminder_logs",
-          (from, to) =>
+          live,
+          (chunk, from, to) =>
             this.db
             .from("reminder_logs")
             .select(REMINDER_COLUMNS)
             .eq("clinic_id", clinicId)
-            .in("patient_id", live)
+            .in("patient_id", chunk)
             .lte("sent_at", asOf)
             .order("sent_at", { ascending: true })
             .order("id", { ascending: true })
-            
-              .range(from, to),
+                .range(from, to),
           fetchLimit,
         ),
       ),
       this.unlessWithheld(LedgerFactKind.TREATMENT_EVENT, () =>
-        readWindow<TreatmentEventRow>(
+        this.readByIds<TreatmentEventRow>(
           "treatment_history",
-          (from, to) =>
+          live,
+          (chunk, from, to) =>
             this.db
             .from("treatment_history")
             .select(TREATMENT_EVENT_COLUMNS)
             .eq("clinic_id", clinicId)
-            .in("patient_id", live)
+            .in("patient_id", chunk)
             .lte("timestamp", asOf)
             .order("timestamp", { ascending: true })
             .order("id", { ascending: true })
-            
-              .range(from, to),
+                .range(from, to),
           fetchLimit,
         ),
       ),
       this.unlessWithheld(LedgerFactKind.ACTION_COMPLETION, () =>
-        readWindow<CompletionRow>(
+        this.readByIds<CompletionRow>(
           "action_completions",
-          (from, to) =>
+          live,
+          (chunk, from, to) =>
             this.db
             .from("action_completions")
             .select(COMPLETION_COLUMNS)
             .eq("clinic_id", clinicId)
-            .overlaps("target_patient_ids", live)
+            .overlaps("target_patient_ids", chunk)
             .lte("completed_at", asOf)
             .order("completed_at", { ascending: true })
             .order("id", { ascending: true })
-            
-              .range(from, to),
+                .range(from, to),
           fetchLimit,
         ),
       ),
@@ -1188,7 +1188,21 @@ export class SupabaseClinicLedger extends SupabaseDiagnosisContext implements Cl
         async (chunk) => (await readUpTo<T>(`clinic ledger (${label})`, (from, to) => query(chunk, from, to), perChunkLimit)).rows,
       ),
     );
-    return parts.flat();
+    // Rows arrive per chunk, so the query's ordering only holds inside a chunk.
+    // `capped` keeps the FIRST rows of the merged list, which would otherwise
+    // mean "the first chunk's" rather than "the earliest". De-duplicate too: an
+    // array overlap can return one row under more than one chunk.
+    const seen = new Set<string>();
+    const merged: T[] = [];
+    for (const row of parts.flat()) {
+      const key = (row as { id?: string }).id;
+      if (key !== undefined) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      merged.push(row);
+    }
+    return merged;
   }
 
   /**

@@ -45,11 +45,40 @@ export const FEATURE_FLAGS = {
 export const BUSINESS_BRAIN_CLINIC_IDS: readonly string[] = [
   // My Dental Clinic — development / demo
   "00000000-0000-0000-0000-000000000001",
+  // Demo Clinic (sample data) — generated records, for reviewing the analysis
+  // against realistic volume. See DEMO_CLINIC_IDS below.
+  "d0000000-0000-4000-8000-0000000000d0",
 ];
 
 /** True when this clinic may access the Business Brain dashboard. */
 export function isBusinessBrainEnabled(clinicId: string | null | undefined): boolean {
   return !!clinicId && BUSINESS_BRAIN_CLINIC_IDS.includes(clinicId);
+}
+
+/**
+ * DEMO_CLINIC_IDS
+ *
+ * Clinics whose records are GENERATED, not real.
+ *
+ * The Business Brain cannot be reviewed against a clinic with three
+ * appointments a month: every rate is noise, every baseline is too wide to flag
+ * anything, and every gate correctly stays shut — so the feature looks broken
+ * when it is working. `scripts/seed-demo-clinic.mjs` fills a clinic with nine
+ * months of plausible activity instead.
+ *
+ * Named here for two reasons. Every surface that shows this clinic labels it as
+ * sample data, so nobody mistakes a generated figure for their own; and the
+ * seeder refuses to write to any clinic that is not on this list, so it can
+ * never be pointed at a real one.
+ */
+export const DEMO_CLINIC_IDS: readonly string[] = [
+  // Demo Clinic (sample data) — generated records, safe to delete and rebuild.
+  "d0000000-0000-4000-8000-0000000000d0",
+];
+
+/** True when this clinic's records are generated sample data, not a real clinic's. */
+export function isDemoClinic(clinicId: string | null | undefined): boolean {
+  return !!clinicId && DEMO_CLINIC_IDS.includes(clinicId);
 }
 
 /**
