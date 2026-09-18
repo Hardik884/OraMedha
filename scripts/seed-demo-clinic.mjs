@@ -483,9 +483,18 @@ async function ensureClinic(adminOnly) {
     if (error && !/already/i.test(error.message)) {
       throw new Error(`demo dentist: ${error.message || JSON.stringify(error)}`);
     }
-  } else if (password) {
-    const { error } = await db.auth.admin.updateUserById(DENTIST_ID, { password });
-    if (error) throw new Error(`demo dentist password: ${error.message}`);
+  } else {
+    // Keep an existing account in step with what was asked for now.
+    const patch = {};
+    if (password) patch.password = password;
+    if (existing.user.email !== DENTIST_EMAIL) {
+      patch.email = DENTIST_EMAIL;
+      patch.email_confirm = true;
+    }
+    if (Object.keys(patch).length > 0) {
+      const { error } = await db.auth.admin.updateUserById(DENTIST_ID, patch);
+      if (error) throw new Error(`demo dentist: ${error.message || JSON.stringify(error)}`);
+    }
   }
   const { error: profileErr } = await db.from("profiles").upsert({
     id: DENTIST_ID,
