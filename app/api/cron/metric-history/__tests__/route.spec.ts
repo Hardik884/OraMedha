@@ -11,6 +11,7 @@
  * run, because they are the part that must not regress silently.
  */
 
+import { createClient } from "@supabase/supabase-js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const URL_BASE = process.env.SUPABASE_TEST_URL ?? "http://127.0.0.1:55321";
@@ -128,6 +129,30 @@ describe.skipIf(!LOCAL_UP)("recording", () => {
     const body = (await res.json()) as { results: { status: string }[] };
     // This is what makes an hourly schedule affordable.
     expect(body.results.every((r) => r.status === "already_recorded")).toBe(true);
+  });
+
+  it("skips an allow-listed clinic that does not exist here, and does not call it a failure", async () => {
+    // A clinic on the allow-list with no clinic_settings row in THIS database —
+    // the demo clinic before anyone runs the seeder. Recording history for it
+    // violates metric_history's foreign key, and reporting that as a failed run
+    // left the job permanently degraded on every such environment.
+    const admin = createClient(URL_BASE, SERVICE_KEY, { auth: { persistSession: false } });
+    const { BUSINESS_BRAIN_CLINIC_IDS } = await import("@/lib/feature-flags");
+    const victim = BUSINESS_BRAIN_CLINIC_IDS[BUSINESS_BRAIN_CLINIC_IDS.length - 1];
+    const { data: saved } = await admin.from("clinic_settings").select("*").eq("clinic_id", victim).maybeSingle();
+    await admin.from("clinic_settings").delete().eq("clinic_id", victim);
+
+    try {
+      const res = await POST(post({ authorization: `Bearer ${SECRET}` }) as never);
+      const body = (await res.json()) as { ok: boolean; results: { clinicId: string; status: string }[] };
+      const outcome = body.results.find((r) => r.clinicId === victim);
+      expect(outcome?.status).toBe("not_configured");
+      // The run as a whole is still clean: nothing failed.
+      expect(body.results.some((r) => r.status === "failed")).toBe(false);
+      expect(body.ok).toBe(true);
+    } finally {
+      if (saved) await admin.from("clinic_settings").insert(saved);
+    }
   });
 
   it("builds clinic memory for the recorded day once, and skips it on the next run", async () => {

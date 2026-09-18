@@ -49,7 +49,13 @@ export const maxDuration = 60;
 interface ClinicOutcome {
   readonly clinicId: string;
   readonly date: string;
-  readonly status: "recorded" | "already_recorded" | "failed";
+  /**
+   * `not_configured` is an allow-listed clinic with no `clinic_settings` row in
+   * THIS environment — the demo clinic on a developer's machine, say. It is not
+   * a failure: there is nothing to record, and treating it as one would leave
+   * the job permanently degraded for a clinic nobody provisioned here.
+   */
+  readonly status: "recorded" | "already_recorded" | "failed" | "not_configured";
   readonly error?: string;
   /**
    * Clinic memory for the same completed day, built once the day is on record.
@@ -107,8 +113,17 @@ export async function POST(request: NextRequest) {
         .select("timezone")
         .eq("clinic_id", clinicId)
         .maybeSingle();
-      const timezone = (data as { timezone?: string | null } | null)?.timezone ?? DEFAULT_TIMEZONE;
+      const settings = data as { timezone?: string | null } | null;
+      const timezone = settings?.timezone ?? DEFAULT_TIMEZONE;
       const date = addDays(getTodayInTimezone(timezone), -1);
+
+      if (settings === null) {
+        // The clinic is on the allow-list but not in this database. Say so and
+        // move on: writing history for it would violate its foreign key, and
+        // reporting a failure would hide the runs that really did fail.
+        results.push({ clinicId, date, status: "not_configured" });
+        continue;
+      }
 
       try {
         // Skip a day already on record. This is what makes an hourly schedule
@@ -139,7 +154,8 @@ export async function POST(request: NextRequest) {
       job: "metric_history",
       startedAt,
       ok: failed === 0,
-      handled: results.length,
+      // Clinics absent from this environment were not work this run attempted.
+      handled: results.filter((r) => r.status !== "not_configured").length,
       failed,
       detail: failed === 0 ? null : results.find((r) => r.status === "failed")?.error ?? "one or more clinics failed",
     });

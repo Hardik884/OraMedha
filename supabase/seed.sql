@@ -113,6 +113,34 @@ where u.email in ('dentist@dentgrow.test', 'receptionist@dentgrow.test')
 on conflict (id) do nothing;
 
 -- =============================================================================
+-- Demo Clinic (sample data)
+--
+-- The clinic row and its settings only. `scripts/seed-demo-clinic.mjs` fills it
+-- with nine months of generated activity; that is far too much to carry in a
+-- seed file, and it belongs in a script anyone can re-run against any
+-- environment.
+--
+-- It exists here because the clinic is on the Business Brain allow-list
+-- (lib/feature-flags.ts), and the hourly metric-history job walks that list. A
+-- clinic on the list with no row in this database used to make the job report a
+-- failed run, every hour, on every environment where nobody had run the seeder.
+-- The job now skips a clinic it cannot find; this makes local and CI match
+-- production instead of relying on that.
+-- =============================================================================
+
+insert into clinics (id, name, dentist_name)
+values ('d0000000-0000-4000-8000-0000000000d0', 'Demo Clinic (sample data)', 'Dr Demo (sample data)')
+on conflict (id) do nothing;
+
+insert into clinic_settings (
+  clinic_id, clinic_name, timezone, average_appointment_duration, chair_count
+)
+values (
+  'd0000000-0000-4000-8000-0000000000d0', 'Demo Clinic (sample data)', 'Asia/Kolkata', 30, 1
+)
+on conflict (clinic_id) do nothing;
+
+-- =============================================================================
 -- Business Brain demo clinic
 --
 -- "My Dental Clinic" is the development clinic the Business Brain dashboard is
