@@ -10,7 +10,7 @@ import {
   computeClinicHealth,
   withDelta,
 } from "@/lib/business-brain/clinic-health";
-import { buildWins } from "@/lib/business-brain/wins-view";
+import { buildWins, buildWinsEmptyState } from "@/lib/business-brain/wins-view";
 import { buildBriefing } from "@/lib/business-brain/briefing-view";
 import { readActiveDismissals, isSuppressed } from "@/lib/business-brain/dismissals";
 import { readReminderOutcomes } from "@/lib/business-brain/reminder-outcomes";
@@ -165,6 +165,9 @@ export default async function BusinessBrainPage() {
   // the Achievement Engine; empty for a clinic running inside its usual range,
   // which renders nothing rather than a placeholder.
   const wins = buildWins(result.achievements, outcomes, now);
+  // And when there are none — the common case — what was checked and how close it
+  // came. Built from the engine's own decision trace, never from a second pass.
+  const winsEmptyState = buildWinsEmptyState(result.achievementDecisions);
   // The clinic's recorded decisions on suggestions, so a decided one shows as decided.
   // A failed read shows them undecided; the server action re-checks either way.
   const decisions = await readClinicDecisions(supabase as never, profile.clinic_id)
@@ -224,6 +227,7 @@ export default async function BusinessBrainPage() {
         problems={problems}
         actions={actions}
         wins={wins}
+        winsEmptyState={winsEmptyState}
         completedCategories={completedCategories}
         whatsappEnabled={whatsappEnabled}
         reminderSummaries={reminderSummaries}

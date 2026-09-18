@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildMetric, MetricKey } from "../../metrics/metric-ids";
 import {
+  BaselineBasis,
   BaselineDirection,
   BaselineQuality,
   BaselineWithholdReason,
@@ -521,6 +522,152 @@ describe("bands stay inside the scale", () => {
 
     expect(baseline?.lower).toBeLessThan(0);
     expect(baseline?.clamped).toBe(false);
+  });
+});
+
+// ── Like days ────────────────────────────────────────────────────────────────
+
+describe("comparing like days", () => {
+  const WAITING = MetricKey.QUEUE_AVERAGE_WAITING_TIME;
+  /** 2026-09-12 is a Saturday; every date below is derived from it. */
+  const SATURDAY = "2026-09-12";
+
+  /** `count` days ending the day before SATURDAY, oldest first. */
+  function daysBefore(count: number): string[] {
+    const out: string[] = [];
+    for (let i = count; i >= 1; i -= 1) {
+      const d = new Date(Date.parse(`${SATURDAY}T00:00:00.000Z`) - i * 86_400_000);
+      out.push(d.toISOString().slice(0, 10));
+    }
+    return out;
+  }
+
+  /** A history where Saturdays read `saturday` and every other day `weekday`. */
+  function weekdayShapedHistory(count: number, saturday: number, weekday: number) {
+    return daysBefore(count).map((date) => {
+      const isSaturday = new Date(Date.parse(`${date}T00:00:00.000Z`)).getUTCDay() === 6;
+      return {
+        date,
+        metrics: [
+          buildMetric(
+            WAITING,
+            isSaturday ? saturday : weekday,
+            CLINIC,
+            date,
+            `${date}T18:00:00.000Z`,
+          ),
+        ],
+      };
+    });
+  }
+
+  it("judges a Saturday against Saturdays once there are enough of them", () => {
+    // Ten weeks: nine Saturdays at 40 minutes, every other day at 10. Today is a
+    // Saturday at 38 minutes — utterly ordinary for this clinic, and three
+    // standard bands outside a range built from all its days.
+    const result = deriveBaselines({
+      history: weekdayShapedHistory(70, 40, 10),
+      current: [buildMetric(WAITING, 38, CLINIC, SATURDAY, `${SATURDAY}T18:00:00.000Z`)],
+      date: SATURDAY,
+    });
+    const baseline = result.byKey.get(WAITING);
+
+    expect(baseline?.basis).toBe(BaselineBasis.SAME_WEEKDAY);
+    expect(baseline?.weekday).toBe(6);
+    expect(baseline?.median).toBe(40);
+    expect(baseline?.position).toBe("inside");
+
+    // Without the date there is no weekday to match, and the same clinic reads
+    // as having an unusual day. That is the calendar, not a finding.
+    const blind = deriveBaselines({
+      history: weekdayShapedHistory(70, 40, 10),
+      current: [buildMetric(WAITING, 38, CLINIC, SATURDAY, `${SATURDAY}T18:00:00.000Z`)],
+    });
+    expect(blind.byKey.get(WAITING)?.basis).toBe(BaselineBasis.ALL_DAYS);
+    expect(blind.byKey.get(WAITING)?.position).toBe("above");
+  });
+
+  it("falls back to every day rather than judging against three Saturdays", () => {
+    // Four weeks: four Saturdays, below the six a weekday band needs. A thinner
+    // comparison is not a better one.
+    const baseline = deriveBaselines({
+      history: weekdayShapedHistory(28, 40, 10),
+      current: [buildMetric(WAITING, 38, CLINIC, SATURDAY, `${SATURDAY}T18:00:00.000Z`)],
+      date: SATURDAY,
+    }).byKey.get(WAITING);
+
+    expect(baseline?.basis).toBe(BaselineBasis.ALL_DAYS);
+    expect(baseline?.weekday).toBeNull();
+  });
+
+  it("does not split a trailing window by weekday", () => {
+    // A 30-day rate measured on a Saturday covers the same weekdays as one
+    // measured on a Tuesday. Splitting it would shrink the sample for nothing.
+    const days = daysBefore(70).map((date) => ({
+      date,
+      metrics: [
+        buildMetric(KEY, 10, CLINIC, date, `${date}T18:00:00.000Z`),
+        buildMetric(MetricKey.SCHEDULING_APPOINTMENTS_30D, AMPLE, CLINIC, date, `${date}T18:00:00.000Z`),
+      ],
+    }));
+    const baseline = deriveBaselines({
+      history: days,
+      current: todayIs(10),
+      date: SATURDAY,
+    }).byKey.get(KEY);
+
+    expect(baseline?.basis).toBe(BaselineBasis.ALL_DAYS);
+    expect(baseline?.observations).toBe(70);
+  });
+
+  it("says plainly that time of year could not be taken into account", () => {
+    const result = deriveBaselines({
+      history: weekdayShapedHistory(70, 40, 10),
+      current: [],
+      date: SATURDAY,
+    });
+
+    expect(result.seasonality.measurable).toBe(false);
+    expect(result.seasonality.historyDays).toBe(70);
+    expect(result.seasonality.requiredDays).toBe(330);
+    // Not silence, and not a claim. The rule is dormant and the run says so.
+    expect(result.seasonality.reason).toContain("330");
+  });
+
+  it("compares against the same weeks of earlier years once a year exists", () => {
+    // Two years of daily readings: 20 through September, 60 the rest of the
+    // year. A clinic with a quiet monsoon should not be told September is a
+    // collapse. The quiet stretch is wider than the engine's own season window
+    // (21 days either side) so the comparison is drawn entirely from it.
+    const start = Date.parse("2024-09-20T00:00:00.000Z");
+    const history = Array.from({ length: 723 }, (_, i) => {
+      const date = new Date(start + i * 86_400_000).toISOString().slice(0, 10);
+      const near =
+        Math.abs(
+          Math.round(
+            (Date.parse(`${date}T00:00:00.000Z`) -
+              Date.parse(`${date.slice(0, 4)}-01-01T00:00:00.000Z`)) /
+              86_400_000,
+          ) - 254,
+        ) <= 25;
+      return {
+        date,
+        metrics: [buildMetric(WAITING, near ? 20 : 60, CLINIC, date, `${date}T18:00:00.000Z`)],
+      };
+    }).filter((d) => d.date < SATURDAY);
+
+    const result = deriveBaselines({
+      history,
+      current: [buildMetric(WAITING, 21, CLINIC, SATURDAY, `${SATURDAY}T18:00:00.000Z`)],
+      date: SATURDAY,
+    });
+    const baseline = result.byKey.get(WAITING);
+
+    expect(result.seasonality.measurable).toBe(true);
+    // Same weekday AND the same weeks of the year — they compose.
+    expect(baseline?.basis).toBe(BaselineBasis.SAME_WEEKDAY_IN_SEASON);
+    expect(baseline?.median).toBe(20);
+    expect(baseline?.position).toBe("inside");
   });
 });
 

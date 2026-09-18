@@ -62,6 +62,8 @@ function beating(key: string, median: number, current: number): MetricBaseline {
     // and quality, never the denominator.
     sample: null,
     clamped: false,
+    basis: "all_days",
+    weekday: null,
     quality: BaselineQuality.ADEQUATE,
     position: current < median - halfWidth ? "below" : current > median + halfWidth ? "above" : "inside",
     consecutiveOutside: 3,

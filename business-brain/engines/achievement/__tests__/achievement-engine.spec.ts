@@ -23,7 +23,11 @@ import {
   DEFAULT_ACHIEVEMENT_CONFIG,
   deriveAchievements,
 } from "../achievement-engine";
-import { BaselineWithholdReason, type BaselineWithholding } from "../../baseline";
+import {
+  BaselineBasis,
+  BaselineWithholdReason,
+  type BaselineWithholding,
+} from "../../baseline";
 import { ACHIEVEMENT_SPECS } from "../achievement-catalog";
 
 const CLINIC = "clinic_ach";
@@ -64,6 +68,10 @@ function baseline(over: Partial<MetricBaseline> = {}): MetricBaseline {
       daysExcluded: 0,
     },
     clamped: false,
+    // A 30-day rate, so it is judged against every day rather than against the
+    // same weekday — see MetricSpan.
+    basis: BaselineBasis.ALL_DAYS,
+    weekday: null,
     quality: BaselineQuality.ADEQUATE,
     position: current < median - 2.2 ? "below" : current > median + 2.2 ? "above" : "inside",
     consecutiveOutside: 3,

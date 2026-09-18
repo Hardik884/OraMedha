@@ -36,12 +36,21 @@ import { readLatestClinicMemory } from "./clinic-memory";
  * every day for as long as the clinic has been live; the run was reading seven of
  * them.
  *
- * Five weeks rather than more: it covers the 30-day windows the metrics
- * themselves describe, plus a few days of slack so a clinic closed on the
- * comparison day still has a nearby one. Beyond that the reads get wider for no
- * question anyone is asking yet.
+ * Raised again from 35 to 70 when baselines became weekday-aware. A Saturday is
+ * judged against Saturdays, and six of them is the bar every other judgement
+ * here uses — which is six weeks, so five weeks of history could never clear it
+ * for any weekday. Ten weeks leaves room for the days a clinic is closed.
+ *
+ * Ten weeks rather than more: it covers the 30-day windows the metrics
+ * themselves describe, with slack for weekday bands and for a comparison day
+ * near a closure. Beyond that the reads get wider for no question anyone is
+ * asking yet — seasonality needs a year, and no clinic has one (see
+ * `BaselineResult.seasonality`).
+ *
+ * The store pages its reads, so a wider window is one range query rather than a
+ * truncated one.
  */
-const HISTORY_DAYS = 35;
+const HISTORY_DAYS = 70;
 
 /**
  * How many of those days this run may MEASURE itself when the store lacks them.

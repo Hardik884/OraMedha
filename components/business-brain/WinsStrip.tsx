@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Minus } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { WinView } from "@/lib/business-brain/wins-view";
+import type { WinsEmptyView, WinView } from "@/lib/business-brain/wins-view";
 
 /**
  * What is going well, between the score and the work.
@@ -24,14 +24,31 @@ import type { WinView } from "@/lib/business-brain/wins-view";
  * needed to decide whether to care. The reasoning and the numbers behind it are
  * one click away and never in the way.
  *
- * ## Renders nothing when there is nothing
+ * ## When there is nothing, it says what was checked
  *
- * No empty state, no "no wins today" placeholder. A clinic inside its normal
- * range has no wins to report, and a box saying so would be the filler this
- * layer exists to avoid.
+ * This block used to render nothing at all on a day with no wins — which is most
+ * days — on the reasoning that an empty box is filler. That was right about the
+ * box and wrong about the silence. Seven measures are checked every morning, and
+ * a dentist who sees nothing cannot tell "we looked, and today is ordinary" from
+ * "this does not work". The test clinic sat in that state for months while every
+ * check ran correctly.
+ *
+ * So the empty state states the finding — nothing outside your usual range — and
+ * shows the closest readings, in the same quiet single lines. None of it is
+ * phrased as a win, and a near miss carries what would have to be true for it to
+ * become one, so the absence is falsifiable rather than mysterious.
  */
-export function WinsStrip({ wins }: { wins: readonly WinView[] }) {
-  if (wins.length === 0) return null;
+export function WinsStrip({
+  wins,
+  empty,
+}: {
+  wins: readonly WinView[];
+  /** What to say when there are no wins. Null renders nothing, as before. */
+  empty?: WinsEmptyView | null;
+}) {
+  if (wins.length === 0) {
+    return empty ? <NothingToReport empty={empty} /> : null;
+  }
 
   return (
     <section aria-labelledby="wins-heading" className="bg-surface border border-border rounded-xl">
@@ -48,6 +65,59 @@ export function WinsStrip({ wins }: { wins: readonly WinView[] }) {
           <WinRow key={win.id} win={win} />
         ))}
       </ul>
+    </section>
+  );
+}
+
+/**
+ * The honest empty state: what was checked, what it found, and what was closest.
+ *
+ * Quieter than a win — no success colour, no disclosure to open — because none of
+ * this is news. It is the answer to "did anything go well today", and that answer
+ * is "no, and here is how close".
+ */
+function NothingToReport({ empty }: { empty: WinsEmptyView }) {
+  return (
+    <section
+      aria-labelledby="wins-heading"
+      className="bg-surface border border-border rounded-xl px-5 py-4"
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 id="wins-heading" className="text-sm font-semibold text-text-primary">
+          What&rsquo;s going well
+        </h2>
+        <span className="text-xs text-text-disabled">measured against your own records</span>
+      </div>
+
+      <p className="mt-1 text-sm text-text-secondary">{empty.headline}</p>
+      {empty.learning && (
+        <p className="mt-1 text-xs text-text-disabled">{empty.learning}</p>
+      )}
+
+      {empty.nearMisses.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {empty.nearMisses.map((near) => (
+            <li key={near.id} className="flex items-start gap-3">
+              <span
+                className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-surface-muted"
+                aria-hidden
+              >
+                <Minus className="h-2.5 w-2.5 text-text-disabled" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm text-text-body">
+                  <span className="font-medium text-text-primary">{near.title}</span>
+                  {" — "}
+                  {near.line}
+                </span>
+                <span className="block text-xs text-text-disabled mt-0.5">
+                  {near.whatWouldShowIt}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

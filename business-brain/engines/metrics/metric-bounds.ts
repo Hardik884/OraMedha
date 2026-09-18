@@ -1,14 +1,16 @@
 /**
- * Business Brain — Metrics Engine: what a metric's values can be, and what it
- * was divided by
+ * Business Brain — Metrics Engine: what a metric is, beyond its value
  *
- * Two facts that belong to the METRIC rather than to any one consumer, kept here
- * so a rate and the judgement made about it cannot disagree:
+ * Three facts that belong to the METRIC rather than to any one consumer, kept
+ * here so a rate and the judgement made about it cannot disagree:
  *
  *   bounds   the values the metric can take at all. A no-show rate below 0% or
  *            above 100% is not a low reading, it is an impossible one.
  *   basis    which metric holds the rate's DENOMINATOR, and how many events must
  *            be behind it before the rate may be judged against a range.
+ *   span     what stretch of time one reading describes — one day, a trailing
+ *            window, or a running level. It decides whether comparing a
+ *            Saturday against a Wednesday is comparing like with like.
  *
  * ## Why the basis exists
  *
@@ -196,4 +198,88 @@ const RATE_BASIS: Readonly<Partial<Record<MetricKey, RateBasis>>> = {
 /** The denominator rule for a rate, or undefined when the metric is not a rate. */
 export function rateBasisFor(key: string): RateBasis | undefined {
   return RATE_BASIS[key as MetricKey];
+}
+
+/**
+ * What stretch of time one reading of a metric describes.
+ *
+ * The distinction exists for one question: is a Saturday comparable to a
+ * Wednesday? For a DAY metric it is not — a clinic that opens four hours on a
+ * Saturday books a quarter of its Tuesday, and a band built across all weekdays
+ * calls every Saturday unusual and every Tuesday normal. For a WINDOW metric the
+ * question does not arise: a 30-day trailing rate on a Saturday covers the same
+ * four Saturdays and five Wednesdays as one on a Tuesday, so splitting by
+ * weekday would only make the sample smaller.
+ *
+ * A LEVEL is a running total that belongs to no particular day — an outstanding
+ * balance, an overdue recall list. It drifts rather than cycling, so a weekday
+ * split buys nothing and costs observations.
+ */
+export const MetricSpan = {
+  /** Describes the target date alone. */
+  DAY: "day",
+  /** Describes a trailing or forward window of days. */
+  WINDOW: "window",
+  /** A running level as it stands, belonging to no one day. */
+  LEVEL: "level",
+} as const;
+
+export type MetricSpan = (typeof MetricSpan)[keyof typeof MetricSpan];
+
+/**
+ * Every metric's span, stated rather than inferred from its name.
+ *
+ * A `_today` suffix is a naming convention and this is a measurement property;
+ * a metric renamed or added without one would silently acquire the wrong
+ * comparison. `metric-bounds.spec.ts` fails if a key is missing.
+ */
+const SPANS: Readonly<Record<MetricKey, MetricSpan>> = {
+  [MetricKey.APPOINTMENTS_TOTAL_TODAY]: MetricSpan.DAY,
+  [MetricKey.APPOINTMENTS_CANCELLED_TODAY]: MetricSpan.DAY,
+  [MetricKey.APPOINTMENTS_NO_SHOWS_TODAY]: MetricSpan.DAY,
+  [MetricKey.SCHEDULING_CANCELLATION_RATE_30D]: MetricSpan.WINDOW,
+  [MetricKey.SCHEDULING_NO_SHOW_RATE_30D]: MetricSpan.WINDOW,
+  [MetricKey.SCHEDULING_REPEAT_NON_ATTENDERS_30D]: MetricSpan.WINDOW,
+  [MetricKey.SCHEDULING_BOOKING_LEAD_TIME_DAYS]: MetricSpan.WINDOW,
+  [MetricKey.SCHEDULING_APPOINTMENTS_30D]: MetricSpan.WINDOW,
+  [MetricKey.SCHEDULING_APPOINTMENT_OVERRUN_30D]: MetricSpan.WINDOW,
+  [MetricKey.SCHEDULING_MEASURED_VISITS_30D]: MetricSpan.WINDOW,
+  [MetricKey.PATIENTS_NEW_TODAY]: MetricSpan.DAY,
+  [MetricKey.PATIENTS_RETURNING_TODAY]: MetricSpan.DAY,
+  // A standing list of people who have not come back — it grows and is worked
+  // down, and has no weekday of its own.
+  [MetricKey.PATIENTS_REACTIVATION_CANDIDATES]: MetricSpan.LEVEL,
+  [MetricKey.REVENUE_COLLECTED_TODAY]: MetricSpan.DAY,
+  [MetricKey.REVENUE_OUTSTANDING]: MetricSpan.LEVEL,
+  [MetricKey.REVENUE_OUTSTANDING_ON_PAYMENT_PLAN]: MetricSpan.LEVEL,
+  [MetricKey.REVENUE_PENDING_TREATMENT_VALUE]: MetricSpan.LEVEL,
+  [MetricKey.REVENUE_PRODUCTION_30D]: MetricSpan.WINDOW,
+  [MetricKey.REVENUE_COLLECTION_RATE_30D]: MetricSpan.WINDOW,
+  [MetricKey.REVENUE_COLLECTED_30D]: MetricSpan.WINDOW,
+  [MetricKey.REVENUE_PRODUCTION_UNPAID_30D]: MetricSpan.WINDOW,
+  [MetricKey.REVENUE_PRODUCTION_PAID_RATE_30D]: MetricSpan.WINDOW,
+  [MetricKey.QUEUE_PATIENTS_WAITING]: MetricSpan.DAY,
+  [MetricKey.QUEUE_AVERAGE_WAITING_TIME]: MetricSpan.DAY,
+  [MetricKey.FOLLOWUPS_DUE_TODAY]: MetricSpan.DAY,
+  [MetricKey.FOLLOWUPS_OVERDUE]: MetricSpan.LEVEL,
+  [MetricKey.TREATMENT_ACCEPTED_PENDING_SCHEDULING]: MetricSpan.LEVEL,
+  [MetricKey.TREATMENT_COMPLETED_TODAY]: MetricSpan.DAY,
+  [MetricKey.TREATMENT_AVERAGE_CASE_VALUE_30D]: MetricSpan.WINDOW,
+  [MetricKey.CAPACITY_CHAIR_UTILIZATION]: MetricSpan.DAY,
+  [MetricKey.CAPACITY_AVAILABLE_SLOTS_TODAY]: MetricSpan.DAY,
+  [MetricKey.CAPACITY_CHAIR_UTILIZATION_30D]: MetricSpan.WINDOW,
+  [MetricKey.CAPACITY_BOOKED_NEXT_7D]: MetricSpan.WINDOW,
+  [MetricKey.CAPACITY_OPEN_MINUTES_TODAY]: MetricSpan.DAY,
+  [MetricKey.CAPACITY_APPOINTMENT_CAPACITY_TODAY]: MetricSpan.DAY,
+};
+
+/**
+ * What one reading of this metric describes.
+ *
+ * An unknown key is treated as a WINDOW: the conservative answer, because it
+ * leaves the comparison as wide as it already was rather than splitting a series
+ * this file knows nothing about.
+ */
+export function spanFor(key: string): MetricSpan {
+  return SPANS[key as MetricKey] ?? MetricSpan.WINDOW;
 }

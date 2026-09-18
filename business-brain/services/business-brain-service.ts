@@ -104,7 +104,7 @@ const OPPORTUNITY_ROW_LIMIT = 5000;
  */
 const ROOT_CAUSE_SCHEDULE_LIMIT = 5000;
 import { deriveBaselines, type MetricBaseline } from "../engines/baseline";
-import { deriveAchievements } from "../engines/achievement";
+import { deriveAchievements, type AchievementDecision } from "../engines/achievement";
 import type { Achievement } from "../domain";
 import {
   calibrateThresholds,
@@ -291,6 +291,16 @@ export interface BusinessBrainResult {
    * saying so anyway would be the praise this layer refuses to invent.
    */
   readonly achievements: readonly Achievement[];
+  /**
+   * Every catalogued metric the Achievement Engine considered, and what happened
+   * to it.
+   *
+   * Carried because {@link achievements} is EMPTY on most days and an empty list
+   * is not an answer. The trace is what lets the view say "nothing outside your
+   * usual range, and here is the closest" rather than rendering nothing, which a
+   * reader cannot tell from a feature that does not work.
+   */
+  readonly achievementDecisions: readonly AchievementDecision[];
   /**
    * The metric set from an earlier day, for callers that want to show a movement
    * rather than a level — a score delta, for instance.
@@ -572,6 +582,7 @@ export class BusinessBrain {
     // run already has, and consumed by nothing downstream.
     let baselines: readonly MetricBaseline[] = [];
     let achievements: readonly Achievement[] = [];
+    let achievementDecisions: readonly AchievementDecision[] = [];
     // Assigned once, below — but read by `finish`, which the failure paths call
     // before that line runs, so it cannot be a const.
     // eslint-disable-next-line prefer-const
@@ -632,6 +643,7 @@ export class BusinessBrain {
         recomputedHistory,
         baselines,
         achievements,
+        achievementDecisions,
         comparison,
         opportunities,
         opportunityAssessments,
@@ -724,9 +736,11 @@ export class BusinessBrain {
     //
     // `history` deliberately excludes `date` itself, so today is never folded
     // into the band it is being judged against.
-    const baselineResult = deriveBaselines({ history, current: metrics });
+    // `date` is what lets a one-day metric be judged against the same weekday: a
+    // Saturday compared against Tuesdays is the calendar, not a finding.
+    const baselineResult = deriveBaselines({ history, current: metrics, date });
     baselines = baselineResult.baselines;
-    achievements = deriveAchievements({
+    const achievementResult = deriveAchievements({
       baselines: baselineResult.byKey,
       // So a metric with no band can say WHICH question failed — no history, or
       // a clinic too small for the rate to be judged. The two read differently
@@ -735,7 +749,9 @@ export class BusinessBrain {
       clinicId,
       date,
       now: startedAt,
-    }).achievements;
+    });
+    achievements = achievementResult.achievements;
+    achievementDecisions = achievementResult.decisions;
     comparison = pickComparisonDay(history, date, baselineResult.baselines.length > 0);
 
     // Trajectories from the same history — no read of their own. Guarded because a
@@ -1404,6 +1420,10 @@ function pickComparisonDay(
     ? deriveBaselines({
         history: history.filter((d) => d.date < (best as { day: MetricsOnlyDay }).day.date),
         current: best.day.metrics,
+        // THAT day's weekday, not today's. A comparison day a week back shares
+        // today's weekday; one nine days back does not, and judging it against
+        // today's would be the mistake this argument exists to prevent.
+        date: best.day.date,
       }).baselines
     : [];
 

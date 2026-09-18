@@ -19,7 +19,13 @@ import { describe, expect, it } from "vitest";
 
 import { ClinicDimension, type Achievement } from "@/business-brain";
 import { MetricKey } from "@/business-brain/engines/metrics/metric-ids";
-import { buildWins } from "../wins-view";
+import {
+  BaselineDirection,
+  BaselineQuality,
+  type MetricBaseline,
+} from "@/business-brain/engines/baseline";
+import type { AchievementDecision } from "@/business-brain/engines/achievement";
+import { buildWins, buildWinsEmptyState } from "../wins-view";
 
 function achievement(over: Partial<Achievement> = {}): Achievement {
   return {
@@ -102,7 +108,28 @@ describe("the expanded explanation", () => {
     const [win] = buildWins([achievement({ consecutiveDays: 3 })]);
     expect(win.explanation).toContain("3 days running");
     expect(win.explanation).toContain("your own records");
-    expect(win.explanation).toContain("normal day-to-day variation");
+    expect(win.explanation).toContain("normal variation");
+  });
+
+  it("counts a weekday baseline in its own weekday, never in days", () => {
+    // A Saturday is judged against Saturdays (see MetricSpan), so three
+    // consecutive readings are three WEEKS. Calling them "3 days running" would
+    // be false, and it is the sentence a dentist would check first.
+    const [win] = buildWins([
+      achievement({
+        metricKey: MetricKey.QUEUE_AVERAGE_WAITING_TIME,
+        consecutiveDays: 3,
+        observations: 9,
+        basis: "same_weekday",
+        weekday: 6,
+      }),
+    ]);
+    expect(win.headline).toContain("3 Saturdays running");
+    expect(win.explanation).toContain("your own Saturdays");
+    expect(win.evidence).toContainEqual({
+      label: "Measured against",
+      value: "9 Saturdays of your own records",
+    });
   });
 
   it("says plainly that one day is not yet a trend", () => {
@@ -208,5 +235,155 @@ describe("hygiene", () => {
     const b = buildWins([achievement({ id: "achievement.x:clinic_b:2026-09-12" })]);
     expect(a[0].id).toContain("clinic_a");
     expect(b[0].id).toContain("clinic_b");
+  });
+});
+
+// ── The empty state, which is most days ─────────────────────────────────────
+
+describe("when nothing qualifies", () => {
+  /** A baseline shaped for a decision trace. */
+  function baseline(over: Partial<MetricBaseline> = {}): MetricBaseline {
+    return {
+      key: MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+      current: 5,
+      median: 5,
+      mad: 1,
+      deviation: 1,
+      lower: 3,
+      upper: 7,
+      delta: 0,
+      deltaPercent: 0,
+      observations: 12,
+      basis: "all_days",
+      weekday: null,
+      sample: null,
+      clamped: false,
+      quality: BaselineQuality.ADEQUATE,
+      position: "inside",
+      consecutiveOutside: 0,
+      confidence: 0.7,
+      ...over,
+    };
+  }
+
+  function decision(over: Partial<AchievementDecision> = {}): AchievementDecision {
+    return {
+      metricKey: MetricKey.SCHEDULING_NO_SHOW_RATE_30D,
+      emitted: false,
+      rejection: "inside_normal_range",
+      reasoning: "inside the normal range",
+      dimension: ClinicDimension.ATTENDANCE,
+      direction: BaselineDirection.LOWER_IS_BETTER,
+      minimumDelta: 2,
+      baseline: baseline(),
+      ...over,
+    };
+  }
+
+  it("says what was checked rather than rendering nothing", () => {
+    // The defect this fixes. Seven measures ran, all correctly found nothing,
+    // and the page showed silence — which a reader cannot tell from a broken
+    // feature.
+    const empty = buildWinsEmptyState([decision()]);
+    expect(empty?.headline).toContain("Nothing outside your usual range");
+  });
+
+  it("shows the closest reading and what would make it a win", () => {
+    const empty = buildWinsEmptyState([decision({ baseline: baseline({ current: 3.4 }) })]);
+    const [near] = empty?.nearMisses ?? [];
+    expect(near?.title).toBe("Fewer no-shows");
+    expect(near?.line).toContain("inside your usual");
+    // Falsifiable: a dentist can check tomorrow whether it was true.
+    expect(near?.whatWouldShowIt).toContain("below 3%");
+  });
+
+  it("ranks by closeness to the edge, not by size of the number", () => {
+    const empty = buildWinsEmptyState([
+      decision({ baseline: baseline({ current: 6.9 }) }),
+      decision({
+        metricKey: MetricKey.FOLLOWUPS_OVERDUE,
+        baseline: baseline({
+          key: MetricKey.FOLLOWUPS_OVERDUE,
+          current: 3.1,
+          median: 5,
+          lower: 3,
+          upper: 7,
+        }),
+      }),
+    ]);
+    expect(empty?.nearMisses[0]?.title).toBe("Smaller overdue recall list");
+  });
+
+  it("says plainly when a measure is already where it should be", () => {
+    // Not a gap. A clinic whose best measure never appears here should be told
+    // why, instead of concluding the feature ignores it.
+    const empty = buildWinsEmptyState([
+      decision({ rejection: "already_good", baseline: baseline({ current: 1, median: 1 }) }),
+    ]);
+    expect(empty?.nearMisses[0]?.line).toContain("already where it should be");
+    expect(empty?.nearMisses[0]?.whatWouldShowIt).toContain("will not appear");
+  });
+
+  it("counts the days towards a normal range while it is still learning", () => {
+    const empty = buildWinsEmptyState([
+      decision({
+        rejection: "baseline_too_thin",
+        baseline: baseline({ observations: 3, quality: BaselineQuality.THIN }),
+      }),
+    ]);
+    expect(empty?.learning).toContain("3 of the 6");
+    // Nothing is claimed about a clinic whose range does not exist yet.
+    expect(empty?.nearMisses).toEqual([]);
+  });
+
+  it("does not tell a clinic to wait when waiting will not help", () => {
+    // Six months of faithful records and five appointments a week. "Still
+    // learning" would be advice this clinic could follow for a year without it
+    // becoming true; the honest answer names the denominator.
+    const empty = buildWinsEmptyState([
+      decision({
+        rejection: "sample_too_small",
+        baseline: baseline({
+          observations: 90,
+          quality: BaselineQuality.STRONG,
+          sample: {
+            key: MetricKey.SCHEDULING_APPOINTMENTS_30D,
+            noun: "appointments",
+            minimum: 50,
+            current: 22,
+            median: 20,
+            sufficientToday: false,
+            daysExcluded: 0,
+          },
+        }),
+      }),
+    ]);
+    expect(empty?.learning).toContain("too few appointments");
+    expect(empty?.learning).toContain("50");
+    expect(empty?.learning).not.toContain("Still learning");
+  });
+
+  it("never dresses a metric moving the WRONG way as a near miss", () => {
+    // That is a problem, and the briefing has a place for problems. Putting it in
+    // the quietest block on the page would bury it.
+    const empty = buildWinsEmptyState([
+      decision({
+        rejection: "wrong_direction",
+        baseline: baseline({ current: 12, position: "above" }),
+      }),
+    ]);
+    expect(empty?.nearMisses).toEqual([]);
+  });
+
+  it("renders nothing at all when a win did qualify", () => {
+    expect(buildWinsEmptyState([decision({ emitted: true, rejection: undefined })])).toBeNull();
+    expect(buildWinsEmptyState([])).toBeNull();
+  });
+
+  it("shows at most three, the same cap the wins have", () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      decision({ metricKey: `metric.${i}`, baseline: baseline({ key: `metric.${i}`, current: 5 + i * 0.1 }) }),
+    );
+    expect(buildWinsEmptyState(many)?.nearMisses).toHaveLength(3);
   });
 });

@@ -66,6 +66,33 @@
  * "Too few appointments to judge" is the honest reading of a five-appointment
  * week, and it is a different statement from "normal".
  *
+ * ## Like days, where the clinic has enough of them
+ *
+ * A band across all weekdays calls every Saturday unusual and every Tuesday
+ * normal, at a clinic that opens four hours on Saturday and nine on Tuesday.
+ * That is not a finding about the clinic; it is the calendar.
+ *
+ * So a metric that describes ONE DAY (`MetricSpan.DAY`) is compared against the
+ * same weekday, once the clinic has enough of them — six, the same bar every
+ * other judgement here uses. Below that it falls back to all days rather than
+ * judging against three Saturdays, and `basis` says which happened.
+ *
+ * A 30-day trailing rate is not split: a window ending on a Saturday contains
+ * the same weekdays as one ending on a Tuesday, so splitting would shrink the
+ * sample and buy nothing.
+ *
+ * ## Time of year, when a clinic has a year
+ *
+ * The same argument holds for seasons — a quiet fortnight in a monsoon is not a
+ * failing clinic — but it needs a year of history to make, and it is the honest
+ * statement of what is missing: with ten weeks of recorded days, nothing about
+ * December can be compared with anything. The rule is implemented and DORMANT:
+ * it applies only once the history spans {@link BaselineConfig.seasonalHistoryDays},
+ * and `BaselineResult.seasonality` states plainly that it did not.
+ *
+ * Nothing here extrapolates a season from a short history. A band that cannot be
+ * built is not built.
+ *
  * ## Pure
  *
  * History and current metrics in, baselines out. No clock, no I/O, no randomness.
@@ -78,7 +105,13 @@ import type { Metric } from "../../domain";
 import { median } from "../metrics/support/windows";
 // What a metric's values can be, and what its rate was divided by. Both belong
 // to the metric rather than to this engine — see `metric-bounds.ts`.
-import { boundsFor, clampToBounds, rateBasisFor } from "../metrics/metric-bounds";
+import {
+  boundsFor,
+  clampToBounds,
+  rateBasisFor,
+  spanFor,
+  MetricSpan,
+} from "../metrics/metric-bounds";
 
 /**
  * How much history stands behind a baseline.
@@ -113,6 +146,37 @@ export type BaselineDirection =
 
 /** Which side of the normal band a value falls on. */
 export type BandPosition = "above" | "below" | "inside";
+
+/**
+ * Which days a band was built from.
+ *
+ * Reported rather than assumed, because "your usual" means something different
+ * in each case and the sentence a clinic reads has to say which: all your
+ * recorded days, or your last nine Tuesdays.
+ */
+export const BaselineBasis = {
+  /** Every measured day in the history. */
+  ALL_DAYS: "all_days",
+  /** Only days falling on the same weekday as the day being judged. */
+  SAME_WEEKDAY: "same_weekday",
+  /** Only days near the same point in the year, across the history. */
+  SAME_TIME_OF_YEAR: "same_time_of_year",
+  /** Both: the same weekday, near the same point in the year. */
+  SAME_WEEKDAY_IN_SEASON: "same_weekday_in_season",
+} as const;
+
+export type BaselineBasis = (typeof BaselineBasis)[keyof typeof BaselineBasis];
+
+/** Whether time of year could be taken into account, and why not when it could not. */
+export interface SeasonalityStatement {
+  readonly measurable: boolean;
+  /** Days between the oldest and newest history day supplied, inclusive. */
+  readonly historyDays: number;
+  /** Days of history the rule needs. */
+  readonly requiredDays: number;
+  /** Plain statement of what was and was not possible. */
+  readonly reason: string;
+}
 
 /**
  * The denominator behind a rate, as this baseline actually found it.
@@ -178,6 +242,13 @@ export interface MetricBaseline {
   readonly deltaPercent: number | null;
   /** How many days of history the band rests on. */
   readonly observations: number;
+  /** Which days those were — see {@link BaselineBasis}. */
+  readonly basis: BaselineBasis;
+  /**
+   * The weekday the band is specific to, 0 = Sunday, or null when it is not
+   * weekday-specific. A number rather than a name: this engine holds no locale.
+   */
+  readonly weekday: number | null;
   /**
    * The denominator rule this metric is judged under, or null when it is not a
    * rate over a countable denominator.
@@ -235,6 +306,26 @@ export interface BaselineConfig {
    * where a relative floor also collapses.
    */
   readonly absoluteDeviationFloor: number;
+  /**
+   * Same-weekday days needed before a one-day metric is judged against its own
+   * weekday rather than against every day.
+   *
+   * The same six {@link adequateObservations} uses, and for the same reason:
+   * below it a band exists but must not be presented as this clinic's normal.
+   * Judging a Saturday against three Saturdays would trade one wrong comparison
+   * for another.
+   */
+  readonly weekdayObservations: number;
+  /**
+   * Days the history must SPAN before time of year can be taken into account.
+   *
+   * Just under a year. Below it there is no earlier same-season period to
+   * compare against, and nothing in a ten-week history says anything about
+   * December.
+   */
+  readonly seasonalHistoryDays: number;
+  /** Days either side of the same point in the year that count as the same season. */
+  readonly seasonWindowDays: number;
   /** Confidence reported per quality band. Data completeness, not probability. */
   readonly confidenceByQuality: Readonly<Record<BaselineQuality, number>>;
 }
@@ -252,6 +343,13 @@ export const DEFAULT_BASELINE_CONFIG: BaselineConfig = {
   bandMads: 2,
   relativeDeviationFloor: 0.1,
   absoluteDeviationFloor: 0.5,
+  weekdayObservations: 6,
+  // 330 days. A clinic with less than that has no earlier same-season period,
+  // and the rule stays dormant rather than inventing one.
+  seasonalHistoryDays: 330,
+  // Three weeks either side. Wide enough to gather comparable days, narrow
+  // enough that a monsoon fortnight is not averaged with a dry one.
+  seasonWindowDays: 21,
   confidenceByQuality: {
     [BaselineQuality.NONE]: 0,
     [BaselineQuality.THIN]: 0.4,
@@ -315,6 +413,8 @@ export interface BaselineResult {
   readonly withheld: readonly BaselineWithholding[];
   /** Lookup by metric key. */
   readonly withheldByKey: ReadonlyMap<string, BaselineWithholding>;
+  /** Whether time of year could be taken into account at all, and why not. */
+  readonly seasonality: SeasonalityStatement;
 }
 
 /** Metric ids are `<key>:<clinicId>:<date>`; the key never contains a colon. */
@@ -344,6 +444,40 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+/** Midnight UTC of a "YYYY-MM-DD", as milliseconds. Dates only; no timezone maths. */
+function dayMillis(date: string): number {
+  return Date.parse(`${date}T00:00:00.000Z`);
+}
+
+/** Day of the week for a business date, 0 = Sunday. */
+function weekdayOf(date: string): number {
+  return new Date(dayMillis(date)).getUTCDay();
+}
+
+/**
+ * Days between two business dates, whole days, ignoring time entirely.
+ *
+ * Business dates are calendar labels rather than instants, so this is
+ * deliberately not a duration: a DST change must not make two dates 0.96 days
+ * apart.
+ */
+function daysApart(a: string, b: string): number {
+  return Math.round(Math.abs(dayMillis(a) - dayMillis(b)) / 86_400_000);
+}
+
+/**
+ * How far apart two dates are in the YEAR, 0..182.
+ *
+ * Wraps across the new year, so 28 December and 3 January are six days apart
+ * rather than three hundred and fifty nine.
+ */
+function seasonalDistance(a: string, b: string): number {
+  const dayOfYear = (date: string) =>
+    Math.round((dayMillis(date) - dayMillis(`${date.slice(0, 4)}-01-01`)) / 86_400_000);
+  const diff = Math.abs(dayOfYear(a) - dayOfYear(b));
+  return Math.min(diff, 365 - diff);
+}
+
 function qualityFor(observations: number, config: BaselineConfig): BaselineQuality {
   if (observations < config.minimumObservations) return BaselineQuality.NONE;
   if (observations >= config.strongObservations) return BaselineQuality.STRONG;
@@ -365,6 +499,15 @@ function qualityFor(observations: number, config: BaselineConfig): BaselineQuali
 export function deriveBaselines(params: {
   readonly history: readonly BaselineHistoryDay[];
   readonly current: readonly Metric[];
+  /**
+   * The business date being judged, "YYYY-MM-DD".
+   *
+   * Optional, and its absence is not a default — it is a narrower answer. Without
+   * it there is no weekday to match and no point in the year to sit near, so
+   * every band is built from all days and says so (`basis: "all_days"`). A
+   * caller that has the date should pass it.
+   */
+  readonly date?: string;
   readonly config?: BaselineConfig;
 }): BaselineResult {
   const config = params.config ?? DEFAULT_BASELINE_CONFIG;
@@ -377,10 +520,15 @@ export function deriveBaselines(params: {
     a.date < b.date ? -1 : a.date > b.date ? 1 : 0,
   );
 
-  /** key -> values in calendar order, oldest first. */
-  const series = new Map<string, number[]>();
-  /** key -> the denominator behind each kept value, same order. */
-  const sampleSeries = new Map<string, number[]>();
+  /** One usable measurement: what it read, when, and what stood behind it. */
+  interface Observation {
+    readonly date: string;
+    readonly value: number;
+    readonly sample: number | null;
+  }
+
+  /** key -> usable observations in calendar order, oldest first. */
+  const series = new Map<string, Observation[]>();
   /** key -> days seen at all, including those the denominator rule dropped. */
   const daysSeen = new Map<string, number>();
 
@@ -403,19 +551,35 @@ export function deriveBaselines(params: {
       // book. An unrecorded denominator is dropped for the same reason it is
       // never assumed elsewhere in this module: unknown is not a value.
       const basis = rateBasisFor(key);
+      let sample: number | null = null;
       if (basis !== undefined) {
         const denominator = denominators.get(basis.denominatorKey);
         if (denominator === undefined || denominator < basis.minimumToJudge) continue;
-        const samples = sampleSeries.get(key);
-        if (samples) samples.push(denominator);
-        else sampleSeries.set(key, [denominator]);
+        sample = denominator;
       }
 
+      const observation: Observation = { date: day.date, value: metric.value, sample };
       const list = series.get(key);
-      if (list) list.push(metric.value);
-      else series.set(key, [metric.value]);
+      if (list) list.push(observation);
+      else series.set(key, [observation]);
     }
   }
+
+  // Whether time of year can be taken into account AT ALL. One statement per
+  // run, because it is a property of the history rather than of any metric.
+  const span =
+    days.length === 0 ? 0 : daysApart(days[0].date, days[days.length - 1].date) + 1;
+  const seasonality: SeasonalityStatement = {
+    measurable: params.date !== undefined && span >= config.seasonalHistoryDays,
+    historyDays: span,
+    requiredDays: config.seasonalHistoryDays,
+    reason:
+      params.date === undefined
+        ? "No date was supplied, so there is no point in the year to compare against."
+        : span >= config.seasonalHistoryDays
+          ? `History spans ${span} days, enough to compare this time of year against the same weeks before it.`
+          : `History spans ${span} days; comparing like for like across a year needs ${config.seasonalHistoryDays}. Nothing here says what this clinic's December looks like.`,
+  };
 
   const currentByKey = new Map<string, number>();
   for (const metric of params.current) {
@@ -434,9 +598,19 @@ export function deriveBaselines(params: {
   );
 
   for (const key of consideredKeys) {
-    const values = series.get(key) ?? [];
+    const usable = series.get(key) ?? [];
     const basis = rateBasisFor(key);
     const seen = daysSeen.get(key) ?? 0;
+
+    // Which of this metric's usable days are LIKE the day being judged.
+    //
+    // Season first, then weekday, because they compose: a Tuesday in October is
+    // compared against Tuesdays in October where the history allows it. Each
+    // narrowing is taken only when what survives is enough to stand on — the
+    // alternative is trading one wrong comparison for a thinner one.
+    const selection = selectComparableDays(key, usable);
+    const observations = selection.observations;
+    const values = observations.map((o) => o.value);
     const quality = qualityFor(values.length, config);
     if (quality === BaselineQuality.NONE) {
       const droppedForSample = basis !== undefined && seen > values.length;
@@ -477,7 +651,9 @@ export function deriveBaselines(params: {
       current === null ? null : current > upper ? "above" : current < lower ? "below" : "inside";
 
     // Consecutive run ending today on the same side. Walks the history backwards
-    // from the most recent day; stops at the first day that is not on that side.
+    // from the most recent COMPARABLE day; stops at the first that is not on that
+    // side. On a weekday band those are consecutive Tuesdays, not consecutive
+    // days, which is what `basis` exists to let a reader say correctly.
     let consecutiveOutside = 0;
     if (position === "above" || position === "below") {
       consecutiveOutside = 1;
@@ -490,7 +666,9 @@ export function deriveBaselines(params: {
 
     // The denominator as this baseline actually found it. `sufficientToday` is
     // the gate `isJudgeable` applies; the rest is evidence for the sentence.
-    const sampleValues = sampleSeries.get(key) ?? [];
+    const sampleValues = observations
+      .map((o) => o.sample)
+      .filter((v): v is number => v !== null);
     const currentSample =
       basis === undefined ? null : (currentByKey.get(basis.denominatorKey) ?? null);
     const sample: BaselineSample | null =
@@ -518,6 +696,8 @@ export function deriveBaselines(params: {
       deltaPercent:
         current === null || mid === 0 ? null : round2(((current - mid) / Math.abs(mid)) * 100),
       observations: values.length,
+      basis: selection.basis,
+      weekday: selection.weekday,
       sample,
       clamped: lower !== rawLower || upper !== rawUpper,
       quality,
@@ -534,7 +714,60 @@ export function deriveBaselines(params: {
     withheldKeys: withheld.map((w) => w.key),
     withheld,
     withheldByKey: new Map(withheld.map((w) => [w.key, w])),
+    seasonality,
   };
+
+  /**
+   * The days comparable to the one being judged, and what makes them so.
+   *
+   * Declared inside `deriveBaselines` because it reads the run's own config,
+   * date and seasonality statement; it is a step of this function rather than a
+   * rule of its own.
+   */
+  function selectComparableDays(
+    key: string,
+    usable: readonly Observation[],
+  ): {
+    readonly observations: readonly Observation[];
+    readonly basis: BaselineBasis;
+    readonly weekday: number | null;
+  } {
+    const date = params.date;
+    if (date === undefined) {
+      return { observations: usable, basis: BaselineBasis.ALL_DAYS, weekday: null };
+    }
+
+    // Same time of year, where a year of history exists to define one.
+    const inSeason = seasonality.measurable
+      ? usable.filter((o) => seasonalDistance(o.date, date) <= config.seasonWindowDays)
+      : usable;
+    const seasonal =
+      seasonality.measurable && inSeason.length >= config.adequateObservations;
+    const pool = seasonal ? inSeason : usable;
+
+    // Same weekday, but only for a metric that describes ONE day. A trailing
+    // window ending on a Saturday contains the same weekdays as one ending on a
+    // Tuesday, so narrowing it would shrink the sample for nothing.
+    if (spanFor(key) === MetricSpan.DAY) {
+      const weekday = weekdayOf(date);
+      const sameWeekday = pool.filter((o) => weekdayOf(o.date) === weekday);
+      if (sameWeekday.length >= config.weekdayObservations) {
+        return {
+          observations: sameWeekday,
+          basis: seasonal
+            ? BaselineBasis.SAME_WEEKDAY_IN_SEASON
+            : BaselineBasis.SAME_WEEKDAY,
+          weekday,
+        };
+      }
+    }
+
+    return {
+      observations: pool,
+      basis: seasonal ? BaselineBasis.SAME_TIME_OF_YEAR : BaselineBasis.ALL_DAYS,
+      weekday: null,
+    };
+  }
 }
 
 /**

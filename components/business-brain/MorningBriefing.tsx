@@ -3,7 +3,7 @@
 import { CheckCircle2 } from "lucide-react";
 import type { ClinicHealth } from "@/lib/business-brain/clinic-health";
 import type { ActionCardView, ProblemView } from "@/lib/business-brain/briefing-view";
-import type { WinView } from "@/lib/business-brain/wins-view";
+import type { WinsEmptyView, WinView } from "@/lib/business-brain/wins-view";
 import type { ReminderSummary } from "@/lib/messaging/reminder-types";
 import { HealthMeter } from "./HealthMeter";
 import { WinsStrip } from "./WinsStrip";
@@ -22,6 +22,14 @@ interface MorningBriefingProps {
    * Empty renders nothing at all — no placeholder, no "no wins today".
    */
   wins?: readonly WinView[];
+  /**
+   * What the wins strip says when there are none — which is most days.
+   *
+   * Optional, and its absence keeps the old behaviour of rendering nothing. Not
+   * derived here: it comes from the Achievement Engine's own decision trace, so
+   * what is shown cannot disagree with what the engine decided.
+   */
+  winsEmptyState?: WinsEmptyView | null;
   /**
    * Categories already marked done today, resolved server-side.
    *
@@ -70,6 +78,7 @@ export function MorningBriefing({
   problems,
   actions,
   wins = [],
+  winsEmptyState = null,
   completedCategories,
   whatsappEnabled = false,
   reminderSummaries = [],
@@ -87,7 +96,7 @@ export function MorningBriefing({
     <div className="space-y-6">
       <HealthMeter health={health} coveredCategories={coveredCategories} />
 
-      <WinsStrip wins={wins} />
+      <WinsStrip wins={wins} empty={winsEmptyState} />
 
       {allClear ? (
         <div className="bg-surface border border-border rounded-xl px-6 py-10 text-center">

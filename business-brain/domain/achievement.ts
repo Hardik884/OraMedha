@@ -71,8 +71,25 @@ export interface Achievement {
   /** How many days of history the baseline rests on. */
   readonly observations: number;
   /**
+   * Which days the baseline was built from: every recorded day, or only those
+   * comparable to this one — the same weekday, the same time of year.
+   *
+   * Carried because it changes what the figures MEAN. "Nine days of your own
+   * records" and "your last nine Tuesdays" are different claims, and
+   * {@link consecutiveDays} counts the days of whichever series this is. Optional
+   * so a caller constructing an Achievement by hand need not restate it; absent
+   * reads as every recorded day.
+   */
+  readonly basis?: "all_days" | "same_weekday" | "same_time_of_year" | "same_weekday_in_season";
+  /** The weekday the baseline is specific to, 0 = Sunday, when it is. */
+  readonly weekday?: number | null;
+  /**
    * Consecutive most-recent days (today included) on the improving side of the
    * band. Always at least 1 — an achievement requires today to be outside it.
+   *
+   * On a weekday-specific baseline these are consecutive SAME WEEKDAYS: three
+   * means three Tuesdays, which is three weeks. {@link basis} is what lets a
+   * reader say so instead of "three days running".
    */
   readonly consecutiveDays: number;
   /**

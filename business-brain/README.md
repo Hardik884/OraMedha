@@ -198,8 +198,12 @@ there is no model.
   surviving balance, capped at what the window charged. No payment is matched to
   a treatment anywhere in OraMedha, so the oldest-charge-first convention is an
   assumption — a stated one, and the cap keeps older debt out either way.
-- Baselines are one band across all weekdays; weekday and seasonal patterns are
-  not modelled, even though memory detects them.
+- Seasonality is implemented and DORMANT: a band is drawn from the same weeks of
+  earlier years only once the history spans 330 days, and no clinic has that.
+  `BaselineResult.seasonality` states so on every run rather than leaving it to
+  be assumed.
+- Weekday bands need six of the same weekday, so they start after six weeks of
+  recorded days and apply only to metrics that describe ONE day.
 - Shared core queries the briefing relies on (`getOverdueFollowUps`,
   planned-without-visit, the `clinic_outstanding_balances` RPC) are not paged.
 - No retention purge covers `finding_snapshots`, `clinic_memory_builds`,

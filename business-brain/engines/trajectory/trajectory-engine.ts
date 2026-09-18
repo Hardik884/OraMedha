@@ -347,6 +347,9 @@ function referenceFor(
     .sort((a, b) => (a.date < b.date ? -1 : 1));
   if (referenceDays.length === 0) return { reference: null, unusableReason: null };
 
+  // Deliberately without a date: this reference range is the level the whole
+  // window is judged against, day by day, so narrowing it to one weekday would
+  // leave six days a week compared against a band built for the seventh.
   const derived = deriveBaselines({ history: referenceDays, current: [] });
   const baseline = derived.byKey.get(spec.metricKey);
   if (baseline === undefined || baseline.quality === BaselineQuality.NONE) {

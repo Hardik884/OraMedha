@@ -45,7 +45,7 @@
  * `date` are supplied by the caller like every other engine in this module.
  */
 
-import type { Achievement } from "../../domain";
+import type { Achievement, ClinicDimension } from "../../domain";
 import {
   BaselineDirection,
   BaselineWithholdReason,
@@ -74,13 +74,34 @@ export type AchievementRejection =
   | "below_minimum_delta"
   | "already_good";
 
-/** One considered metric and what happened to it. The engine's own trace. */
+/**
+ * One considered metric and what happened to it. The engine's own trace.
+ *
+ * The trace is not debug output. A clinic with no wins is the COMMON case, and
+ * the reason each metric did not qualify is the only honest thing there is to
+ * say to it — "nothing outside your usual range" is a measurement, and silence
+ * is indistinguishable from the check never having run. So a decision carries
+ * the reading it was made on, not only a sentence about it, and the view layer
+ * writes the English (`lib/business-brain/wins-view.ts`).
+ */
 export interface AchievementDecision {
   readonly metricKey: string;
   readonly emitted: boolean;
   readonly rejection?: AchievementRejection;
   /** Plain statement of the arithmetic, for the decision trace. */
   readonly reasoning: string;
+  readonly dimension: ClinicDimension;
+  /** Which direction of movement is an improvement for this metric. */
+  readonly direction: BaselineDirection;
+  /** Smallest movement worth reporting, in the metric's own unit. */
+  readonly minimumDelta: number;
+  /**
+   * The baseline the decision was made against, when there was one.
+   *
+   * Absent only for `no_baseline` and the withheld cases — the two situations
+   * where there is genuinely nothing to state.
+   */
+  readonly baseline?: MetricBaseline;
 }
 
 export interface AchievementConfig {
@@ -114,6 +135,23 @@ export interface AchievementResult {
    * qualify, which is a different statement from it never having been looked at.
    */
   readonly decisions: readonly AchievementDecision[];
+}
+
+/**
+ * The part of a decision that comes from the catalogue rather than from the day.
+ *
+ * Spread into every decision so the trace carries the same context whichever
+ * gate ended it — and so adding a field cannot be forgotten at one of nine call
+ * sites.
+ */
+function context(spec: AchievementSpec, baseline?: MetricBaseline) {
+  return {
+    metricKey: spec.metricKey,
+    dimension: spec.dimension,
+    direction: spec.direction,
+    minimumDelta: spec.minimumDelta,
+    ...(baseline === undefined ? {} : { baseline }),
+  };
 }
 
 /** Was the clinic already past the point where this metric is worth improving? */
@@ -201,7 +239,7 @@ export function deriveAchievements(params: {
     if (baseline === undefined) {
       const withheld = params.withheld?.get(spec.metricKey);
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec),
         emitted: false,
         ...describeMissingBaseline(withheld),
       });
@@ -211,7 +249,7 @@ export function deriveAchievements(params: {
     // Gate 1b — and it rests on enough history to judge against.
     if (!hasEnoughHistory(baseline)) {
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "baseline_too_thin",
         reasoning: `Baseline rests on ${baseline.observations} day(s) (${baseline.quality}); too few to call a change unusual.`,
@@ -227,7 +265,7 @@ export function deriveAchievements(params: {
     if (!hasEnoughSampleToday(baseline)) {
       const sample = baseline.sample;
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "sample_too_small",
         reasoning:
@@ -243,7 +281,7 @@ export function deriveAchievements(params: {
     // Gate 1c — and today was measured.
     if (baseline.current === null) {
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "not_measured_today",
         reasoning: "Not measured on this date, so there is nothing to compare.",
@@ -254,7 +292,7 @@ export function deriveAchievements(params: {
     // Gate 2 — outside this clinic's own band, in the improving direction.
     if (baseline.position === "inside") {
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "inside_normal_range",
         reasoning: `${baseline.current} is inside this clinic's normal range ${baseline.lower}..${baseline.upper}.`,
@@ -263,7 +301,7 @@ export function deriveAchievements(params: {
     }
     if (!isImprovement(baseline, spec.direction)) {
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "wrong_direction",
         reasoning: `${baseline.current} is outside the normal range ${baseline.lower}..${baseline.upper}, but in the direction that is worse for this metric.`,
@@ -275,7 +313,7 @@ export function deriveAchievements(params: {
     const magnitude = Math.abs(baseline.delta ?? 0);
     if (magnitude < spec.minimumDelta) {
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "below_minimum_delta",
         reasoning: `Moved ${magnitude} from a median of ${baseline.median}, below the ${spec.minimumDelta} worth reporting for this metric.`,
@@ -286,7 +324,7 @@ export function deriveAchievements(params: {
     // Gate 4 — the clinic was not already good at this.
     if (alreadyGood(baseline.median, spec)) {
       decisions.push({
-        metricKey: spec.metricKey,
+        ...context(spec, baseline),
         emitted: false,
         rejection: "already_good",
         reasoning: `This clinic's normal of ${baseline.median} was already at or past ${spec.alreadyGoodAt}, so a further improvement is not a change worth reporting.`,
@@ -309,6 +347,8 @@ export function deriveAchievements(params: {
         delta: baseline.delta ?? 0,
         bandEdge,
         observations: baseline.observations,
+        basis: baseline.basis,
+        weekday: baseline.weekday,
         consecutiveDays: baseline.consecutiveOutside,
         sustained,
         confidence: baseline.confidence,
@@ -316,9 +356,9 @@ export function deriveAchievements(params: {
       },
     });
     decisions.push({
-      metricKey: spec.metricKey,
+      ...context(spec, baseline),
       emitted: true,
-      reasoning: `${baseline.current} against a normal of ${baseline.median} (range ${baseline.lower}..${baseline.upper}) over ${baseline.observations} day(s), ${baseline.consecutiveOutside} consecutive day(s) outside it.`,
+      reasoning: `${baseline.current} against a normal of ${baseline.median} (range ${baseline.lower}..${baseline.upper}) over ${baseline.observations} comparable day(s) (${baseline.basis}), ${baseline.consecutiveOutside} consecutive one(s) outside it.`,
     });
   }
 
