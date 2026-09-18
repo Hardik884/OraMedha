@@ -12,6 +12,12 @@ import { requireAdmin } from "@/lib/auth/session";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SignOutButton } from "@/components/shared/SignOutButton";
 import { isBusinessBrainEnabled } from "@/lib/feature-flags";
+import {
+  describeJobHealth,
+  readJobHealth,
+  type JobHealth,
+  type JobStatus,
+} from "@/lib/business-brain/job-health";
 
 export const metadata: Metadata = {
   title: "Admin",
@@ -43,6 +49,9 @@ export default async function AdminPage() {
   const profile = await requireAdmin();
 
   const overview = await loadOverview(profile.clinic_id);
+  // Whether the scheduled work is actually happening. Null means the health
+  // itself could not be read, which renders as unknown — never as healthy.
+  const jobs = await readJobHealth(createAdminClient(), new Date().toISOString());
 
   return (
     <div className="min-h-dvh bg-background">
@@ -79,6 +88,27 @@ export default async function AdminPage() {
             <Stat label="Patient records" value={overview.patients} />
             <Stat label="Portal accounts" value={overview.portalAccounts} />
           </dl>
+        </section>
+
+        {/* Scheduled jobs */}
+        <section>
+          <h2 className="text-[13px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+            Scheduled jobs
+          </h2>
+          <p className="mt-2 max-w-xl text-sm leading-relaxed text-text-body">
+            Each job records its own run when it finishes. pg_cron reports success
+            as soon as it queues the request, so it cannot tell you whether the
+            work happened — these rows can.
+          </p>
+          <div className="mt-3 space-y-3">
+            {jobs === null ? (
+              <p className="rounded-xl border border-border bg-surface px-4 py-3.5 text-sm text-text-secondary">
+                Couldn&apos;t read job health. The jobs may still be running.
+              </p>
+            ) : (
+              jobs.map((job) => <JobRow key={job.job} health={job} />)
+            )}
+          </div>
         </section>
 
         {/* Where the admin actually works */}
@@ -137,6 +167,60 @@ export default async function AdminPage() {
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
+
+const JOB_LABELS: Record<string, string> = {
+  metric_history: "Metric history + clinic memory",
+  no_show_detection: "No-show detection",
+};
+
+/** Colour says what to do: red needs attention now, amber is worth a look. */
+const JOB_TONES: Record<JobStatus, { dot: string; text: string; label: string }> = {
+  healthy: { dot: "bg-success", text: "text-success", label: "Healthy" },
+  degraded: { dot: "bg-warning", text: "text-warning", label: "Degraded" },
+  stale: { dot: "bg-danger", text: "text-danger", label: "Stale" },
+  never_run: { dot: "bg-danger", text: "text-danger", label: "Never run" },
+};
+
+function JobRow({ health }: { health: JobHealth }) {
+  const tone = JOB_TONES[health.status];
+  return (
+    <div className="rounded-xl border border-border bg-surface px-4 py-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-medium text-text-primary">
+          {JOB_LABELS[health.job] ?? health.job}
+        </span>
+        <span className={`flex items-center gap-1.5 text-xs font-medium ${tone.text}`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} aria-hidden="true" />
+          {tone.label}
+        </span>
+      </div>
+      <p className="mt-1 text-xs leading-relaxed text-text-secondary">
+        {describeJobHealth(health)}
+        {health.lastSuccessAt !== null && (
+          <>
+            {" "}
+            Last success {formatWhen(health.lastSuccessAt)}.
+          </>
+        )}
+      </p>
+      {health.detail !== null && (
+        <p className="mt-1 font-mono text-[11px] leading-relaxed text-text-secondary">
+          {health.detail}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** A short, absolute time — an admin reading this needs the actual moment. */
+function formatWhen(iso: string): string {
+  return new Date(iso).toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 function Stat({ label, value }: { label: string; value: number | null }) {
   return (

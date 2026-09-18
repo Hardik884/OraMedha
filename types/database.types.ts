@@ -1604,6 +1604,39 @@ export type Database = {
           },
         ]
       }
+      job_runs: {
+        Row: {
+          detail: string | null
+          failed: number
+          finished_at: string
+          handled: number
+          id: string
+          job: string
+          ok: boolean
+          started_at: string
+        }
+        Insert: {
+          detail?: string | null
+          failed?: number
+          finished_at?: string
+          handled?: number
+          id?: string
+          job: string
+          ok: boolean
+          started_at: string
+        }
+        Update: {
+          detail?: string | null
+          failed?: number
+          finished_at?: string
+          handled?: number
+          id?: string
+          job?: string
+          ok?: boolean
+          started_at?: string
+        }
+        Relationships: []
+      }
       metric_history: {
         Row: {
           clinic_id: string
@@ -4413,6 +4446,19 @@ export type Database = {
           recorded_at: string
           seq: number
           status: Database["public"]["Enums"]["follow_up_status"]
+        }[]
+      }
+      job_health: {
+        Args: never
+        Returns: {
+          clinics_failed_24h: number
+          failures_24h: number
+          job: string
+          last_detail: string
+          last_ok: boolean
+          last_run_at: string
+          last_success_at: string
+          runs_24h: number
         }[]
       }
       jsonb_values_are_codes: { Args: { value: Json }; Returns: boolean }

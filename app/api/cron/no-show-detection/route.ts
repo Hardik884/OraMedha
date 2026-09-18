@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { secretsMatch } from "@/lib/security/timing-safe";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { recordJobRun } from "@/lib/business-brain/job-health";
 import { DEFAULT_TIMEZONE } from "@/lib/clinic/constants";
 import { autoMarkNoShowForClinic } from "@/lib/appointments/auto-no-show";
 
@@ -42,6 +43,7 @@ interface ClinicOutcome {
 }
 
 export async function POST(request: NextRequest) {
+  const startedAt = new Date().toISOString();
   const expected = process.env.CRON_SECRET;
   if (!expected) {
     // Fail closed — an unset secret must never be read as "no auth required".
@@ -64,6 +66,7 @@ export async function POST(request: NextRequest) {
 
     if (clinicsErr) {
       console.error("[cron/no-show-detection] failed to list clinics:", clinicsErr);
+      await recordJobRun(db, { job: "no_show_detection", startedAt, ok: false, handled: 0, failed: 0, detail: `failed to list clinics: ${clinicsErr.message}` });
       return NextResponse.json({ error: "Failed to list clinics" }, { status: 500 });
     }
 
@@ -90,6 +93,15 @@ export async function POST(request: NextRequest) {
     }
 
     const failed = results.filter((r) => r.status === "failed").length;
+    // See job-health.ts: pg_cron cannot tell anyone whether this ran.
+    await recordJobRun(db, {
+      job: "no_show_detection",
+      startedAt,
+      ok: failed === 0,
+      handled: results.length,
+      failed,
+      detail: failed === 0 ? null : results.find((r) => r.status === "failed")?.error ?? "one or more clinics failed",
+    });
     return NextResponse.json(
       { ok: failed === 0, results },
       // 207 when some clinics succeeded and others did not, so a monitor can
@@ -97,6 +109,14 @@ export async function POST(request: NextRequest) {
       { status: failed === 0 ? 200 : 207 },
     );
   } catch (error) {
+    await recordJobRun(createAdminClient(), {
+      job: "no_show_detection",
+      startedAt,
+      ok: false,
+      handled: 0,
+      failed: 0,
+      detail: error instanceof Error ? error.message : String(error),
+    });
     console.error("[cron/no-show-detection] unexpected", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

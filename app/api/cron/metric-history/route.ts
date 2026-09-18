@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { secretsMatch } from "@/lib/security/timing-safe";
 import { BUSINESS_BRAIN_CLINIC_IDS } from "@/lib/feature-flags";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { recordJobRun } from "@/lib/business-brain/job-health";
 import { getTodayInTimezone } from "@/lib/utils";
 import { addDays } from "@/business-brain";
 import { SupabaseMetricHistoryStore } from "@/lib/business-brain/metric-history-store";
@@ -77,6 +78,7 @@ async function buildMemory(
 }
 
 export async function POST(request: NextRequest) {
+  const startedAt = new Date().toISOString();
   const expected = process.env.CRON_SECRET;
   if (!expected) {
     // Fail closed. An unset secret must never mean "no auth required" — that
@@ -131,6 +133,16 @@ export async function POST(request: NextRequest) {
     }
 
     const failed = results.filter((r) => r.status === "failed").length;
+    // The run records itself: pg_cron only knows the request was queued, so this
+    // row is the only evidence the work actually happened (job-health.ts).
+    await recordJobRun(db, {
+      job: "metric_history",
+      startedAt,
+      ok: failed === 0,
+      handled: results.length,
+      failed,
+      detail: failed === 0 ? null : results.find((r) => r.status === "failed")?.error ?? "one or more clinics failed",
+    });
     return NextResponse.json(
       { ok: failed === 0, results },
       // 207 when some clinics succeeded and others did not, so a monitor can
@@ -138,6 +150,14 @@ export async function POST(request: NextRequest) {
       { status: failed === 0 ? 200 : 207 },
     );
   } catch (error) {
+    await recordJobRun(createAdminClient(), {
+      job: "metric_history",
+      startedAt,
+      ok: false,
+      handled: 0,
+      failed: 0,
+      detail: error instanceof Error ? error.message : String(error),
+    });
     console.error("[cron/metric-history] unexpected", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
