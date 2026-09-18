@@ -9,16 +9,12 @@ import {
   withAITimeout,
 } from "@/lib/ai/gemini";
 import {
-  buildDiagnosisExplanationPrompt,
   buildDashboardActionSummaryPrompt,
   type DashboardActionFact,
 } from "@/lib/ai/prompts";
 import { parseDashboardActionSummary } from "@/lib/ai/dashboard-action-summary";
 import {
   assessRunHealth,
-  explanationInputFor,
-  verifyExplanation,
-  type Diagnosis,
 } from "@/business-brain";
 import { addDays } from "@/business-brain";
 import { getClinicConfig } from "@/lib/clinic/config";
@@ -37,134 +33,36 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database.types";
 
 /**
- * Business Brain — AI explanation Server Action.
+ * Business Brain — Server Actions.
  *
- * Rewrites one already-computed diagnosis in plain English. It adds no analysis:
- * the diagnosis, its evidence and its hypothesis statuses are all decided by the
- * deterministic engines before this runs, and the model only rephrases them.
+ * The dashboard's writes and its one AI call. Everything the clinic is told is
+ * computed by the deterministic engines first; the model only rephrases facts
+ * that are already correct, and the same three guardrails apply to it:
  *
- * Three guardrails, in order of importance:
+ * 1. Output is VERIFIED before it is shown. `parseDashboardActionSummary`
+ *    rejects any line carrying a figure absent from the supplied facts, any
+ *    advisory wording, or anything over-long — a fabricated number in a money
+ *    summary is worse than no summary.
+ * 2. The fact set is closed and computed server-side. The client cannot widen
+ *    what the model is allowed to talk about.
+ * 3. Failure is never fatal. Timeouts, API errors and rejected generations fall
+ *    back to each item's own deterministic sentence, so the dashboard keeps
+ *    working with AI unavailable (CLAUDE.md §13.11).
  *
- * 1. Output is VERIFIED before it is returned. `verifyExplanation` rejects any
- *    text containing a figure absent from the supplied facts, any advisory
- *    wording, or anything over-long. Failing output is discarded and logged
- *    rather than shown — a fabricated number in a money summary is worse than
- *    no summary.
- * 2. The fact set is closed and derived server-side from the diagnosis. The
- *    client cannot widen what the model is allowed to talk about.
- * 3. Failure is never fatal. Timeouts, API errors and rejected generations all
- *    return a message, so the dashboard keeps working with AI unavailable
- *    (CLAUDE.md §13.11).
+ * A second action, `explainDiagnosis`, once rewrote a whole diagnosis in plain
+ * English. It was removed on 18 Sep 2026: no screen ever called it, and an
+ * exported "use server" function is a reachable endpoint whether or not a form
+ * points at it (CLAUDE.md §13.4). The verifier and prompt it used
+ * (`verifyExplanation`, `buildDiagnosisExplanationPrompt`) are kept for the
+ * explanation surface when one is actually built.
  */
-
-const EXPLANATION_UNAVAILABLE =
-  "Plain-English explanation is unavailable right now. The findings above are unaffected.";
-
-/** Kept short: this is one paragraph, not a conversation. */
-const EXPLANATION_TIMEOUT_MS = 12_000;
-
-export interface DiagnosisExplanation {
-  readonly diagnosisId: string;
-  readonly text: string;
-}
-
-/**
- * Explain a diagnosis in plain language.
- *
- * @param diagnosis          The diagnosis to explain, as produced by the pipeline.
- * @param signalDescriptions Descriptions of the signals behind it. These become
- *                           part of the closed fact set the model may restate.
- */
-export async function explainDiagnosis(
-  diagnosis: Diagnosis,
-  signalDescriptions: string[] = [],
-): Promise<ActionResult<DiagnosisExplanation>> {
-  try {
-    // Same gate as the dashboard: this is a development surface.
-    const { profile } = await resolveSession();
-    if (!profile || profile.role !== "dentist") {
-      return { data: null, error: "Unauthorized" };
-    }
-    if (!isBusinessBrainEnabled(profile.clinic_id)) {
-      return { data: null, error: "Unauthorized" };
-    }
-
-    if (!diagnosis?.id || !diagnosis.title || !Array.isArray(diagnosis.hypotheses)) {
-      return { data: null, error: "Invalid diagnosis." };
-    }
-
-    const input = explanationInputFor(diagnosis, signalDescriptions);
-
-    // The Business Brain prompt has always been identifier-free — it restates
-    // aggregate findings the deterministic engines already computed. The guard
-    // is applied anyway, so that stays true of every future diagnosis a matcher
-    // learns to emit rather than being true only of today's.
-    const prompt = guardOutboundPrompt(
-      buildDiagnosisExplanationPrompt({
-        title: diagnosis.title,
-        summary: diagnosis.summary,
-        facts: [...input.facts],
-        supported: diagnosis.hypotheses
-          .filter((h) => h.status === "supported")
-          .map((h) => h.statement),
-        ruledOut: diagnosis.hypotheses
-          .filter((h) => h.status === "contradicted")
-          .map((h) => h.statement),
-        undetermined: diagnosis.hypotheses
-          .filter((h) => h.status === "undetermined")
-          .map((h) => h.statement),
-        persistence: diagnosis.persistence.replace(/_/g, " "),
-      })
-    );
-
-    const raw = await withAITimeout(async () => {
-      const model = getGeminiModel();
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          // Low temperature: this is a rewording task, not a creative one.
-          temperature: 0.2,
-          maxOutputTokens: 220,
-        },
-      });
-      return result.response.text();
-    }, EXPLANATION_TIMEOUT_MS);
-
-    const text = raw.trim();
-    const verdict = verifyExplanation(text, input);
-
-    if (!verdict.ok) {
-      // Deliberately not returned to the user and deliberately not retried: a
-      // generation that invented a figure or gave advice is not a transient
-      // fault, and silently showing it would defeat the guardrail.
-      console.error("[explainDiagnosis] rejected generation", {
-        diagnosisId: diagnosis.id,
-        violations: verdict.violations,
-      });
-      return { data: null, error: EXPLANATION_UNAVAILABLE };
-    }
-
-    return { data: { diagnosisId: diagnosis.id, text }, error: null };
-  } catch (error) {
-    if (error instanceof AIError) {
-      console.error("[explainDiagnosis] AI unavailable:", error.message);
-      return { data: null, error: EXPLANATION_UNAVAILABLE };
-    }
-    console.error("[explainDiagnosis]", error);
-    return { data: null, error: EXPLANATION_UNAVAILABLE };
-  }
-}
 
 /** Kept short: this is a handful of one-line rewrites, not a conversation. */
 const DASHBOARD_ACTIONS_TIMEOUT_MS = 8_000;
 
 /** Most items a dashboard load will ever ask to have rephrased at once. Keeps the prompt small and the failure mode (whole batch discarded) cheap. */
 const MAX_DASHBOARD_ACTION_ITEMS = 8;
-/**
- * The facts arrive from the browser, so their size is bounded here: a briefing
- * reason is one sentence, and an unbounded one would make this action a general
- * text-rewording endpoint on the clinic's AI quota.
- */
+
 const MAX_DASHBOARD_ACTION_FACT_CHARS = 500;
 const MAX_DASHBOARD_ACTION_ID_CHARS = 120;
 
@@ -178,8 +76,7 @@ export interface DashboardActionSummary {
  * sentences — one Gemini call for the whole card rather than one per item, so
  * the card renders after a single round trip.
  *
- * This is deliberately NOT the same shape as explainDiagnosis: there is no new
- * analysis here, no evidence, no hypotheses — each item's `fact` is already a
+ * There is no new analysis here, no evidence and no hypotheses — each item's `fact` is already a
  * complete, correct sentence computed by the existing Business Brain / dashboard
  * logic, and the model's only job is to phrase it more clearly. Per CLAUDE.md
  * §8/§13.11, a rejected or failed generation must never block the dashboard: the
@@ -245,7 +142,7 @@ export async function summarizeDashboardActions(
     } else {
       console.error("[summarizeDashboardActions]", error);
     }
-    // Unlike explainDiagnosis, failure here still returns data: every item's
+    // Failure here still returns data: every item's
     // deterministic fact, so the card renders its concise fallback rather than
     // an error state (CLAUDE.md §13.11 — AI is an enhancement, never a
     // dependency for a page that already has the underlying data).

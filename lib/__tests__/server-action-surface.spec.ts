@@ -108,7 +108,6 @@ const ALLOWED: ReadonlySet<string> = new Set([
   "getPortalTreatmentBill",
 
   // actions/business-brain.ts
-  "explainDiagnosis",
   "recordMetricHistory",
   "dismissProblem",
   "summarizeDashboardActions",

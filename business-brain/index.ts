@@ -17,7 +17,6 @@ export * from "./memory";
 export * from "./history";
 export * from "./provenance";
 export * from "./training";
-export * from "./config";
 export * from "./validation";
 export * from "./utils";
 /**

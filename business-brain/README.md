@@ -1,286 +1,213 @@
 # Business Brain
 
-The **Business Brain** is an independent application layer inside DentGrow
-responsible for business intelligence and decision making. It turns raw clinic
-data into metrics, detects meaningful signals, diagnoses root causes, proposes
-constraint-valid strategies, executes and measures actions, and learns from the
-results — with every decision explainable to clinic staff.
+The **Business Brain** is an independent application layer inside OraMedha. It
+turns a clinic's own records into measurements, decides which of them are
+unusual for that clinic, explains why, proposes work the clinic can actually do,
+and measures what followed — with every statement traceable to evidence, and
+nothing claimed that the records cannot support.
 
-> **Phase 1 of 22 — Foundation only.**
-> This phase establishes the architecture. It contains **no business logic**.
-> Every engine is a documented contract that future phases implement.
+It is live behind a clinic allow-list (`BUSINESS_BRAIN_CLINIC_IDS` in
+`lib/feature-flags.ts`) and renders at `/dentist/business-brain`.
 
----
-
-## Purpose
-
-- Keep business intelligence and decision logic **out of React components**.
-- Give the UI a single, stable place to consume decisions and explanations.
-- Let each concern evolve independently behind a small, typed contract.
-- Make future phases additive — new engines slot in without refactoring the
-  foundation.
+> **What this module will not do:** invent a number, fill a gap with zero, or say
+> the clinic caused an improvement. Where the records cannot answer, the answer
+> is "unknown", and the UI says so.
 
 ---
 
-## Architecture
+## The run
 
-The Business Brain is a pipeline of loosely coupled, single-responsibility
-engines. Each engine takes a typed input plus an `ExecutionContext` and returns
-a uniform `EngineResult<T>`.
+One run per clinic-day. Five recorded stages, each stopping the ones after it if
+it fails:
 
 ```
-Metrics ─▶ Signal ─▶ Diagnosis ─▶ Constraint ─▶ Strategy ─▶ Workflow ─▶ Action
-                                                                          │
-                                                                          ▼
-                                        Learning ◀─ Value ◀─ Outcome ◀────┘
-
-                 AIExplanation  (explains outputs & decision traces across the pipeline)
+Metrics ─▶ Signals ─▶ Diagnosis ─▶ Strategy ─▶ Actions
 ```
 
-The chain answers one question per stage:
+| Stage | Question | Where |
+|---|---|---|
+| Metrics | What are the numbers? | `engines/metrics/` |
+| Signals | Which of them are unusual for THIS clinic? | `engines/signals/` |
+| Diagnosis | Why? Which hypotheses survive the evidence? | `engines/diagnosis/` |
+| Strategy | What is worth doing, given the clinic's limits? | `engines/constraint/`, `engines/value/`, `engines/strategy/`, `engines/workflow/` |
+| Actions | What can OraMedha prepare? | `engines/action/` |
 
-| Stage | Question |
-| --- | --- |
-| Metrics | What are the numbers? |
-| Signal | Which of them are unusual? |
-| Diagnosis | Why? |
-| Constraint | Which of those are the same problem? |
-| Value | How much is sitting in each? |
-| Strategy | What should be done? |
-| Workflow | How should the clinic approach it? |
-| Action | How can DentGrow help execute it? |
+Derived outputs are computed alongside the run and never feed a later stage, so
+a failure in one cannot silently change another: **baselines** (this clinic's
+normal range), **achievements** (measured improvements), **trajectories**,
+**opportunities**, **root causes** (only when a finding qualifies) and the
+**findings** projection that ranks everything for the page.
 
-The Action Engine is the last deterministic stage. It converts each workflow into
-prepared work — screens to open already filtered, message drafts to reuse, forms
-to fill — and performs none of it. Nothing in it sends, writes, schedules or calls
-an API, and the `eslint` boundary over `engines/action/**` fails the build if a
-network client, database client or model is imported there.
+After the fact, three engines close the loop: **outcome** (what followed a
+completed action), **learning** (what has worked repeatedly) and **memory**
+(what is worth remembering about this clinic, rebuilt each day).
 
-Principles enforced by this structure:
-
-- **UI depends on the Business Brain; never the reverse.** No engine imports
-  React or any DentGrow component.
-- **Single responsibility per engine.**
-- **Loose coupling** — engines communicate through shared primitive types, not
-  by importing each other's internals.
-- **No circular dependencies** — dependency direction is one-way:
-  `types → core → engines → services`, with `repositories` feeding services.
-- **Strong typing throughout** and **composition over inheritance**.
-- **Errors as values** — engines return `EngineError` inside `EngineResult`
-  rather than throwing across boundaries.
+`services/business-brain-service.ts` orchestrates all of it and reports run
+health. `assessRunHealth` is what makes a failed run show as "unavailable"
+rather than as a quiet clinic.
 
 ---
 
-## Folder Structure
+## Layout
 
 ```
 business-brain/
-├── README.md              # This document
-├── index.ts               # Public API barrel (import from "@/business-brain")
-├── types/                 # Shared, generic primitive types
-│   ├── common.ts          # EngineResult, ExecutionContext, Evidence, Confidence,
-│   │                      # Priority, Severity, DecisionTrace, EngineError
-│   └── index.ts
-├── domain/                # Canonical domain models (the Business Brain's vocabulary)
-│   ├── shared.ts          # EntityType, RelatedEntity
-│   ├── metric.ts          # Metric, MetricCategory, MetricUnit
-│   ├── signal.ts          # Signal, SignalCategory
-│   ├── diagnosis.ts       # Diagnosis
-│   ├── constraint.ts      # Constraint, ConstraintCategory
-│   ├── strategy.ts        # Strategy
-│   ├── value.ts           # Value, ValueType
-│   ├── workflow.ts        # Workflow, WorkflowTask, WorkflowOwner/Effort/Timeframe
-│   ├── action.ts          # Action, ActionPlan, ActionKind/Category/Readiness,
-│   │                      # DentGrowArea, ActionChannel, ActionExecution
-│   ├── outcome.ts         # Outcome, OutcomeStatus
-│   ├── learning.ts        # Learning
-│   └── index.ts
-├── core/                  # Foundational contracts everything depends on
-│   ├── engine.ts          # Engine interface + BaseEngine abstract class
-│   └── index.ts
-├── engines/               # One contract per engine (abstract class + I/O types)
-│   ├── metrics-engine.ts
-│   ├── signal-engine.ts
-│   ├── diagnosis-engine.ts
-│   ├── constraint-engine.ts
-│   ├── strategy-engine.ts
-│   ├── workflow-engine.ts
-│   ├── outcome-engine.ts
-│   ├── value-engine.ts
-│   ├── learning-engine.ts
-│   ├── ai-explanation-engine.ts
-│   ├── metrics/           # MetricsEngine implementation (Phase 3)
-│   │   ├── metric-ids.ts          # metric keys, descriptors, buildMetric factory
-│   │   ├── calculators/           # one pure function per metric group
-│   │   └── metrics-engine.ts      # DentGrowMetricsEngine (deterministic)
-│   ├── workflow/          # WorkflowEngine implementation
-│   │   └── workflow-engine.ts     # templates + WORKFLOW_TEMPLATE_KEYS
-│   ├── action/            # ActionEngine implementation (deterministic, side-effect free)
-│   │   ├── action-catalog.ts      # every capability DentGrow can prepare, defined once
-│   │   ├── action-plans.ts        # workflow template key → ordered capabilities
-│   │   ├── action-dates.ts        # the date windows every filter is built from
-│   │   └── action-engine.ts       # generateActions(workflows, clinic, date, now)
-│   └── index.ts
-├── config/                # Feature flags, engine toggles, thresholds, AI placeholder
-│   ├── config.ts
-│   └── index.ts
-├── validation/            # Reusable Zod-based validation utilities
-│   ├── validators.ts
-│   └── index.ts
-├── utils/                 # Cross-cutting utilities
-│   ├── logger.ts          # Centralized info/warn/error logger
-│   └── index.ts
-├── services/              # (reserved) Cross-engine orchestration — future phases
-│   └── index.ts
-└── repositories/          # Read-only data ports (no DB access here yet)
-    ├── snapshots.ts       # ClinicDataSnapshot + sub-snapshot shapes
-    ├── metrics-data-repository.ts  # MetricsDataRepository port (impl: future phase)
-    └── index.ts
+├── README.md               # this document
+├── HISTORY.md              # point-in-time knowledge, provenance, attribution
+├── METRICS-REVIEW.md       # the metric catalogue, reviewed
+├── index.ts                # public barrel — import from "@/business-brain"
+├── types/                  # EngineResult, ExecutionContext, Evidence, Confidence…
+├── domain/                 # Metric, Signal, Diagnosis, Constraint, Strategy,
+│                           # Workflow, Action, Outcome, Learning, Achievement, Memory
+├── core/                   # the Engine contract and BaseEngine
+├── engines/                # the implementations (below)
+├── ledger/                 # relational facts, the graph over them, and
+│                           # record-evidence.ts — what a row may be read as
+├── repositories/           # ports: ClinicDataSnapshot and the data contracts
+├── history/                # point-in-time readers and coverage
+├── provenance/             # how a stored reading was produced, and evidence quality
+├── memory/                 # the memory engine and its reader
+├── training/               # what may be used to train a model (there is no model)
+├── services/               # BusinessBrain — the run, and its health
+├── validation/             # Zod helpers
+└── utils/                  # dates, logger
 ```
 
----
+The Supabase adapters live outside this module, in `lib/business-brain/`:
+`metrics-repository.ts`, `clinic-ledger.ts`, `diagnosis-context.ts`,
+`metric-history-store.ts`, `clinic-memory.ts`, `finding-snapshots.ts`,
+`paged-read.ts`, and the view projections the page renders
+(`briefing-view.ts`, `wins-view.ts`, `outcomes-view.ts`, `clinic-health.ts`).
 
-## Module Responsibilities
-
-| Module | Responsibility |
-|---|---|
-| `types/` | Generic primitives shared by all engines. No business objects. |
-| `core/` | The `Engine` contract and `BaseEngine`. Depends only on `types`. |
-| `engines/` | A documented contract (abstract class + placeholder I/O types) for each of the 11 engines. |
-| `config/` | Lightweight static config: feature flags, per-engine toggles, thresholds, AI placeholder. |
-| `validation/` | Reusable input-validation helpers built on Zod. |
-| `utils/` | Cross-cutting helpers, currently the centralized logger. |
-| `services/` | Orchestrates the engines into one run (`BusinessBrain`) and reports its health (`assessRunHealth`). |
-| `repositories/` | Port types only. The Supabase adapters live in `lib/business-brain/`. |
-
-### The 11 Engines
+### Engines
 
 | Engine | Responsibility |
 |---|---|
-| `MetricsEngine` | Compute the clinic's core KPIs from raw data. |
-| `SignalEngine` | Detect anomalies/patterns in metrics and emit prioritized signals. |
-| `DiagnosisEngine` | Explain *why* signals occur via root-cause diagnoses. |
-| `ConstraintEngine` | Encode/evaluate real-world limits (capacity, budget, policy). |
-| `StrategyEngine` | Propose constraint-valid strategies for diagnoses. |
-| `WorkflowEngine` | Decompose a strategy into an ordered, executable workflow. |
-| `ActionEngine` | Convert a workflow into work DentGrow has already prepared: filtered screens, message drafts, pre-opened forms. It prepares; it never performs. |
-| `OutcomeEngine` | Measure actual results vs. expectations after actions. |
-| `ValueEngine` | Quantify the business value delivered by outcomes. |
-| `LearningEngine` | Feed outcomes/value back to improve future decisions. |
-| `AIExplanationEngine` | Turn outputs & decision traces into human-readable explanations. |
+| `metrics` | 32 KPIs from one clinic-day snapshot. Withheld when unmeasurable, never zeroed. |
+| `signals` | 31 signal types, thresholds calibrated per clinic. |
+| `diagnosis` | 17 matchers across acquisition, clinical, financial, operational, retention and scheduling, each with hypotheses and discriminators. |
+| `constraint` | Groups diagnoses into the 10 constraint categories the clinic recognises. |
+| `value` | What is at stake behind each constraint, in rupees or patients. |
+| `strategy` | Constraint-valid approaches. |
+| `workflow` | An ordered, doable decomposition of a strategy. |
+| `action` | Prepared work: filtered screens, drafted messages, pre-filled forms. **It prepares; it never performs.** |
+| `baseline` | This clinic's own normal range per metric, with a quality rating. |
+| `achievement` | Measured improvements against that normal — the wins strip. |
+| `trajectory` | Where a metric has been heading, and for how long. |
+| `opportunity` | Time still ahead that could be filled. |
+| `root-cause` | Where a problem concentrates, with real significance testing. |
+| `findings` | One ranked, explained list out of everything above. |
+| `outcome` | What the clinic's own records show after a completed action. |
+| `learning` | What has worked for this clinic, repeatedly, and what has not. |
+
+`engines/ai-explanation-engine.ts` is a **contract with no implementation**:
+the verifier (`verifyExplanation`) and its prompt exist and are used as the
+pattern for `summarizeDashboardActions`, but nothing in the Business Brain calls
+a model today. Building the explanation surface means implementing this engine —
+not adding an ungated model call somewhere else.
 
 ---
 
-## How Future Phases Build on This Foundation
+## Rules that hold everywhere
 
-Each subsequent phase implements one engine (or supporting layer) **without
-touching the foundation**:
-
-1. Add the engine's concrete input/output types (replacing the `unknown`
-   placeholders) next to its contract in `engines/`.
-2. Extend the engine's abstract class and implement `execute()`.
-3. Add any needed data access as a method in `repositories/`.
-4. Add orchestration (multi-engine pipelines) in `services/`.
-5. Opt the engine in via `config` (`engines.<name> = true`).
-6. Expose results to the UI through the `@/business-brain` public barrel and,
-   where mutations are involved, DentGrow's existing Server Actions.
-
-Because engines share only generic primitive types and a uniform result
-envelope, new engines integrate without breaking existing ones.
+- **The UI depends on the Business Brain, never the reverse.** No engine imports
+  React or an OraMedha component. An eslint boundary over `engines/action/**`
+  fails the build if a network client, database client or model is imported there.
+- **Engines are pure.** Data in, decisions out: no clock, no I/O, no randomness.
+  `now` and `date` are always supplied by the caller.
+- **Errors are values.** Engines return `EngineError` inside `EngineResult`
+  rather than throwing across boundaries.
+- **One direction:** `types → core → domain → engines → services`, with
+  `repositories`, `ledger` and `history` feeding services.
 
 ---
 
-## Integration with DentGrow
+## Production invariants
 
-- **Import path:** consumers use `@/business-brain` (matches the project's
-  `@/*` path alias). Only the public barrel is imported — internal files are
-  not reached across the boundary.
-- **One-way dependency:** DentGrow (Server Components, Server Actions, UI)
-  depends on the Business Brain. The Business Brain never imports React or
-  DentGrow components, keeping business logic testable and UI-independent.
-- **Data & side effects:** in later phases, engines read data through
-  `repositories/` and cause side effects through DentGrow's existing
-  `actions/` — the Business Brain consumes those, it does not own the data.
-- **AI:** the `AIExplanationEngine` will wire up to the existing `lib/ai`
-  (Gemini) layer in a future phase. Only a config placeholder exists now.
+Each is pinned by the test named with it; a change that breaks one should break
+that test first.
 
----
+**Reads are whole, or they say so.** PostgREST silently caps a response at 1000
+rows. Every multi-row read in `lib/business-brain/` pages through
+`paged-read.ts`: `readAll` returns everything or throws `BoundedReadError`,
+`readUpTo` reports truncation the engines treat as a gap, and a window too large
+to read whole is refused rather than sampled. `paged-read.spec.ts`,
+`bounded-reads.spec.ts`.
 
-## Production Invariants
-
-These hold across every engine and adapter. Each is pinned by a test named here;
-a change that breaks one should break that test first.
-
-**Reads are whole, or they say so.** PostgREST returns at most `max_rows` (1000)
-rows however large a `.limit()` asks for, silently. Every multi-row read in
-`lib/business-brain/` pages with `.range()` over a total order through
-`paged-read.ts`: `readAll` returns everything or throws `BoundedReadError`;
-`readUpTo` returns a limit plus a `truncated` flag the engines report as a gap. A
-window too large to read whole is refused (`EntityWindowTooLargeError`), never
-sampled. `paged-read.spec.ts` forbids a bare `.limit(n > 1)` in these files;
-`bounded-reads.spec.ts` proves it on more than 1000 real rows.
-
-**A failed run is never a quiet clinic.** Empty outputs from a failed run read
-exactly like a clinic with nothing wrong. The briefing page, the compact card and
-the proposal decision all call `assessRunHealth` first and show "unavailable"
-instead; a finding snapshot is recorded only for a healthy run.
+**A failed run is never a quiet clinic.** Empty output from a failed run reads
+exactly like a healthy clinic with nothing wrong. Every surface calls
+`assessRunHealth` first and shows "unavailable" instead; a finding snapshot is
+recorded only for a healthy run.
 
 **Dates are the clinic's, not the server's.** Business dates, hours and ages are
-clinic-local (`clinic_settings.timezone`), via `localDatePart` and the metric id's
-own date — never `iso.slice(0, 10)` of a UTC instant. `local-dates.spec.ts`
-covers midnight, DST, month and year ends.
+clinic-local (`clinic_settings.timezone`), never `iso.slice(0, 10)` of a UTC
+instant. `local-dates.spec.ts` covers midnight, DST, month and year ends.
 
 **A concentration must beat chance across every comparison made.** Root causes
-test rates with a one-sided Fisher exact test and minutes with a rank-sum test,
-each against a 5% family budget divided across the groups compared (Bonferroni),
-on top of the effect-size rules. `false-positives.spec.ts` runs 1000 seeded
-clinics with nothing to find per analysis and holds each at or under 6%.
+use a one-sided Fisher exact test for rates and a rank-sum test for minutes,
+against a 5% family budget divided across the groups compared, on top of
+effect-size rules. `false-positives.spec.ts` runs 1000 seeded clinics with
+nothing to find and holds each analysis at or under 6%.
 
 **The server writes evidence; the browser does not.** `action_completions` and
-`clinic_decisions` have no client INSERT. The server validates the card
-(`completion-card.ts`: this clinic, this category, the last week) and writes with
-the service role, idempotently per card; database checks pin the constraint id
-and a decision's target to the row's clinic and keep a decision's basis to codes
-and numbers. Duplicate completions of one card count once (`dedupeCompletions`).
-`rls-matrix.spec.ts` checks every Business Brain table against every role.
+`clinic_decisions` have no client INSERT; the server validates the card and
+writes with the service role, idempotently. `rls-matrix.spec.ts` checks every
+Business Brain table against every role.
 
 **Memory is reproducible and fresh.** A build for a past day reads evidence as of
 the end of that day, so rebuilding later gives the same digest. Findings cite
 memory only from a build at most two days old.
 
+**Nothing is read as more than it is.** `ledger/record-evidence.ts` states, once,
+how to read a record whose click and whose event differ: an inferred no-show is
+not an observed one, a visit clicked through in under a minute records no
+arrival, a visit left open after its day has no outcome, a completed treatment
+with no `performed_at` is dated by when its completion was recorded and says so,
+and a consultation charge is not a treatment type.
+
 ### History, provenance and what the past knew
 
-See **[HISTORY.md](./HISTORY.md)**. In short:
-
-- **Every change is captured.** Changes to appointments, treatments, follow-ups, payments and patient records are captured by trigger into append-only state versions, with a database-stamped `recorded_at`. Past moments are read as known then; before capture began they are unknown.
-- **Stored readings carry provenance.** Each is observed at the time, a point-in-time reconstruction, recomputed later, or unknown. A recomputation never replaces a reading measured at the time.
-- **The upper attribution rungs are guarded.** They need point-in-time readings and objectively observed results. Staff declarations are kept, labelled, and never counted as observed.
-- **`training/training-contract.ts` defines training-safe data.** There is no model.
+See **[HISTORY.md](./HISTORY.md)**. In short: every change to appointments,
+treatments, follow-ups, payments and patients is captured by trigger into
+append-only state versions with a database-stamped `recorded_at`; stored readings
+carry typed provenance, and a recomputation never replaces one measured at the
+time; the upper attribution rungs require point-in-time readings and objectively
+observed results; `training/training-contract.ts` defines training-safe data, and
+there is no model.
 
 ### What the database cannot tell us
 
-- **Anything before history capture began.** See HISTORY.md section 8.
-- **Whether a message was delivered or read.** Outreach is a completion a person declared, not an observed contact.
-- **When an action was actually done.** `completed_at` is when it was declared.
-- **Why a patient did not return.** Only that no later visit is recorded.
-- **Anything about a day with no snapshot.** A missing snapshot, or an empty one from before run health was tracked, is unknown, never "nothing was shown".
+- Anything before history capture began (HISTORY.md §8).
+- Whether a message was delivered or read. Outreach is a declaration, not an
+  observed contact.
+- When an action was actually done: `completed_at` is when it was declared.
+- Why a patient did not return — only that no later visit is recorded.
+- Anything about a day with no snapshot.
 
 ### Known limits, not fixed here
 
-- Shared core queries the briefing's target counts and messages rely on
-  (`getOverdueFollowUps`, planned-without-visit, the `clinic_outstanding_balances`
-  RPC) are not paged. They are core-app code outside the Business Brain.
+- The briefing runs the whole pipeline on every page load, including the history
+  the run measures for itself. It should be precomputed by the scheduled job.
+- Rate baselines are judged without a minimum denominator, so a clinic with a
+  handful of appointments gets a normal range too wide to flag anything.
+- `revenue.collection_rate_30d` compares collections against the same window's
+  production, so paying off old debt can push it past 100%.
+- Baselines are one band across all weekdays; weekday and seasonal patterns are
+  not modelled, even though memory detects them.
+- Shared core queries the briefing relies on (`getOverdueFollowUps`,
+  planned-without-visit, the `clinic_outstanding_balances` RPC) are not paged.
+- No retention purge covers `finding_snapshots`, `clinic_memory_builds`,
+  `action_completions`, `metric_observations` or the state-history tables.
 - `getClinicConfig` falls back to defaults when `clinic_settings` cannot be read,
-  app-wide; the Business Brain's own repository throws instead.
-- The dashboard still computes cumulative totals from live rows each load.
-- No retention purge is scheduled yet for `finding_snapshots`,
-  `clinic_memory_builds`, `action_completions`, `metric_observations` or the
-  state-history tables. Each accepts one (`app.purge_context = 'retention'`), but
-  `run_retention_purge` does not include them: its table list is fixed at
-  migration time.
-- The retention purge of `metric_history` and `queue_entries` removes the current
-  view and queue rows. The observations in `metric_observations` outlive them.
-- The dentist RLS policies still permit hard DELETE on appointments, treatments,
-  follow-ups, payments and patients. A hard delete of any row with history now
-  fails, rather than erasing the history with it, but the policies themselves
-  should be dropped in favour of soft deletes.
+  app-wide; this module's own repository throws instead.
+
+### Operations
+
+The hourly job (`/api/cron/metric-history`, scheduled by pg_cron in migration
+`20260731000100`) records each clinic's completed day and builds its memory. It
+reads its URL and bearer token from Vault (`app_base_url`, `cron_secret`).
+**If that URL is wrong, every call fails silently** — pg_cron reports success for
+a request it merely queued. That happened between the Vercel project rename and
+18 Sep 2026, and it left the hosted project with no reading recorded at the time
+and no memory build at all. `/admin` now shows each job's health, and
+`lib/business-brain/job-health.ts` is what it reads.
