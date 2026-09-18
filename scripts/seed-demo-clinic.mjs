@@ -35,6 +35,18 @@
  *   node scripts/seed-demo-clinic.mjs --confirm                  # local stack
  *   SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… node scripts/seed-demo-clinic.mjs --confirm
  *   node scripts/seed-demo-clinic.mjs --confirm --reset          # wipe first
+ *   node scripts/seed-demo-clinic.mjs --confirm --admin-only     # see below
+ *
+ * ENVIRONMENT
+ *   DEMO_DENTIST_EMAIL     sign-in address for the demo clinic's dentist
+ *   DEMO_DENTIST_PASSWORD  its password; without one the account cannot sign in
+ *
+ * --admin-only
+ *   Marks the demo account as a platform admin. The sign-in doors are split by
+ *   audience (actions/auth.ts), and an admin account is refused at the staff
+ *   door — so the demo clinic becomes reachable through /admin/login and
+ *   nowhere else. It also means the account can open /admin, which shows
+ *   platform-wide COUNTS (never patient rows), so give it a real password.
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -52,7 +64,7 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? LOCAL_SERVICE_KEY;
 const CLINIC_ID = "d0000000-0000-4000-8000-0000000000d0";
 const CLINIC_NAME = "Demo Clinic (sample data)";
 const DENTIST_ID = "d0000000-0000-4000-8000-0000000000d1";
-const DENTIST_EMAIL = "demo-dentist@oramedha.invalid";
+const DENTIST_EMAIL = process.env.DEMO_DENTIST_EMAIL ?? "demo-dentist@oramedha.invalid";
 
 /** The demo clinic must be declared in the app, not only here. */
 function assertDeclaredDemoClinic() {
@@ -428,7 +440,7 @@ async function wipe() {
   console.log("  wiped the demo clinic's generated rows");
 }
 
-async function ensureClinic() {
+async function ensureClinic(adminOnly) {
   const { error: clinicErr } = await db
     .from("clinics")
     .upsert({ id: CLINIC_ID, name: CLINIC_NAME, dentist_name: "Dr Demo (sample data)" });
@@ -475,9 +487,15 @@ async function ensureClinic() {
     const { error } = await db.auth.admin.updateUserById(DENTIST_ID, { password });
     if (error) throw new Error(`demo dentist password: ${error.message}`);
   }
-  const { error: profileErr } = await db
-    .from("profiles")
-    .upsert({ id: DENTIST_ID, clinic_id: CLINIC_ID, full_name: "Dr Demo (sample data)", role: "dentist" });
+  const { error: profileErr } = await db.from("profiles").upsert({
+    id: DENTIST_ID,
+    clinic_id: CLINIC_ID,
+    full_name: "Dr Demo (sample data)",
+    role: "dentist",
+    // An admin account is refused at the staff door, so this is what makes the
+    // demo clinic reachable only through /admin/login.
+    is_admin: adminOnly,
+  });
   if (profileErr) throw new Error(`profiles: ${profileErr.message}`);
 
   const rules = [1, 2, 3, 4].map((d) => ({ clinic_id: CLINIC_ID, day_of_week: d, start_time: "09:00", end_time: "17:00", slot_duration_minutes: 30, is_active: true }));
@@ -504,8 +522,12 @@ async function main() {
   }
   assertDeclaredDemoClinic();
 
-  console.log(`Seeding ${CLINIC_NAME} on ${new URL(TARGET_URL).host}`);
-  await ensureClinic();
+  const adminOnly = args.includes("--admin-only");
+  console.log(
+    `Seeding ${CLINIC_NAME} on ${new URL(TARGET_URL).host}` +
+      (adminOnly ? " — reachable through /admin/login only" : ""),
+  );
+  await ensureClinic(adminOnly);
   if (args.includes("--reset")) await wipe();
 
   const data = build();
@@ -526,7 +548,9 @@ async function main() {
   }
 
   console.log(
-    `\nDone. Sign in as ${DENTIST_EMAIL} and open /dentist/business-brain.\n` +
+    `\nDone. Sign in as ${DENTIST_EMAIL}` +
+      (adminOnly ? ` at /admin/login (the staff door refuses admin accounts)` : ` at /login`) +
+      `, then open /dentist/business-brain.\n` +
       (process.env.DEMO_DENTIST_PASSWORD
         ? `That account's password was set from DEMO_DENTIST_PASSWORD.\n`
         : `It has no password it can sign in with — re-run with DEMO_DENTIST_PASSWORD=… to set one.\n`) +
