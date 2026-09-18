@@ -18,9 +18,15 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { BUSINESS_BRAIN_CLINIC_IDS, isBusinessBrainEnabled } from "@/lib/feature-flags";
+import {
+  BUSINESS_BRAIN_CLINIC_IDS,
+  DEMO_CLINIC_IDS,
+  isBusinessBrainEnabled,
+  isDemoClinic,
+} from "@/lib/feature-flags";
 
-const DEMO_CLINIC = "00000000-0000-0000-0000-000000000001";
+const DEV_CLINIC = "00000000-0000-0000-0000-000000000001";
+const SAMPLE_DATA_CLINIC = "d0000000-0000-4000-8000-0000000000d0";
 const PILOT_CLINIC = "11111111-1111-1111-1111-111111111111";
 const CLINIC_B = "22222222-2222-2222-2222-222222222222";
 
@@ -47,7 +53,8 @@ describe("the pilot clinic can never reach the Business Brain", () => {
   it("refuses the pilot clinic and every other clinic", () => {
     expect(isBusinessBrainEnabled(PILOT_CLINIC)).toBe(false);
     expect(isBusinessBrainEnabled(CLINIC_B)).toBe(false);
-    expect(isBusinessBrainEnabled(DEMO_CLINIC)).toBe(true);
+    expect(isBusinessBrainEnabled(DEV_CLINIC)).toBe(true);
+    expect(isBusinessBrainEnabled(SAMPLE_DATA_CLINIC)).toBe(true);
   });
 
   it("fails CLOSED for a missing or empty clinic", () => {
@@ -57,8 +64,25 @@ describe("the pilot clinic can never reach the Business Brain", () => {
     expect(isBusinessBrainEnabled("")).toBe(false);
   });
 
-  it("lists exactly one clinic, and it is the demo one", () => {
-    expect(BUSINESS_BRAIN_CLINIC_IDS).toEqual([DEMO_CLINIC]);
+  it("lists only clinics that are not a real practice", () => {
+    // The guarantee is not the LENGTH of the list — it is that no clinic on it
+    // sees an unfinished analysis of its own real practice. The development
+    // clinic and the generated sample-data clinic both qualify; a pilot clinic
+    // never can.
+    expect(BUSINESS_BRAIN_CLINIC_IDS).toEqual([DEV_CLINIC, SAMPLE_DATA_CLINIC]);
+    expect(BUSINESS_BRAIN_CLINIC_IDS).not.toContain(PILOT_CLINIC);
+    expect(BUSINESS_BRAIN_CLINIC_IDS).not.toContain(CLINIC_B);
+  });
+
+  it("labels the generated clinic as sample data, and no real clinic as demo", () => {
+    // The briefing renders a "sample data" notice from this, so a generated
+    // figure can never be read as a clinic's own.
+    expect(isDemoClinic(SAMPLE_DATA_CLINIC)).toBe(true);
+    expect(DEMO_CLINIC_IDS).toEqual([SAMPLE_DATA_CLINIC]);
+    for (const real of [PILOT_CLINIC, CLINIC_B, DEV_CLINIC]) {
+      expect(isDemoClinic(real)).toBe(false);
+    }
+    expect(isDemoClinic(null)).toBe(false);
   });
 
   it("gates every known entry point on the clinic", () => {
