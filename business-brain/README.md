@@ -197,6 +197,17 @@ It is not a compliance score: no target, no grade, no comparison between
 clinics. A clinic that never uses the queue board is making a legitimate choice,
 and this says what the choice costs.
 
+### Was it worth saying?
+
+`finding_feedback` records a dentist's verdict on one finding — useful, or not
+relevant with a reason code — and `/admin` shows precision per rule across every
+clinic. A snooze was the closest thing to this before, and it cannot carry it: a
+real and inconvenient problem gets snoozed as readily as a wrong one.
+
+Nothing in the pipeline reads the table. A rule that quietened itself because one
+clinic said "not relevant" would be a rule tuned by its own audience, one click
+at a time.
+
 ### Known limits, not fixed here
 
 - The briefing runs the whole pipeline on every page load, including the history

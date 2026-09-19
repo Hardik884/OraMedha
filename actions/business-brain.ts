@@ -21,7 +21,13 @@ import { getClinicConfig } from "@/lib/clinic/config";
 import { getTodayInTimezone } from "@/lib/utils";
 import { persistMetricRange, type PersistResult } from "@/lib/business-brain/persist-metrics";
 import { revalidatePath } from "next/cache";
-import { CompleteActionSchema, DecideLearningProposalSchema, DismissProblemSchema, type ActionResult } from "@/types";
+import {
+  CompleteActionSchema,
+  DecideLearningProposalSchema,
+  DismissProblemSchema,
+  RecordFindingFeedbackSchema,
+  type ActionResult,
+} from "@/types";
 import { loadActionLearning } from "@/lib/business-brain/action-outcomes";
 import { recordClinicDecision } from "@/lib/business-brain/clinic-memory";
 import { resolveActionTargets } from "@/lib/business-brain/action-targets";
@@ -491,5 +497,88 @@ export async function decideLearningProposal(input: {
   } catch (error) {
     console.error("[decideLearningProposal]", error);
     return { data: null, error: "Could not record this decision." };
+  }
+}
+
+/**
+ * Record whether one finding was worth telling this clinic.
+ *
+ * ## The one question the module has never asked
+ *
+ * Everything else recorded here is what the clinic DID — a snooze, a completion,
+ * a decision on a proposal. None of it answers whether what we said was worth
+ * saying, and a snooze cannot stand in for it: a dentist snoozes a problem that
+ * is real and inconvenient exactly as readily as one that is wrong. So precision
+ * has been unmeasurable since the first rule shipped, and a rule firing wrongly
+ * for a year looks the same as one firing correctly and being ignored.
+ *
+ * ## What the browser is allowed to say
+ *
+ * The finding's id, kind and category — what was on screen — plus a verdict and
+ * a reason code. Clinic, actor and business date are resolved from the session
+ * and the clinic's own timezone, so no request can file feedback against another
+ * clinic, in someone else's name, or against a day of its choosing.
+ *
+ * No free text anywhere. A comment box here would collect patient names and
+ * clinical notes into a table designed to hold neither.
+ *
+ * ## Changing your mind is a new row
+ *
+ * The table is append-only and every reader takes the latest verdict, so a
+ * mis-click is correctable without anything being overwritten — and that the
+ * opinion changed stays visible, which is itself worth knowing.
+ */
+export async function recordFindingFeedback(input: {
+  findingId: string;
+  findingKind: string;
+  category?: string | null;
+  verdict: "useful" | "not_relevant";
+  reason?: "already_knew" | "not_true" | "not_my_priority" | "cannot_act" | "other";
+}): Promise<ActionResult<{ recorded: true }>> {
+  try {
+    const { db, profile } = await resolveSession();
+    if (!profile || profile.role !== "dentist") {
+      return { data: null, error: "Forbidden" };
+    }
+    if (!isBusinessBrainEnabled(profile.clinic_id)) {
+      return { data: null, error: "Not available for this clinic." };
+    }
+
+    const parsed = RecordFindingFeedbackSchema.safeParse(input);
+    if (!parsed.success) {
+      return { data: null, error: parsed.error.issues[0]?.message ?? "Invalid input." };
+    }
+    // The schema cannot express this one: a "not relevant" with no reason is a
+    // count, and a count does not say whether to retire the rule, move a
+    // threshold or rank it lower. The database enforces it too.
+    if (parsed.data.verdict === "not_relevant" && parsed.data.reason === undefined) {
+      return { data: null, error: "Tell us why it was not relevant." };
+    }
+
+    // The clinic's own business date, never the browser's: a request cannot
+    // choose which day its verdict lands on.
+    const { timezone } = await getClinicConfig();
+    const { error } = await db.from("finding_feedback").insert({
+      clinic_id: profile.clinic_id,
+      business_date: getTodayInTimezone(timezone),
+      finding_id: parsed.data.findingId,
+      finding_kind: parsed.data.findingKind,
+      category: parsed.data.category ?? null,
+      verdict: parsed.data.verdict,
+      reason: parsed.data.reason ?? null,
+      recorded_by: profile.id,
+    });
+    if (error) {
+      console.error("[recordFindingFeedback]", error.message);
+      return { data: null, error: "Could not record that." };
+    }
+
+    // The briefing renders the standing verdict server-side, so it has to be
+    // re-read for the card to show what was just said.
+    revalidatePath("/dentist/business-brain");
+    return { data: { recorded: true }, error: null };
+  } catch (error) {
+    console.error("[recordFindingFeedback]", error);
+    return { data: null, error: "Could not record that." };
   }
 }

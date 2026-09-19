@@ -1338,6 +1338,60 @@ export type Database = {
         }
         Relationships: []
       }
+      finding_feedback: {
+        Row: {
+          business_date: string
+          category: string | null
+          clinic_id: string
+          finding_id: string
+          finding_kind: string
+          id: string
+          reason: Database["public"]["Enums"]["finding_feedback_reason"] | null
+          recorded_at: string
+          recorded_by: string | null
+          verdict: Database["public"]["Enums"]["finding_verdict"]
+        }
+        Insert: {
+          business_date: string
+          category?: string | null
+          clinic_id: string
+          finding_id: string
+          finding_kind: string
+          id?: string
+          reason?: Database["public"]["Enums"]["finding_feedback_reason"] | null
+          recorded_at?: string
+          recorded_by?: string | null
+          verdict: Database["public"]["Enums"]["finding_verdict"]
+        }
+        Update: {
+          business_date?: string
+          category?: string | null
+          clinic_id?: string
+          finding_id?: string
+          finding_kind?: string
+          id?: string
+          reason?: Database["public"]["Enums"]["finding_feedback_reason"] | null
+          recorded_at?: string
+          recorded_by?: string | null
+          verdict?: Database["public"]["Enums"]["finding_verdict"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "finding_feedback_clinic_id_fkey"
+            columns: ["clinic_id"]
+            isOneToOne: false
+            referencedRelation: "clinics"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "finding_feedback_recorded_by_fkey"
+            columns: ["recorded_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       finding_snapshots: {
         Row: {
           brain_version: string | null
@@ -4604,6 +4658,13 @@ export type Database = {
         | "ai_assisted"
       data_consent_decision: "granted" | "withdrawn"
       dentition_type: "adult" | "primary"
+      finding_feedback_reason:
+        | "already_knew"
+        | "not_true"
+        | "not_my_priority"
+        | "cannot_act"
+        | "other"
+      finding_verdict: "useful" | "not_relevant"
       follow_up_confirmation_status: "tentative" | "confirmed"
       follow_up_status: "pending" | "completed" | "cancelled"
       gender_type: "male" | "female" | "other"
@@ -4828,6 +4889,14 @@ export const Constants = {
       ],
       data_consent_decision: ["granted", "withdrawn"],
       dentition_type: ["adult", "primary"],
+      finding_feedback_reason: [
+        "already_knew",
+        "not_true",
+        "not_my_priority",
+        "cannot_act",
+        "other",
+      ],
+      finding_verdict: ["useful", "not_relevant"],
       follow_up_confirmation_status: ["tentative", "confirmed"],
       follow_up_status: ["pending", "completed", "cancelled"],
       gender_type: ["male", "female", "other"],

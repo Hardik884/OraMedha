@@ -1320,6 +1320,30 @@ export const DecideLearningProposalSchema = z.object({
   decision: z.enum(["accepted", "rejected"]),
 });
 
+/**
+ * A dentist's verdict on one finding the briefing showed.
+ *
+ * Two verdicts and a reason code — no free text anywhere, deliberately. A text
+ * box here would collect patient names and clinical notes into a table designed
+ * to hold neither, and the codes are what make the answers countable: "not
+ * true" means the rule is wrong, "not my priority" means it is ranked wrong,
+ * and a bare count of dismissals cannot tell those apart.
+ *
+ * The finding's id, kind and category travel from the browser because they are
+ * what was on screen; clinic, actor and date are resolved server-side, so a
+ * request can never file feedback against another clinic or in someone else's
+ * name.
+ */
+export const RecordFindingFeedbackSchema = z.object({
+  findingId: z.string().min(1).max(300),
+  findingKind: z.string().min(1).max(64),
+  category: z.string().min(1).max(64).nullable().optional(),
+  verdict: z.enum(["useful", "not_relevant"]),
+  reason: z
+    .enum(["already_knew", "not_true", "not_my_priority", "cannot_act", "other"])
+    .optional(),
+});
+
 export const CompleteActionSchema = z.object({
   category: z.string().min(1).max(64),
   constraintId: z.string().min(1).max(200),

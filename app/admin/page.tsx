@@ -13,6 +13,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { SignOutButton } from "@/components/shared/SignOutButton";
 import { isBusinessBrainEnabled } from "@/lib/feature-flags";
 import {
+  readFindingPrecision,
+  type FindingPrecision,
+} from "@/lib/business-brain/finding-feedback";
+import {
   describeJobHealth,
   readJobHealth,
   type JobHealth,
@@ -52,6 +56,9 @@ export default async function AdminPage() {
   // Whether the scheduled work is actually happening. Null means the health
   // itself could not be read, which renders as unknown — never as healthy.
   const jobs = await readJobHealth(createAdminClient(), new Date().toISOString());
+  // Whether the briefing is worth reading, as its readers judge it. Platform
+  // wide and counts only — no clinic is named, and nothing here is patient data.
+  const precision = await readPlatformPrecision();
 
   return (
     <div className="min-h-dvh bg-background">
@@ -107,6 +114,29 @@ export default async function AdminPage() {
               </p>
             ) : (
               jobs.map((job) => <JobRow key={job.job} health={job} />)
+            )}
+          </div>
+        </section>
+
+        {/* Briefing precision */}
+        <section>
+          <h2 className="text-[13px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+            Briefing precision (30 days)
+          </h2>
+          <p className="mt-2 max-w-xl text-sm leading-relaxed text-text-body">
+            What dentists said about the findings they were shown. A snooze never
+            answered this — a real problem gets snoozed as readily as a wrong one
+            — so until now a rule that fired wrongly for a year looked exactly
+            like one that fired correctly and was ignored.
+          </p>
+          <div className="mt-3 space-y-3">
+            {precision.length === 0 ? (
+              <p className="rounded-xl border border-border bg-surface px-4 py-3.5 text-sm text-text-secondary">
+                Nobody has answered yet. That is not 0% precision — it is no
+                answer, and the two must not be read as the same thing.
+              </p>
+            ) : (
+              precision.map((row) => <PrecisionRow key={row.group} row={row} />)
             )}
           </div>
         </section>
@@ -180,6 +210,44 @@ const JOB_TONES: Record<JobStatus, { dot: string; text: string; label: string }>
   stale: { dot: "bg-danger", text: "text-danger", label: "Stale" },
   never_run: { dot: "bg-danger", text: "text-danger", label: "Never run" },
 };
+
+/** Why a finding was not relevant, in words rather than codes. */
+const REASON_LABELS: Record<string, string> = {
+  not_true: "not true of the clinic",
+  already_knew: "already known",
+  not_my_priority: "not a priority",
+  cannot_act: "outside their control",
+  other: "other",
+};
+
+/**
+ * One rule's standing with the clinics that see it.
+ *
+ * The reasons matter more than the percentage: "not true" is a rule to fix,
+ * "already knew" is a rule that is right and not worth a card, and "not a
+ * priority" is a ranking problem. A bare precision figure hides all three.
+ */
+function PrecisionRow({ row }: { row: FindingPrecision }) {
+  const answered = row.useful + row.notRelevant;
+  return (
+    <div className="rounded-xl border border-border bg-surface px-4 py-3.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="text-sm font-medium text-text-primary">{row.group}</span>
+        <span className="text-sm tabular-nums text-text-body">
+          {row.precisionPercent === null ? "—" : `${Math.round(row.precisionPercent)}% useful`}
+          <span className="text-text-secondary"> · {answered} answered</span>
+        </span>
+      </div>
+      {row.reasons.length > 0 && (
+        <p className="mt-1 text-xs leading-relaxed text-text-secondary">
+          {row.reasons
+            .map((r) => `${r.count} ${REASON_LABELS[r.reason] ?? r.reason}`)
+            .join(", ")}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function JobRow({ health }: { health: JobHealth }) {
   const tone = JOB_TONES[health.status];
@@ -285,6 +353,29 @@ type Overview = {
  * locked out of its own overview because one count errored would be a worse
  * outcome than a dash on a card.
  */
+/**
+ * Feedback across every clinic, for the last 30 days.
+ *
+ * Service role, because this is the one question that is only worth asking
+ * across the whole platform: one clinic's verdicts are too few to say whether a
+ * rule earns its place. Counts and rule names only — no clinic is identified and
+ * no patient data is involved.
+ *
+ * A failed read yields an empty list, which renders as "nobody has answered" —
+ * not as perfect precision.
+ */
+async function readPlatformPrecision(): Promise<readonly FindingPrecision[]> {
+  try {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    return await readFindingPrecision(createAdminClient() as never, { since });
+  } catch (err) {
+    console.error("[admin] precision failed:", err);
+    return [];
+  }
+}
+
 async function loadOverview(homeClinicId: string): Promise<Overview> {
   const empty: Overview = {
     clinics: null,

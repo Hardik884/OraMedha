@@ -3,9 +3,37 @@
 import { useState, useTransition } from "react";
 import { ChevronDown, BellOff } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { dismissProblem } from "@/actions/business-brain";
+import { dismissProblem, recordFindingFeedback } from "@/actions/business-brain";
 import { cn } from "@/lib/utils";
 import type { ProblemView } from "@/lib/business-brain/briefing-view";
+import type {
+  FindingFeedbackReason,
+  RecordedVerdict,
+} from "@/lib/business-brain/finding-feedback";
+
+/**
+ * Why a finding was not relevant, in the clinic's words.
+ *
+ * Four codes and no text box. The codes are the point: "not true" means the rule
+ * is wrong, "already knew" means it is right and not worth a card, and "not my
+ * priority" means it is ranked wrong — three different fixes that a bare count
+ * of dismissals cannot tell apart. A free-text box would also collect patient
+ * names into a table designed to hold none.
+ */
+const REASONS: readonly { readonly code: FindingFeedbackReason; readonly label: string }[] = [
+  { code: "not_true", label: "Not true of my clinic" },
+  { code: "already_knew", label: "True, I already knew" },
+  { code: "not_my_priority", label: "True, not a priority" },
+  { code: "cannot_act", label: "Nothing I can do about it" },
+];
+
+const RECORDED_LABEL: Readonly<Record<string, string>> = {
+  not_true: "not true of this clinic",
+  already_knew: "already known",
+  not_my_priority: "not a priority",
+  cannot_act: "outside your control",
+  other: "not relevant",
+};
 
 /**
  * Severity stripe down the left edge of a problem card. This is an ordered
@@ -71,14 +99,54 @@ const TREND_TONE: Record<string, string> = {
  * decode. "Show more" reveals how to fix it and why we think it, and nothing
  * else: no confidence, no metrics, no engine reasoning.
  */
-export function ProblemCard({ problem }: { problem: ProblemView }) {
+export function ProblemCard({
+  problem,
+  verdict = null,
+}: {
+  problem: ProblemView;
+  /**
+   * What this clinic already said about this card TODAY, when it said anything.
+   *
+   * Resolved on the server and scoped to the business date, so yesterday's
+   * verdict never marks today's card: the same problem flagged again tomorrow is
+   * a new claim, and whether it is still worth saying is a new question.
+   */
+  verdict?: RecordedVerdict | null;
+}) {
   const [open, setOpen] = useState(false);
   const [snoozing, setSnoozing] = useState(false);
   const [reason, setReason] = useState("");
   const [days, setDays] = useState(14);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const [asking, setAsking] = useState(false);
+  const [recorded, setRecorded] = useState<RecordedVerdict | null>(verdict);
   const router = useRouter();
+
+  function submitVerdict(
+    value: "useful" | "not_relevant",
+    reasonCode?: FindingFeedbackReason,
+  ) {
+    setError(null);
+    startTransition(async () => {
+      const res = await recordFindingFeedback({
+        findingId: problem.id,
+        // Coarse source; precision is grouped by the category below, which is
+        // the rule-level identity a problem card actually has.
+        findingKind: "problem",
+        category: problem.category,
+        verdict: value,
+        ...(reasonCode === undefined ? {} : { reason: reasonCode }),
+      });
+      if (res.error) {
+        setError(res.error);
+        return;
+      }
+      setRecorded({ verdict: value, reason: reasonCode ?? null });
+      setAsking(false);
+      router.refresh();
+    });
+  }
 
   function submitSnooze() {
     setError(null);
@@ -182,10 +250,72 @@ export function ProblemCard({ problem }: { problem: ProblemView }) {
                     <p className="text-sm text-text-body leading-relaxed">{problem.trend.detail}</p>
                   </div>
                 )}
-                {/* Snooze — the one place the dentist can tell the briefing it
-                    is wrong. Deliberately inside "Show more" rather than on the
-                    card face: dismissing should cost a deliberate click, not sit
-                    next to the actions as an easier alternative to doing them. */}
+                {/* Was this worth flagging? The only question the module asks,
+                    and it is deliberately not the snooze below: a dentist snoozes
+                    a problem that is real and inconvenient exactly as readily as
+                    one that is wrong, so hiding something has never told us
+                    whether it was true. Two verdicts, no text box. */}
+                <div className="pt-3 border-t border-surface-muted">
+                  {recorded !== null ? (
+                    <p className="text-xs text-text-disabled">
+                      {recorded.verdict === "useful"
+                        ? "Thanks — recorded as useful."
+                        : `Thanks — recorded as ${RECORDED_LABEL[recorded.reason ?? "other"]}.`}
+                    </p>
+                  ) : !asking ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-text-secondary">Was this worth flagging?</span>
+                      <button
+                        type="button"
+                        onClick={() => submitVerdict("useful")}
+                        disabled={pending}
+                        className="rounded-full border border-border px-2.5 py-1 text-xs text-text-body hover:bg-background transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        Useful
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAsking(true)}
+                        disabled={pending}
+                        className="rounded-full border border-border px-2.5 py-1 text-xs text-text-body hover:bg-background transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        Not relevant
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-text-secondary">
+                        What was wrong with it?
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {REASONS.map((r) => (
+                          <button
+                            key={r.code}
+                            type="button"
+                            onClick={() => submitVerdict("not_relevant", r.code)}
+                            disabled={pending}
+                            className="rounded-full border border-border px-2.5 py-1 text-xs text-text-body hover:bg-background transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            {r.label}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAsking(false)}
+                        className="text-xs text-text-secondary hover:text-text-body cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Snooze — a different act from the verdict above: this one
+                    changes what the briefing SHOWS. Deliberately inside "Show
+                    more" rather than on the card face: dismissing should cost a
+                    deliberate click, not sit next to the actions as an easier
+                    alternative to doing them. */}
                 <div className="pt-3 border-t border-surface-muted">
                   {!snoozing ? (
                     <button

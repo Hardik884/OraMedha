@@ -20,6 +20,7 @@ import { readClinicDecisions } from "@/lib/business-brain/clinic-memory";
 import { resolveDecisions } from "@/business-brain/memory";
 import { recordFindingSnapshot, snapshotFindings } from "@/lib/business-brain/finding-snapshots";
 import { buildOutcomeViews } from "@/lib/business-brain/outcomes-view";
+import { readFindingVerdicts } from "@/lib/business-brain/finding-feedback";
 import { readRecordQuality } from "@/lib/business-brain/record-quality";
 import { buildRecordQualityView } from "@/lib/business-brain/record-quality-view";
 import { ActionHistory } from "@/components/business-brain/ActionHistory";
@@ -214,6 +215,10 @@ export default async function BusinessBrainPage() {
     suppressedCategories,
   );
 
+  // What this clinic has already said about today's cards. A failed read shows
+  // the question again rather than hiding it — the harmless direction.
+  const verdicts = await readFindingVerdicts(supabase as never, profile.clinic_id, date);
+
   // How completely the last thirty days were recorded, and what each gap costs.
   // Read after everything the day needs: a failure here must never cost the
   // briefing, so it returns null and the card renders nothing.
@@ -239,6 +244,7 @@ export default async function BusinessBrainPage() {
         wins={wins}
         winsEmptyState={winsEmptyState}
         completedCategories={completedCategories}
+        verdicts={verdicts}
         whatsappEnabled={whatsappEnabled}
         reminderSummaries={reminderSummaries}
       />

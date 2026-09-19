@@ -5,6 +5,7 @@ import type { ClinicHealth } from "@/lib/business-brain/clinic-health";
 import type { ActionCardView, ProblemView } from "@/lib/business-brain/briefing-view";
 import type { WinsEmptyView, WinView } from "@/lib/business-brain/wins-view";
 import type { ReminderSummary } from "@/lib/messaging/reminder-types";
+import type { RecordedVerdict } from "@/lib/business-brain/finding-feedback";
 import { HealthMeter } from "./HealthMeter";
 import { WinsStrip } from "./WinsStrip";
 import { ProblemCard } from "./ProblemCard";
@@ -38,6 +39,13 @@ interface MorningBriefingProps {
    * component state.
    */
   completedCategories?: ReadonlySet<string>;
+  /**
+   * What this clinic already said about today's problem cards, by finding id.
+   *
+   * Server-resolved so an answer survives a refresh, and scoped to today: the
+   * same problem flagged again tomorrow is a new claim.
+   */
+  verdicts?: ReadonlyMap<string, RecordedVerdict>;
   /** When true, action cards may offer an inline "Contact Patients" button. */
   whatsappEnabled?: boolean;
   /** Per-kind reminder counts from the server, matched onto each card by its messageKind. */
@@ -80,6 +88,7 @@ export function MorningBriefing({
   wins = [],
   winsEmptyState = null,
   completedCategories,
+  verdicts,
   whatsappEnabled = false,
   reminderSummaries = [],
 }: MorningBriefingProps) {
@@ -131,7 +140,7 @@ export function MorningBriefing({
                 summaryByKind && action?.messageKind ? summaryByKind.get(action.messageKind) : undefined;
               return (
                 <div key={p.id} className="grid grid-cols-1 lg:grid-cols-2 gap-3 lg:gap-6 items-stretch">
-                  <ProblemCard problem={p} />
+                  <ProblemCard problem={p} verdict={verdicts?.get(p.id) ?? null} />
                   {action ? (
                     <ActionCard
                       action={action}
