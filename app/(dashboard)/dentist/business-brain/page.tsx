@@ -20,7 +20,10 @@ import { readClinicDecisions } from "@/lib/business-brain/clinic-memory";
 import { resolveDecisions } from "@/business-brain/memory";
 import { recordFindingSnapshot, snapshotFindings } from "@/lib/business-brain/finding-snapshots";
 import { buildOutcomeViews } from "@/lib/business-brain/outcomes-view";
+import { readRecordQuality } from "@/lib/business-brain/record-quality";
+import { buildRecordQualityView } from "@/lib/business-brain/record-quality-view";
 import { ActionHistory } from "@/components/business-brain/ActionHistory";
+import { RecordQualityCard } from "@/components/business-brain/RecordQualityCard";
 import { ReminderOutcomes } from "@/components/business-brain/ReminderOutcomes";
 import { createServerClient } from "@/lib/supabase/server";
 import { getReminderSummaries } from "@/actions/messaging";
@@ -211,6 +214,13 @@ export default async function BusinessBrainPage() {
     suppressedCategories,
   );
 
+  // How completely the last thirty days were recorded, and what each gap costs.
+  // Read after everything the day needs: a failure here must never cost the
+  // briefing, so it returns null and the card renders nothing.
+  const recordQuality = buildRecordQualityView(
+    await readRecordQuality(supabase as never, profile.clinic_id, date, timezone),
+  );
+
   // Only meaningful where reminders can actually be sent, so it shares the
   // WhatsApp gate rather than appearing as an empty panel for clinics that have
   // never had the affordance.
@@ -232,6 +242,9 @@ export default async function BusinessBrainPage() {
         whatsappEnabled={whatsappEnabled}
         reminderSummaries={reminderSummaries}
       />
+      {/* Why some figures are quiet. Below the work, because nothing here is
+          urgent — it is a standing fact about the records rather than today's. */}
+      <RecordQualityCard quality={recordQuality} />
       {/* A look back, below everything that needs action. Renders nothing when
           the clinic has completed nothing. */}
       <ActionHistory outcomes={outcomeViews} />

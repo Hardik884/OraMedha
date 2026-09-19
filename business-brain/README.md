@@ -184,6 +184,19 @@ there is no model.
 - Why a patient did not return — only that no later visit is recorded.
 - Anything about a day with no snapshot.
 
+### Recording gaps
+
+Every "we could not tell you" traces back to something nobody pressed — a visit
+with no check-in has no measurable wait, a treatment with no `performed_at` is
+dated by when it was typed, a no-show the nightly job inferred is a reading
+rather than an observation. `business-brain/ledger/record-quality.ts` counts
+those gaps, `lib/business-brain/record-quality.ts` reads them, and the briefing
+shows each beside the measurement it costs and the screen that closes it.
+
+It is not a compliance score: no target, no grade, no comparison between
+clinics. A clinic that never uses the queue board is making a legitimate choice,
+and this says what the choice costs.
+
 ### Known limits, not fixed here
 
 - The briefing runs the whole pipeline on every page load, including the history
