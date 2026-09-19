@@ -13,6 +13,14 @@
 `treatment_history` and `data_consent_records` are absent from
 `retention_policies` and **unreachable** from `run_retention_purge`.
 
+So are the **state-history** tables — `appointment_status_history`,
+`treatment_status_history`, `follow_up_status_history`, `payment_state_history`
+and `patient_state_history`. They sit with the clinical records rather than with
+the logs because they are what "what was known at T" is reconstructed from:
+purging one would not shrink a log, it would quietly change the answer to a
+question about the past, and the answers would keep being produced from what
+survived.
+
 That is structural, not a convention. The function switches on an **explicit
 CASE** over a fixed set of operational tables, so adding a policy row cannot by
 itself cause a table to be deleted from; dynamic SQL would have moved that
@@ -53,6 +61,12 @@ compliance with anything.
 | `problem_dismissals` | 90 d | Snoozes carry their own `expires_at`; this clears rows once the snooze is long past. |
 | `phi_access_log` | 730 d | A security log. The window is how far back an investigation might reasonably reach — comfortably beyond the 180 days the Indian log-retention direction asks for. Shortening it makes a future breach harder to scope, which is the situation it exists for. |
 | `deleted_treatment_documents` | 90 d | Grace period so a radiograph removed by mistake can be restored. After it, row **and** storage object are cleared. |
+| `metric_observations` | 365 d | Every *version* of every metric reading, including recomputations that never replaced the current row — the fastest-growing table in the schema at ~35 rows per clinic per day before rewrites. Point-in-time reads reach back weeks, and `metric_history` keeps the standing value. |
+| `finding_snapshots` | 365 d | What the briefing showed, one row per clinic-day. The Learning Engine reads recent weeks; beyond a year the rules themselves have changed enough that the comparison stops meaning anything. |
+| `clinic_memory_builds` | 180 d | Derived memory, rebuilt daily from evidence that is still there. Purging it loses nothing that cannot be recomputed. |
+| `action_completions` | 730 d | What a clinic did about a finding. Read by the Outcome Engine within three weeks and by the Learning Engine over a longer span; that history is what distinguishes a clinic that acts from one that does not. |
+| `finding_feedback` | 730 d | Verdicts on findings. A rule's precision is measured across clinics and releases, and a short window would keep resetting the count. |
+| `job_runs` | 90 d | One row per scheduled-job run, hourly. Only the latest run of each job is read; the rest is a trail for looking back at an incident. |
 
 ---
 

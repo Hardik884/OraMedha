@@ -22,13 +22,36 @@ import { describe, expect, it } from "vitest";
 
 const MIGRATIONS = join(process.cwd(), "supabase/migrations");
 
-const RETENTION_MIGRATION = readdirSync(MIGRATIONS).find((f) =>
-  f.endsWith("_retention_policies.sql")
-);
+/**
+ * The migration that defines the purge AS IT STANDS — the last one to replace
+ * it, not the one that introduced it.
+ *
+ * This file used to read `*_retention_policies.sql` by name, which was correct
+ * exactly until the function was replaced somewhere else. From that moment it
+ * would have gone on checking a body Postgres no longer runs, and passed: a test
+ * pinned to the wrong file is worse than no test, because it reports safety it
+ * did not check.
+ */
+const DEFINING_MIGRATION = readdirSync(MIGRATIONS)
+  .filter((f) => f.endsWith(".sql"))
+  .sort()
+  .reverse()
+  .find((f) =>
+    readFileSync(join(MIGRATIONS, f), "utf8").includes(
+      "create or replace function run_retention_purge",
+    ),
+  );
 
-const SQL = RETENTION_MIGRATION
-  ? readFileSync(join(MIGRATIONS, RETENTION_MIGRATION), "utf8")
+const SQL = DEFINING_MIGRATION
+  ? readFileSync(join(MIGRATIONS, DEFINING_MIGRATION), "utf8")
   : "";
+
+/** Every migration's SQL, for the claims that are about the whole history. */
+const ALL_SQL = readdirSync(MIGRATIONS)
+  .filter((f) => f.endsWith(".sql"))
+  .sort()
+  .map((f) => readFileSync(join(MIGRATIONS, f), "utf8"))
+  .join("\n");
 
 /** The body of run_retention_purge, so policy INSERTs elsewhere do not count. */
 function purgeFunctionBody(): string {
@@ -59,6 +82,15 @@ describe("the retention job's reach", () => {
       "metric_history",
       "problem_dismissals",
       "phi_access_log",
+      // The Business Brain's own operational tables, added by
+      // 20260919100100_business_brain_retention.sql. Each one grows every day
+      // and none of them is a record of care.
+      "metric_observations",
+      "finding_snapshots",
+      "clinic_memory_builds",
+      "action_completions",
+      "finding_feedback",
+      "job_runs",
     ]);
 
     for (const table of tables) {
@@ -72,6 +104,16 @@ describe("the retention job's reach", () => {
   });
 
   const CLINICAL_AND_AUDIT = [
+    // The state-history tables are here, with the clinical records rather than
+    // with the logs, on purpose. They are what "what was known at T" is
+    // reconstructed FROM: purging one would not shrink a log, it would quietly
+    // change the answer to a question about the past while the answers kept
+    // being produced from what survived.
+    "appointment_status_history",
+    "treatment_status_history",
+    "follow_up_status_history",
+    "payment_state_history",
+    "patient_state_history",
     "patients",
     "appointments",
     "treatments",
@@ -120,22 +162,42 @@ describe("the purge defaults to counting", () => {
 
 describe("the policy table is honest about what its numbers are", () => {
   it("ships every period as legally unconfirmed", () => {
-    // The default is false and no INSERT overrides it. If one ever does, that
-    // is a claim about the law being made by a migration.
-    expect(SQL).toMatch(/legally_confirmed\s+boolean\s+not\s+null\s+default\s+false/i);
+    // The default is false and no INSERT anywhere overrides it. If one ever
+    // does, that is a claim about the law being made by a migration.
+    expect(ALL_SQL).toMatch(/legally_confirmed\s+boolean\s+not\s+null\s+default\s+false/i);
 
-    const insertBlock = SQL.slice(SQL.indexOf("insert into retention_policies"));
-    expect(insertBlock).not.toMatch(/legally_confirmed/);
+    for (const block of ALL_SQL.split("insert into retention_policies").slice(1)) {
+      expect(block.slice(0, block.indexOf(";"))).not.toMatch(/legally_confirmed/);
+    }
   });
 
-  it("defines no policy for any clinical or audit table", () => {
-    const insertBlock = SQL.slice(
-      SQL.indexOf("insert into retention_policies"),
-      SQL.indexOf("-- 3. THE PURGE")
-    );
-
-    for (const forbidden of ["'patients'", "'treatments'", "'appointments'", "'consents'"]) {
-      expect(insertBlock).not.toContain(forbidden);
+  it("defines no policy for any clinical, audit or state-history table", () => {
+    // Across EVERY migration, not only the one that happens to define the
+    // function: a policy row added later is exactly how a forbidden table would
+    // acquire a window, and the row is what a reader would find first.
+    const forbidden = [
+      "patients",
+      "treatments",
+      "appointments",
+      "consents",
+      "appointment_history",
+      "consent_audit",
+      "treatment_history",
+      "data_consent_records",
+      "appointment_status_history",
+      "treatment_status_history",
+      "follow_up_status_history",
+      "payment_state_history",
+      "patient_state_history",
+    ];
+    for (const block of ALL_SQL.split("insert into retention_policies").slice(1)) {
+      const policies = block.slice(0, block.indexOf("on conflict") + 1 || block.length);
+      for (const table of forbidden) {
+        expect(
+          policies,
+          `a retention policy is declared for "${table}", which must never have one`,
+        ).not.toContain(`('${table}'`);
+      }
     }
   });
 });

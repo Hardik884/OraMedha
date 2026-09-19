@@ -208,6 +208,22 @@ Nothing in the pipeline reads the table. A rule that quietened itself because on
 clinic said "not relevant" would be a rule tuned by its own audience, one click
 at a time.
 
+### Housekeeping
+
+Every table this module writes is registered in `retention_policies` and reached
+by `run_retention_purge` (20260919100100): metric observations, finding
+snapshots, memory builds, action completions, feedback and job runs. The purge
+still defaults to a dry run and is still not scheduled — see docs/RETENTION.md.
+
+The state-history tables are deliberately OUTSIDE it, with the clinical records
+rather than the logs: purging one would not shrink a log, it would quietly
+change the answer to a question about the past while the answers kept being
+produced from what survived.
+
+`npm run test:clock` runs the pure suites as if three months had passed, which
+is how a spec that compares a fixed fixture against the real clock is found
+before it quietly stops testing anything.
+
 ### Known limits, not fixed here
 
 - The briefing runs the whole pipeline on every page load, including the history
@@ -230,8 +246,6 @@ at a time.
   recorded days and apply only to metrics that describe ONE day.
 - Shared core queries the briefing relies on (`getOverdueFollowUps`,
   planned-without-visit, the `clinic_outstanding_balances` RPC) are not paged.
-- No retention purge covers `finding_snapshots`, `clinic_memory_builds`,
-  `action_completions`, `metric_observations` or the state-history tables.
 - `getClinicConfig` falls back to defaults when `clinic_settings` cannot be read,
   app-wide; this module's own repository throws instead.
 
